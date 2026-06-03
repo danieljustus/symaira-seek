@@ -2,6 +2,7 @@ package engine
 
 import (
 	"sort"
+	"sync"
 
 	"github.com/danieljustus/symaira-seek/internal/db"
 )
@@ -21,18 +22,33 @@ func SearchHybrid(dbClient *db.DB, embedder *EmbeddingsGenerator, query string, 
 		fetchLimit = 50
 	}
 
-	// 2. Perform BM25 Search
-	bm25Results, err := dbClient.SearchBM25(query, fetchLimit)
-	if err != nil {
-		// Log error to Stderr as per guidelines
-		// and continue with vector-only if BM25 fails
-		bm25Results = nil
-	}
+	var bm25Results []*db.SearchResult
+	var vectorResults []*db.SearchResult
+	var vecErr error
 
-	// 3. Perform Vector Search
-	vectorResults, err := dbClient.SearchVector(queryVec, fetchLimit)
-	if err != nil {
-		return nil, err
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	// 2. Perform BM25 Search concurrently
+	go func() {
+		defer wg.Done()
+		var err error
+		bm25Results, err = dbClient.SearchBM25(query, fetchLimit)
+		if err != nil {
+			bm25Results = nil
+		}
+	}()
+
+	// 3. Perform Vector Search concurrently
+	go func() {
+		defer wg.Done()
+		vectorResults, vecErr = dbClient.SearchVector(queryVec, fetchLimit)
+	}()
+
+	wg.Wait()
+
+	if vecErr != nil {
+		return nil, vecErr
 	}
 
 	// 4. Reciprocal Rank Fusion

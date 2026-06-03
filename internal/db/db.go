@@ -2,11 +2,12 @@ package db
 
 import (
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"math"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -42,6 +43,35 @@ type SearchResult struct {
 // DB manages the SQLite connection.
 type DB struct {
 	conn *sql.DB
+}
+
+// Float32SliceToBytes converts a slice of float32 to a byte slice using standard bitwise math.
+func Float32SliceToBytes(slice []float32) []byte {
+	buf := make([]byte, len(slice)*4)
+	for i, f := range slice {
+		bits := math.Float32bits(f)
+		buf[i*4] = byte(bits)
+		buf[i*4+1] = byte(bits >> 8)
+		buf[i*4+2] = byte(bits >> 16)
+		buf[i*4+3] = byte(bits >> 24)
+	}
+	return buf
+}
+
+// BytesToFloat32Slice converts a byte slice back to a float32 slice.
+func BytesToFloat32Slice(buf []byte) []float32 {
+	if len(buf)%4 != 0 {
+		return nil
+	}
+	slice := make([]float32, len(buf)/4)
+	for i := range slice {
+		bits := uint32(buf[i*4]) |
+			uint32(buf[i*4+1])<<8 |
+			uint32(buf[i*4+2])<<16 |
+			uint32(buf[i*4+3])<<24
+		slice[i] = math.Float32frombits(bits)
+	}
+	return slice
 }
 
 // Open initializes the SQLite database at a standard XDG path.
@@ -92,14 +122,14 @@ func (db *DB) initSchema() error {
 			updated_at DATETIME NOT NULL
 		);`,
 
-		// 2. Chunks Table
+		// 2. Chunks Table (embedding is stored as BLOB for performance)
 		`CREATE TABLE IF NOT EXISTS chunks (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			uuid TEXT UNIQUE NOT NULL,
 			document_path TEXT NOT NULL,
 			chunk_index INTEGER NOT NULL,
 			content TEXT NOT NULL,
-			embedding TEXT NOT NULL,
+			embedding BLOB NOT NULL,
 			hash TEXT NOT NULL,
 			FOREIGN KEY(document_path) REFERENCES documents(path) ON DELETE CASCADE
 		);`,
@@ -151,11 +181,6 @@ func (db *DB) SaveDocument(doc *Document) error {
 
 // DeleteDocument removes a document and its cascade associated chunks.
 func (db *DB) DeleteDocument(path string) error {
-	// First fetch all chunk ids to trigger the FTS delete trigger properly,
-	// SQLite ON DELETE CASCADE might bypass individual AFTER DELETE triggers unless handled.
-	// But actually, in modern SQLite, with PRAGMA foreign_keys=ON, cascade delete deletes
-	// the child rows which triggers the AFTER DELETE trigger.
-	// However, to be absolutely safe and keep the FTS index consistent, we can delete chunks first:
 	tx, err := db.conn.Begin()
 	if err != nil {
 		return err
@@ -223,12 +248,8 @@ func (db *DB) SaveChunks(chunks []*Chunk) error {
 	defer stmt.Close()
 
 	for _, c := range chunks {
-		embeddingJSON, err := json.Marshal(c.Embedding)
-		if err != nil {
-			return fmt.Errorf("failed to marshal embedding for chunk %s: %w", c.UUID, err)
-		}
-
-		res, err := stmt.Exec(c.UUID, c.DocumentPath, c.ChunkIndex, c.Content, string(embeddingJSON), c.Hash)
+		embBytes := Float32SliceToBytes(c.Embedding)
+		res, err := stmt.Exec(c.UUID, c.DocumentPath, c.ChunkIndex, c.Content, embBytes, c.Hash)
 		if err != nil {
 			return fmt.Errorf("failed to insert chunk: %w", err)
 		}
@@ -254,19 +275,17 @@ func (db *DB) GetChunksForDocument(docPath string) ([]*Chunk, error) {
 	var chunks []*Chunk
 	for rows.Next() {
 		var c Chunk
-		var embStr string
-		if err := rows.Scan(&c.ID, &c.UUID, &c.DocumentPath, &c.ChunkIndex, &c.Content, &embStr, &c.Hash); err != nil {
+		var embBytes []byte
+		if err := rows.Scan(&c.ID, &c.UUID, &c.DocumentPath, &c.ChunkIndex, &c.Content, &embBytes, &c.Hash); err != nil {
 			return nil, err
 		}
-		if err := json.Unmarshal([]byte(embStr), &c.Embedding); err != nil {
-			return nil, err
-		}
+		c.Embedding = BytesToFloat32Slice(embBytes)
 		chunks = append(chunks, &c)
 	}
 	return chunks, nil
 }
 
-// GetStats returns database statistics.
+// Stats returns database statistics.
 type Stats struct {
 	DocumentCount int   `json:"document_count"`
 	ChunkCount    int   `json:"chunk_count"`
@@ -285,7 +304,6 @@ func (db *DB) GetStats() (*Stats, error) {
 		return nil, err
 	}
 
-	// Fetch DB size via PRAGMA page_count and page_size
 	var pageCount, pageSize int64
 	err = db.conn.QueryRow("PRAGMA page_count").Scan(&pageCount)
 	if err != nil {
@@ -302,7 +320,6 @@ func (db *DB) GetStats() (*Stats, error) {
 
 // SearchBM25 performs a keyword search on the FTS5 virtual table.
 func (db *DB) SearchBM25(queryStr string, limit int) ([]*SearchResult, error) {
-	// Look up in FTS5 table
 	sqlQuery := `
 		SELECT c.id, c.uuid, c.document_path, c.chunk_index, c.content, c.embedding, c.hash
 		FROM chunks c
@@ -313,7 +330,6 @@ func (db *DB) SearchBM25(queryStr string, limit int) ([]*SearchResult, error) {
 
 	rows, err := db.conn.Query(sqlQuery, queryStr, limit)
 	if err != nil {
-		// FTS5 MATCH on empty query or weird chars might error, return empty slice instead of crashing
 		return nil, nil
 	}
 	defer rows.Close()
@@ -322,13 +338,11 @@ func (db *DB) SearchBM25(queryStr string, limit int) ([]*SearchResult, error) {
 	rank := 1
 	for rows.Next() {
 		var c Chunk
-		var embStr string
-		if err := rows.Scan(&c.ID, &c.UUID, &c.DocumentPath, &c.ChunkIndex, &c.Content, &embStr, &c.Hash); err != nil {
+		var embBytes []byte
+		if err := rows.Scan(&c.ID, &c.UUID, &c.DocumentPath, &c.ChunkIndex, &c.Content, &embBytes, &c.Hash); err != nil {
 			return nil, err
 		}
-		if err := json.Unmarshal([]byte(embStr), &c.Embedding); err != nil {
-			return nil, err
-		}
+		c.Embedding = BytesToFloat32Slice(embBytes)
 
 		results = append(results, &SearchResult{
 			Chunk:    &c,
@@ -340,62 +354,101 @@ func (db *DB) SearchBM25(queryStr string, limit int) ([]*SearchResult, error) {
 }
 
 // SearchVector performs in-memory Cosine Similarity search over all chunks.
-// For extremely large databases, it loads embeddings.
-// Note: Since this is run on a local computer, loading all embeddings for up to 50k chunks
-// fits easily in memory and runs in sub-10ms.
+// It loads ONLY the IDs and Embedding bytes to save memory and I/O.
 func (db *DB) SearchVector(queryVec []float32, limit int) ([]*SearchResult, error) {
-	rows, err := db.conn.Query("SELECT id, uuid, document_path, chunk_index, content, embedding, hash FROM chunks")
+	rows, err := db.conn.Query("SELECT id, embedding FROM chunks")
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
 	type scoredResult struct {
-		chunk *Chunk
+		id    int64
 		score float32
 	}
 
 	var scored []*scoredResult
 	for rows.Next() {
-		var c Chunk
-		var embStr string
-		if err := rows.Scan(&c.ID, &c.UUID, &c.DocumentPath, &c.ChunkIndex, &c.Content, &embStr, &c.Hash); err != nil {
-			return nil, err
-		}
-		if err := json.Unmarshal([]byte(embStr), &c.Embedding); err != nil {
+		var id int64
+		var embBytes []byte
+		if err := rows.Scan(&id, &embBytes); err != nil {
 			return nil, err
 		}
 
-		score := CosineSimilarity(queryVec, c.Embedding)
+		vec := BytesToFloat32Slice(embBytes)
+		score := CosineSimilarity(queryVec, vec)
 		scored = append(scored, &scoredResult{
-			chunk: &c,
+			id:    id,
 			score: score,
 		})
 	}
 
-	// Sort descending by score
-	for i := 0; i < len(scored); i++ {
-		for j := i + 1; j < len(scored); j++ {
-			if scored[j].score > scored[i].score {
-				scored[i], scored[j] = scored[j], scored[i]
-			}
-		}
-	}
+	// High performance sort descending: O(N log N) instead of O(N^2)
+	sort.Slice(scored, func(i, j int) bool {
+		return scored[i].score > scored[j].score
+	})
 
 	if limit > len(scored) {
 		limit = len(scored)
 	}
 
-	var results []*SearchResult
+	if limit == 0 {
+		return nil, nil
+	}
+
+	// Collect the top K IDs and mapping maps
+	topIDs := make([]interface{}, limit)
+	scoreMap := make(map[int64]float32)
+	idOrderMap := make(map[int64]int)
 	for i := 0; i < limit; i++ {
-		results = append(results, &SearchResult{
-			Chunk:       scored[i].chunk,
-			VectorRank:  i + 1,
-			CosineScore: scored[i].score,
+		topIDs[i] = scored[i].id
+		scoreMap[scored[i].id] = scored[i].score
+		idOrderMap[scored[i].id] = i
+	}
+
+	// Query details for ONLY the top K chunk IDs
+	placeholders := make([]string, limit)
+	for i := range placeholders {
+		placeholders[i] = "?"
+	}
+	query := fmt.Sprintf(
+		"SELECT id, uuid, document_path, chunk_index, content, embedding, hash FROM chunks WHERE id IN (%s)",
+		strings.Join(placeholders, ","),
+	)
+
+	detailRows, err := db.conn.Query(query, topIDs...)
+	if err != nil {
+		return nil, err
+	}
+	defer detailRows.Close()
+
+	unsortedResults := make([]*SearchResult, 0, limit)
+	for detailRows.Next() {
+		var c Chunk
+		var embBytes []byte
+		if err := detailRows.Scan(&c.ID, &c.UUID, &c.DocumentPath, &c.ChunkIndex, &c.Content, &embBytes, &c.Hash); err != nil {
+			return nil, err
+		}
+		c.Embedding = BytesToFloat32Slice(embBytes)
+
+		unsortedResults = append(unsortedResults, &SearchResult{
+			Chunk:       &c,
+			VectorRank:  0, // Will be set according to scoreMap sorting
+			CosineScore: scoreMap[c.ID],
 		})
 	}
 
-	return results, nil
+	// Re-sort results back into correct similarity score order
+	sort.Slice(unsortedResults, func(i, j int) bool {
+		return idOrderMap[unsortedResults[i].Chunk.ID] < idOrderMap[unsortedResults[j].Chunk.ID]
+	})
+
+	// Set rank values
+	for i, res := range unsortedResults {
+		res.VectorRank = i + 1
+	}
+
+	return unsortedResults, nil
 }
 
 // CosineSimilarity computes the cosine similarity between two float32 slices.
