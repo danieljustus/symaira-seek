@@ -92,10 +92,13 @@ func Open() (*DB, error) {
 		return nil, fmt.Errorf("failed to open sqlite database: %w", err)
 	}
 
-	// Enable WAL mode & foreign keys
-	if _, err := conn.Exec("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;"); err != nil {
+	if _, err := conn.Exec("PRAGMA journal_mode=WAL;"); err != nil {
 		conn.Close()
-		return nil, fmt.Errorf("failed to configure sqlite parameters: %w", err)
+		return nil, fmt.Errorf("failed to set WAL mode: %w", err)
+	}
+	if _, err := conn.Exec("PRAGMA foreign_keys=ON;"); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("failed to enable foreign keys: %w", err)
 	}
 
 	db := &DB{conn: conn}
