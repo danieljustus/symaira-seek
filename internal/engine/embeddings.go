@@ -2,6 +2,7 @@ package engine
 
 import (
 	"bytes"
+	"container/list"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
@@ -13,13 +14,21 @@ import (
 	"time"
 )
 
+const maxEmbeddingCacheSize = 10000
+
 // EmbeddingsGenerator manages Ollama queries and the pure-Go hashing fallback.
 type EmbeddingsGenerator struct {
 	OllamaURL  string
 	Model      string
 	httpClient *http.Client
-	cache      map[string][]float32
-	cacheMu    sync.RWMutex
+	cache      map[string]*list.Element
+	cacheOrder *list.List
+	cacheMu    sync.Mutex
+}
+
+type cacheEntry struct {
+	key   string
+	value []float32
 }
 
 // NewEmbeddingsGenerator sets up the standard engine configuration.
@@ -28,39 +37,57 @@ func NewEmbeddingsGenerator() *EmbeddingsGenerator {
 		OllamaURL:  "http://localhost:11434/api/embeddings",
 		Model:      "nomic-embed-text",
 		httpClient: &http.Client{Timeout: 5000 * time.Millisecond},
-		cache:      make(map[string][]float32),
+		cache:      make(map[string]*list.Element),
+		cacheOrder: list.New(),
 	}
 }
 
 // GenerateVector produces a 768-dimensional normalized embedding vector.
-// Uses an in-memory cache to avoid recomputing embeddings for repeated text.
+// Uses an LRU in-memory cache to avoid recomputing embeddings for repeated text.
 // Queries Ollama first, falling back to local deterministic hashing if offline.
 func (eg *EmbeddingsGenerator) GenerateVector(text string) []float32 {
-	// Check cache first
-	eg.cacheMu.RLock()
-	if vec, ok := eg.cache[text]; ok {
-		eg.cacheMu.RUnlock()
-		return vec
+	eg.cacheMu.Lock()
+	if elem, ok := eg.cache[text]; ok {
+		eg.cacheOrder.MoveToFront(elem)
+		eg.cacheMu.Unlock()
+		return elem.Value.(*cacheEntry).value
 	}
-	eg.cacheMu.RUnlock()
+	eg.cacheMu.Unlock()
 
 	dims := 768
 
 	// Try Ollama first
 	vec, err := eg.queryOllama(text)
 	if err == nil && len(vec) == dims {
-		eg.cacheMu.Lock()
-		eg.cache[text] = vec
-		eg.cacheMu.Unlock()
+		eg.cachePut(text, vec)
 		return vec
 	}
 
 	// Local pure-Go fallback vector
 	fallback := GenerateLocalHashVector(text, dims)
-	eg.cacheMu.Lock()
-	eg.cache[text] = fallback
-	eg.cacheMu.Unlock()
+	eg.cachePut(text, fallback)
 	return fallback
+}
+
+func (eg *EmbeddingsGenerator) cachePut(key string, value []float32) {
+	eg.cacheMu.Lock()
+	defer eg.cacheMu.Unlock()
+
+	if _, exists := eg.cache[key]; exists {
+		return
+	}
+
+	if eg.cacheOrder.Len() >= maxEmbeddingCacheSize {
+		oldest := eg.cacheOrder.Back()
+		if oldest != nil {
+			entry := oldest.Value.(*cacheEntry)
+			delete(eg.cache, entry.key)
+			eg.cacheOrder.Remove(oldest)
+		}
+	}
+
+	elem := eg.cacheOrder.PushFront(&cacheEntry{key: key, value: value})
+	eg.cache[key] = elem
 }
 
 // GenerateVectors produces embeddings for a batch of texts.
@@ -82,15 +109,16 @@ func (eg *EmbeddingsGenerator) GenerateVectors(texts []string) [][]float32 {
 	}
 	var uncachedList []uncached
 
-	eg.cacheMu.RLock()
+	eg.cacheMu.Lock()
 	for i, t := range texts {
-		if vec, ok := eg.cache[t]; ok {
-			results[i] = vec
+		if elem, ok := eg.cache[t]; ok {
+			eg.cacheOrder.MoveToFront(elem)
+			results[i] = elem.Value.(*cacheEntry).value
 		} else {
 			uncachedList = append(uncachedList, uncached{idx: i, text: t})
 		}
 	}
-	eg.cacheMu.RUnlock()
+	eg.cacheMu.Unlock()
 
 	if len(uncachedList) == 0 {
 		return results
@@ -105,18 +133,16 @@ func (eg *EmbeddingsGenerator) GenerateVectors(texts []string) [][]float32 {
 	// Try batch Ollama query
 	batchVectors, err := eg.queryOllamaBatch(uncachedTexts)
 	if err == nil && len(batchVectors) == len(uncachedList) {
-		eg.cacheMu.Lock()
 		for i, u := range uncachedList {
 			vec := batchVectors[i]
 			if len(vec) == dims {
 				results[u.idx] = vec
-				eg.cache[u.text] = vec
+				eg.cachePut(u.text, vec)
 			} else {
 				results[u.idx] = GenerateLocalHashVector(u.text, dims)
-				eg.cache[u.text] = results[u.idx]
+				eg.cachePut(u.text, results[u.idx])
 			}
 		}
-		eg.cacheMu.Unlock()
 		return results
 	}
 
