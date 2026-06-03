@@ -352,18 +352,19 @@ func IndexSingleFile(dbClient *db.DB, embedder *engine.EmbeddingsGenerator, path
 	}
 
 	textChunks := parser.SplitText(content, 1000, 200)
+	embeddings := embedder.GenerateVectors(textChunks)
+
 	var chunks []*db.Chunk
 	for idx, tc := range textChunks {
 		hashSum := sha256.Sum256([]byte(tc))
 		chunkHash := hex.EncodeToString(hashSum[:])
-		embedding := embedder.GenerateVector(tc)
 
 		chunks = append(chunks, &db.Chunk{
 			UUID:         uuid.New().String(),
 			DocumentPath: path,
 			ChunkIndex:   idx,
 			Content:      tc,
-			Embedding:    embedding,
+			Embedding:    embeddings[idx],
 			Hash:         chunkHash,
 		})
 	}
