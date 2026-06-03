@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"strconv"
 
 	"github.com/danieljustus/symaira-seek/internal/db"
@@ -106,6 +107,6 @@ func StartHTTPServer(port int, ollamaURL, model string) error {
 	})
 
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
-	fmt.Printf("HTTP daemon listening on http://%s...\n", addr)
+	fmt.Fprintf(os.Stderr, "HTTP daemon listening on http://%s...\n", addr)
 	return http.ListenAndServe(addr, mux)
 }
