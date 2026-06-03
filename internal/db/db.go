@@ -318,6 +318,23 @@ func (db *DB) GetStats() (*Stats, error) {
 	return &s, nil
 }
 
+// escapeFTS5Query escapes special characters in an FTS5 query string to
+// prevent syntax errors. Special characters (\", *, (, ), +, -) are
+// replaced with spaces. The entire query is then wrapped in double quotes
+// to treat it as a phrase, which avoids column-filter syntax issues.
+func escapeFTS5Query(query string) string {
+	replacer := strings.NewReplacer(
+		"\"", " ",
+		"*", " ",
+		"(", " ",
+		")", " ",
+		"+", " ",
+		"-", " ",
+	)
+	cleaned := replacer.Replace(query)
+	return "\"" + cleaned + "\""
+}
+
 // SearchBM25 performs a keyword search on the FTS5 virtual table.
 func (db *DB) SearchBM25(queryStr string, limit int) ([]*SearchResult, error) {
 	sqlQuery := `
@@ -328,7 +345,8 @@ func (db *DB) SearchBM25(queryStr string, limit int) ([]*SearchResult, error) {
 		ORDER BY bm25(chunks_fts) ASC
 		LIMIT ?`
 
-	rows, err := db.conn.Query(sqlQuery, queryStr, limit)
+	escapedQuery := escapeFTS5Query(queryStr)
+	rows, err := db.conn.Query(sqlQuery, escapedQuery, limit)
 	if err != nil {
 		return nil, nil
 	}
