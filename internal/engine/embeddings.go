@@ -36,7 +36,7 @@ func NewEmbeddingsGenerator() *EmbeddingsGenerator {
 	return &EmbeddingsGenerator{
 		OllamaURL:  "http://localhost:11434/api/embeddings",
 		Model:      "nomic-embed-text",
-		httpClient: &http.Client{Timeout: 5000 * time.Millisecond},
+		httpClient: &http.Client{Timeout: 120 * time.Second},
 		cache:      make(map[string]*list.Element),
 		cacheOrder: list.New(),
 	}
