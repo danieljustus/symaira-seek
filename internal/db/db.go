@@ -353,61 +353,65 @@ func (db *DB) SearchBM25(queryStr string, limit int) ([]*SearchResult, error) {
 	return results, nil
 }
 
-// SearchVector performs in-memory Cosine Similarity search over all chunks.
-// It loads ONLY the IDs and Embedding bytes to save memory and I/O.
+// SearchVector performs Cosine Similarity search over chunks using batched
+// pagination instead of loading all embeddings into memory at once.
+// Chunks are processed in batches; only the top-K results are retained
+// across batches, and only those top-K chunks have their full detail rows
+// fetched at the end.
 func (db *DB) SearchVector(queryVec []float32, limit int) ([]*SearchResult, error) {
-	rows, err := db.conn.Query("SELECT id, embedding FROM chunks")
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
+	const vectorBatchSize = 500
+	var topK []*scoredEntry
 
-	type scoredResult struct {
-		id    int64
-		score float32
-	}
-
-	var scored []*scoredResult
-	for rows.Next() {
-		var id int64
-		var embBytes []byte
-		if err := rows.Scan(&id, &embBytes); err != nil {
+	offset := 0
+	for {
+		rows, err := db.conn.Query(
+			"SELECT id, embedding FROM chunks ORDER BY id LIMIT ? OFFSET ?",
+			vectorBatchSize, offset,
+		)
+		if err != nil {
 			return nil, err
 		}
 
-		vec := BytesToFloat32Slice(embBytes)
-		score := CosineSimilarity(queryVec, vec)
-		scored = append(scored, &scoredResult{
-			id:    id,
-			score: score,
-		})
+		batchCount := 0
+		for rows.Next() {
+			var id int64
+			var embBytes []byte
+			if err := rows.Scan(&id, &embBytes); err != nil {
+				rows.Close()
+				return nil, err
+			}
+
+			vec := BytesToFloat32Slice(embBytes)
+			score := CosineSimilarity(queryVec, vec)
+			batchCount++
+
+			// Insert into topK maintaining sorted order
+			topK = insertSorted(topK, &scoredEntry{id: id, score: score}, limit)
+		}
+		rows.Close()
+
+		if batchCount < vectorBatchSize {
+			break // Last page
+		}
+		offset += vectorBatchSize
 	}
 
-	// High performance sort descending: O(N log N) instead of O(N^2)
-	sort.Slice(scored, func(i, j int) bool {
-		return scored[i].score > scored[j].score
-	})
-
-	if limit > len(scored) {
-		limit = len(scored)
-	}
-
-	if limit == 0 {
+	if len(topK) == 0 {
 		return nil, nil
 	}
 
 	// Collect the top K IDs and mapping maps
-	topIDs := make([]interface{}, limit)
 	scoreMap := make(map[int64]float32)
 	idOrderMap := make(map[int64]int)
-	for i := 0; i < limit; i++ {
-		topIDs[i] = scored[i].id
-		scoreMap[scored[i].id] = scored[i].score
-		idOrderMap[scored[i].id] = i
+	topIDs := make([]interface{}, len(topK))
+	for i, s := range topK {
+		topIDs[i] = s.id
+		scoreMap[s.id] = s.score
+		idOrderMap[s.id] = i
 	}
 
 	// Query details for ONLY the top K chunk IDs
-	placeholders := make([]string, limit)
+	placeholders := make([]string, len(topK))
 	for i := range placeholders {
 		placeholders[i] = "?"
 	}
@@ -422,7 +426,7 @@ func (db *DB) SearchVector(queryVec []float32, limit int) ([]*SearchResult, erro
 	}
 	defer detailRows.Close()
 
-	unsortedResults := make([]*SearchResult, 0, limit)
+	unsortedResults := make([]*SearchResult, 0, len(topK))
 	for detailRows.Next() {
 		var c Chunk
 		var embBytes []byte
@@ -433,7 +437,7 @@ func (db *DB) SearchVector(queryVec []float32, limit int) ([]*SearchResult, erro
 
 		unsortedResults = append(unsortedResults, &SearchResult{
 			Chunk:       &c,
-			VectorRank:  0, // Will be set according to scoreMap sorting
+			VectorRank:  0,
 			CosineScore: scoreMap[c.ID],
 		})
 	}
@@ -449,6 +453,31 @@ func (db *DB) SearchVector(queryVec []float32, limit int) ([]*SearchResult, erro
 	}
 
 	return unsortedResults, nil
+}
+
+// scoredEntry holds an intermediate cosine similarity result.
+type scoredEntry struct {
+	id    int64
+	score float32
+}
+
+// insertSorted maintains a descending-score top-K list of at most maxLen entries.
+func insertSorted(list []*scoredEntry, item *scoredEntry, maxLen int) []*scoredEntry {
+	pos := sort.Search(len(list), func(i int) bool {
+		return list[i].score < item.score
+	})
+
+	if len(list) < maxLen {
+		// Expand
+		list = append(list, nil)
+		copy(list[pos+1:], list[pos:len(list)-1])
+		list[pos] = item
+	} else if pos < maxLen {
+		// Shift and drop last
+		copy(list[pos+1:], list[pos:maxLen-1])
+		list[pos] = item
+	}
+	return list
 }
 
 // CosineSimilarity computes the cosine similarity between two float32 slices.

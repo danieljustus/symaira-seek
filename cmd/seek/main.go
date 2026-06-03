@@ -1,10 +1,13 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -113,13 +116,29 @@ func main() {
 			}
 
 			if watchFlag {
+				ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+				defer cancel()
+
 				fmt.Fprintf(os.Stderr, "Starting watch daemon on: %s (Sync every 5 seconds)\n", dirPath)
 				for {
+					select {
+					case <-ctx.Done():
+						fmt.Fprintf(os.Stderr, "Received shutdown signal, stopping watch daemon.\n")
+						return nil
+					default:
+					}
+
 					err := engine.IndexDirectory(dbClient, embedder, dirPath)
 					if err != nil {
 						fmt.Fprintf(os.Stderr, "Sync error: %v\n", err)
 					}
-					time.Sleep(5 * time.Second)
+
+					select {
+					case <-ctx.Done():
+						fmt.Fprintf(os.Stderr, "Received shutdown signal, stopping watch daemon.\n")
+						return nil
+					case <-time.After(5 * time.Second):
+					}
 				}
 			} else {
 				fmt.Fprintf(os.Stderr, "Indexing folder: %s...\n", dirPath)
