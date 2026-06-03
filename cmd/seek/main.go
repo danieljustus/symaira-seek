@@ -29,12 +29,13 @@ type Config struct {
 }
 
 var (
-	cfgFile   string
-	cfg       Config
-	limitFlag int
-	jsonFlag  bool
-	watchFlag bool
-	portFlag  int
+	cfgFile      string
+	cfg          Config
+	limitFlag    int
+	jsonFlag     bool
+	watchFlag    bool
+	syncInterval int
+	portFlag     int
 )
 
 func main() {
@@ -117,10 +118,14 @@ func main() {
 			}
 
 			if watchFlag {
+				interval := syncInterval
+				if interval <= 0 {
+					interval = 5
+				}
 				ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 				defer cancel()
 
-				fmt.Fprintf(os.Stderr, "Starting watch daemon on: %s (Sync every 5 seconds)\n", dirPath)
+				fmt.Fprintf(os.Stderr, "Starting watch daemon on: %s (Sync every %d seconds)\n", dirPath, interval)
 				for {
 					select {
 					case <-ctx.Done():
@@ -138,7 +143,7 @@ func main() {
 					case <-ctx.Done():
 						fmt.Fprintf(os.Stderr, "Received shutdown signal, stopping watch daemon.\n")
 						return nil
-					case <-time.After(5 * time.Second):
+					case <-time.After(time.Duration(interval) * time.Second):
 					}
 				}
 			} else {
@@ -148,6 +153,7 @@ func main() {
 		},
 	}
 	indexCmd.Flags().BoolVarP(&watchFlag, "watch", "w", false, "Run in background and monitor folder for changes")
+	indexCmd.Flags().IntVar(&syncInterval, "interval", 5, "Sync interval in seconds when watch mode is active")
 	rootCmd.AddCommand(indexCmd)
 
 	// 3. Status Command
