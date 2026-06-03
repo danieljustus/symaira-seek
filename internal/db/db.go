@@ -374,11 +374,14 @@ func (db *DB) SearchBM25(queryStr string, limit int) ([]*SearchResult, error) {
 	return results, nil
 }
 
-// SearchVector performs Cosine Similarity search over chunks using batched
-// pagination instead of loading all embeddings into memory at once.
-// Chunks are processed in batches; only the top-K results are retained
-// across batches, and only those top-K chunks have their full detail rows
-// fetched at the end.
+// SearchVector performs Cosine Similarity search over chunks.
+//
+// This function uses a full-table scan with batched pagination to avoid
+// loading all embeddings into memory at once. An approximate nearest-neighbor
+// (ANN) index is not used here to keep the database layer CGO-free and
+// dependency-light. For small to medium index sizes this linear scan is fast
+// enough; users with very large indexes can pre-filter results via BM25
+// before running vector search.
 func (db *DB) SearchVector(queryVec []float32, limit int) ([]*SearchResult, error) {
 	const vectorBatchSize = 500
 	var topK []*scoredEntry
