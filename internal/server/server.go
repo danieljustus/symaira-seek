@@ -12,6 +12,12 @@ import (
 
 // StartHTTPServer runs the local HTTP REST daemon.
 func StartHTTPServer(port int, ollamaURL, model string) error {
+	dbClient, err := db.Open()
+	if err != nil {
+		return fmt.Errorf("failed to open database: %w", err)
+	}
+	defer dbClient.Close()
+
 	mux := http.NewServeMux()
 
 	// 1. Health check endpoint
@@ -23,13 +29,6 @@ func StartHTTPServer(port int, ollamaURL, model string) error {
 	// 2. Status endpoint
 	mux.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		dbClient, err := db.Open()
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		defer dbClient.Close()
-
 		stats, err := dbClient.GetStats()
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -53,13 +52,6 @@ func StartHTTPServer(port int, ollamaURL, model string) error {
 				limit = parsed
 			}
 		}
-
-		dbClient, err := db.Open()
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		defer dbClient.Close()
 
 		embedder := &engine.EmbeddingsGenerator{
 			OllamaURL: ollamaURL,
@@ -96,21 +88,13 @@ func StartHTTPServer(port int, ollamaURL, model string) error {
 			return
 		}
 
-		dbClient, err := db.Open()
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		defer dbClient.Close()
-
 		embedder := &engine.EmbeddingsGenerator{
 			OllamaURL: ollamaURL,
 			Model:     model,
 		}
 
 		// Run crawl
-		err = engine.IndexDirectory(dbClient, embedder, req.Path)
-		if err != nil {
+		if err := engine.IndexDirectory(dbClient, embedder, req.Path); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
