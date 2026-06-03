@@ -348,7 +348,7 @@ func (db *DB) SearchBM25(queryStr string, limit int) ([]*SearchResult, error) {
 	escapedQuery := escapeFTS5Query(queryStr)
 	rows, err := db.conn.Query(sqlQuery, escapedQuery, limit)
 	if err != nil {
-		return nil, nil
+		return nil, err
 	}
 	defer rows.Close()
 
