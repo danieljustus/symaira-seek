@@ -156,7 +156,39 @@ func main() {
 	indexCmd.Flags().IntVar(&syncInterval, "interval", 5, "Sync interval in seconds when watch mode is active")
 	rootCmd.AddCommand(indexCmd)
 
-	// 3. Status Command
+	// 3. Delete Command
+	deleteCmd := &cobra.Command{
+		Use:   "delete [document_path]",
+		Short: "Remove a document and its chunks from the index",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			docPath := args[0]
+			dbClient, err := db.Open()
+			if err != nil {
+				return err
+			}
+			defer dbClient.Close()
+
+			existing, err := dbClient.GetDocument(docPath)
+			if err != nil {
+				return err
+			}
+			if existing == nil {
+				fmt.Fprintf(os.Stderr, "Document not found in index: %s\n", docPath)
+				return nil
+			}
+
+			if err := dbClient.DeleteDocument(docPath); err != nil {
+				return err
+			}
+
+			fmt.Fprintf(os.Stderr, "Removed from index: %s\n", docPath)
+			return nil
+		},
+	}
+	rootCmd.AddCommand(deleteCmd)
+
+	// 4. Status Command
 	statusCmd := &cobra.Command{
 		Use:   "status",
 		Short: "Display statistics about the local search index",
