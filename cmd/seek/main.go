@@ -7,9 +7,11 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
+	"github.com/dustin/go-humanize"
 	"github.com/spf13/cobra"
 
 	"github.com/danieljustus/symaira-seek/internal/db"
@@ -83,8 +85,7 @@ func main() {
 				fmt.Printf("[%d] Path: %s (Chunk Index: %d)\n", idx+1, r.Chunk.DocumentPath, r.Chunk.ChunkIndex)
 				fmt.Printf("    Score: RRF=%.4f Cosine=%.4f (Ranks: BM25=%d Vector=%d)\n", r.RRFScore, r.CosineScore, r.BM25Rank, r.VectorRank)
 				fmt.Println("    --- Content ---")
-				lines := stringsSplitLines(r.Chunk.Content)
-				for _, line := range lines {
+				for _, line := range strings.Split(r.Chunk.Content, "\n") {
 					fmt.Printf("    %s\n", line)
 				}
 				fmt.Println("    ----------------")
@@ -167,7 +168,7 @@ func main() {
 
 			fmt.Printf("Indexed Documents: %d\n", stats.DocumentCount)
 			fmt.Printf("Indexed Chunks:    %d\n", stats.ChunkCount)
-			fmt.Printf("Database Size:     %s\n", formatBytes(stats.DatabaseSize))
+			fmt.Printf("Database Size:     %s\n", humanize.Bytes(uint64(stats.DatabaseSize)))
 			return nil
 		},
 	}
@@ -244,36 +245,6 @@ func initConfig() {
 		data, _ := json.MarshalIndent(cfg, "", "  ")
 		os.WriteFile(cfgFile, data, 0644)
 	}
-}
-
-func stringsSplitLines(s string) []string {
-	var lines []string
-	var line []rune
-	for _, r := range s {
-		if r == '\n' {
-			lines = append(lines, string(line))
-			line = nil
-		} else {
-			line = append(line, r)
-		}
-	}
-	if len(line) > 0 {
-		lines = append(lines, string(line))
-	}
-	return lines
-}
-
-func formatBytes(b int64) string {
-	const unit = 1024
-	if b < unit {
-		return fmt.Sprintf("%d B", b)
-	}
-	div, exp := int64(unit), 0
-	for n := b / unit; n >= unit; n /= unit {
-		div *= unit
-		exp++
-	}
-	return fmt.Sprintf("%.2f %cB", float64(b)/float64(div), "KMGTPE"[exp])
 }
 
 func startHTTPServer(port int) error {
