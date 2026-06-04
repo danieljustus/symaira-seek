@@ -89,74 +89,10 @@ func IndexDirectory(dbClient *db.DB, embedder *EmbeddingsGenerator, dirPath stri
 
 	// 3. Process new and changed files
 	for path := range foundPaths {
-		currentHash, err := parser.GetFileHash(path)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to compute hash for %s: %v\n", path, err)
+		if _, err := IndexFile(dbClient, embedder, path); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: %v\n", err)
 			continue
 		}
-
-		existing, err := dbClient.GetDocument(path)
-		if err != nil {
-			return fmt.Errorf("failed to query document from DB: %w", err)
-		}
-
-		if existing != nil {
-			if existing.Hash == currentHash {
-				// No change, skip embedding/re-parsing
-				continue
-			}
-			// Content changed: clean up old DB state first
-			err = dbClient.DeleteDocument(path)
-			if err != nil {
-				return fmt.Errorf("failed to delete old document version: %w", err)
-			}
-		}
-
-		// Parse the file
-		content, err := parser.ParseFile(path)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to parse %s: %v\n", path, err)
-			continue
-		}
-
-		// Split file into chunks
-		// Standard: 1000 characters chunk size, 200 characters overlap
-		textChunks := parser.SplitText(content, 1000, 200)
-
-		embeddings := embedder.GenerateVectors(textChunks)
-
-		var chunks []*db.Chunk
-		for idx, tc := range textChunks {
-			hashSum := sha256.Sum256([]byte(tc))
-			chunkHash := hex.EncodeToString(hashSum[:])
-
-			chunks = append(chunks, &db.Chunk{
-				UUID:         uuid.New().String(),
-				DocumentPath: path,
-				ChunkIndex:   idx,
-				Content:      tc,
-				Embedding:    embeddings[idx],
-				Hash:         chunkHash,
-			})
-		}
-
-		// Save document metadata
-		err = dbClient.SaveDocument(&db.Document{
-			Path:      path,
-			Hash:      currentHash,
-			UpdatedAt: time.Now(),
-		})
-		if err != nil {
-			return fmt.Errorf("failed to save document metadata: %w", err)
-		}
-
-		// Save document chunks
-		err = dbClient.SaveChunks(chunks)
-		if err != nil {
-			return fmt.Errorf("failed to save chunks: %w", err)
-		}
-
-		fmt.Fprintf(os.Stderr, "Indexed: %s (%d chunks)\n", path, len(chunks))
 	}
 
 	// 4. Orphan detection: delete DB documents that no longer exist on disk
@@ -171,6 +107,67 @@ func IndexDirectory(dbClient *db.DB, embedder *EmbeddingsGenerator, dirPath stri
 	}
 
 	return nil
+}
+
+// IndexFile indexes a single file: parses, chunks, embeds, and saves to the database.
+// It handles hash-based change detection and skips unchanged files.
+func IndexFile(dbClient *db.DB, embedder *EmbeddingsGenerator, path string) (string, error) {
+	currentHash, err := parser.GetFileHash(path)
+	if err != nil {
+		return "", fmt.Errorf("failed to compute hash for %s: %w", path, err)
+	}
+
+	existing, err := dbClient.GetDocument(path)
+	if err != nil {
+		return "", fmt.Errorf("failed to query document from DB: %w", err)
+	}
+
+	if existing != nil {
+		if existing.Hash == currentHash {
+			return currentHash, nil
+		}
+		if err := dbClient.DeleteDocument(path); err != nil {
+			return "", fmt.Errorf("failed to delete old document version: %w", err)
+		}
+	}
+
+	content, err := parser.ParseFile(path)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse %s: %w", path, err)
+	}
+
+	textChunks := parser.SplitText(content, 1000, 200)
+	embeddings := embedder.GenerateVectors(textChunks)
+
+	var chunks []*db.Chunk
+	for idx, tc := range textChunks {
+		hashSum := sha256.Sum256([]byte(tc))
+		chunkHash := hex.EncodeToString(hashSum[:])
+
+		chunks = append(chunks, &db.Chunk{
+			UUID:         uuid.New().String(),
+			DocumentPath: path,
+			ChunkIndex:   idx,
+			Content:      tc,
+			Embedding:    embeddings[idx],
+			Hash:         chunkHash,
+		})
+	}
+
+	if err := dbClient.SaveDocument(&db.Document{
+		Path:      path,
+		Hash:      currentHash,
+		UpdatedAt: time.Now(),
+	}); err != nil {
+		return "", fmt.Errorf("failed to save document metadata: %w", err)
+	}
+
+	if err := dbClient.SaveChunks(chunks); err != nil {
+		return "", fmt.Errorf("failed to save chunks: %w", err)
+	}
+
+	fmt.Fprintf(os.Stderr, "Indexed: %s (%d chunks)\n", path, len(chunks))
+	return currentHash, nil
 }
 
 // WatchDirectory watches a directory for changes and re-indexes when files change.
