@@ -233,8 +233,31 @@ func handleToolCall(reqID interface{}, name string, args map[string]interface{},
 			return
 		}
 
+		// Security: prevent directory traversal and restrict to indexed documents only.
+		cleanPath := filepath.Clean(path)
+		absPath, err := filepath.Abs(cleanPath)
+		if err != nil {
+			sendError(reqID, -32603, "Invalid path: "+err.Error())
+			return
+		}
+		if strings.Contains(absPath, "..") {
+			sendError(reqID, -32603, "Path contains directory traversal characters")
+			return
+		}
+
+		// Verify the file is actually indexed before allowing access.
+		doc, err := dbClient.GetDocument(absPath)
+		if err != nil {
+			sendError(reqID, -32603, "Database error: "+err.Error())
+			return
+		}
+		if doc == nil {
+			sendError(reqID, -32603, "Document is not indexed and cannot be read")
+			return
+		}
+
 		// Read file content
-		data, err := os.ReadFile(path)
+		data, err := os.ReadFile(absPath)
 		if err != nil {
 			sendError(reqID, -32603, "Failed to read file: "+err.Error())
 			return
