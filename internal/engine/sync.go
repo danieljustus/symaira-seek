@@ -16,6 +16,21 @@ import (
 	"github.com/danieljustus/symaira-seek/internal/parser"
 )
 
+var supportedExtensions = map[string]bool{
+	".md":   true,
+	".txt":  true,
+	".go":   true,
+	".py":   true,
+	".js":   true,
+	".ts":   true,
+	".json": true,
+	".yaml": true,
+	".yml":  true,
+	".sh":   true,
+	".html": true,
+	".css":  true,
+}
+
 // IndexDirectory crawls a directory, computes hashes, parses changed files,
 // generates embeddings, saves to DB, and deletes orphan documents.
 func IndexDirectory(dbClient *db.DB, embedder *EmbeddingsGenerator, dirPath string) error {
@@ -53,21 +68,7 @@ func IndexDirectory(dbClient *db.DB, embedder *EmbeddingsGenerator, dirPath stri
 		}
 
 		ext := strings.ToLower(filepath.Ext(path))
-		supported := map[string]bool{
-			".md":   true,
-			".txt":  true,
-			".go":   true,
-			".py":   true,
-			".js":   true,
-			".ts":   true,
-			".json": true,
-			".yaml": true,
-			".yml":  true,
-			".sh":   true,
-			".html": true,
-			".css":  true,
-		}
-		if supported[ext] {
+		if supportedExtensions[ext] {
 			foundPaths[path] = true
 		}
 

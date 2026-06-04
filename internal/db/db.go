@@ -92,10 +92,13 @@ func Open() (*DB, error) {
 		return nil, fmt.Errorf("failed to open sqlite database: %w", err)
 	}
 
-	// Enable WAL mode & foreign keys
-	if _, err := conn.Exec("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;"); err != nil {
+	if _, err := conn.Exec("PRAGMA journal_mode=WAL;"); err != nil {
 		conn.Close()
-		return nil, fmt.Errorf("failed to configure sqlite parameters: %w", err)
+		return nil, fmt.Errorf("failed to set WAL mode: %w", err)
+	}
+	if _, err := conn.Exec("PRAGMA foreign_keys=ON;"); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("failed to enable foreign keys: %w", err)
 	}
 
 	db := &DB{conn: conn}
@@ -318,6 +321,23 @@ func (db *DB) GetStats() (*Stats, error) {
 	return &s, nil
 }
 
+// escapeFTS5Query escapes special characters in an FTS5 query string to
+// prevent syntax errors. Special characters (\", *, (, ), +, -) are
+// replaced with spaces. The entire query is then wrapped in double quotes
+// to treat it as a phrase, which avoids column-filter syntax issues.
+func escapeFTS5Query(query string) string {
+	replacer := strings.NewReplacer(
+		"\"", " ",
+		"*", " ",
+		"(", " ",
+		")", " ",
+		"+", " ",
+		"-", " ",
+	)
+	cleaned := replacer.Replace(query)
+	return "\"" + cleaned + "\""
+}
+
 // SearchBM25 performs a keyword search on the FTS5 virtual table.
 func (db *DB) SearchBM25(queryStr string, limit int) ([]*SearchResult, error) {
 	sqlQuery := `
@@ -328,9 +348,10 @@ func (db *DB) SearchBM25(queryStr string, limit int) ([]*SearchResult, error) {
 		ORDER BY bm25(chunks_fts) ASC
 		LIMIT ?`
 
-	rows, err := db.conn.Query(sqlQuery, queryStr, limit)
+	escapedQuery := escapeFTS5Query(queryStr)
+	rows, err := db.conn.Query(sqlQuery, escapedQuery, limit)
 	if err != nil {
-		return nil, nil
+		return nil, err
 	}
 	defer rows.Close()
 
@@ -353,11 +374,14 @@ func (db *DB) SearchBM25(queryStr string, limit int) ([]*SearchResult, error) {
 	return results, nil
 }
 
-// SearchVector performs Cosine Similarity search over chunks using batched
-// pagination instead of loading all embeddings into memory at once.
-// Chunks are processed in batches; only the top-K results are retained
-// across batches, and only those top-K chunks have their full detail rows
-// fetched at the end.
+// SearchVector performs Cosine Similarity search over chunks.
+//
+// This function uses a full-table scan with batched pagination to avoid
+// loading all embeddings into memory at once. An approximate nearest-neighbor
+// (ANN) index is not used here to keep the database layer CGO-free and
+// dependency-light. For small to medium index sizes this linear scan is fast
+// enough; users with very large indexes can pre-filter results via BM25
+// before running vector search.
 func (db *DB) SearchVector(queryVec []float32, limit int) ([]*SearchResult, error) {
 	const vectorBatchSize = 500
 	var topK []*scoredEntry
