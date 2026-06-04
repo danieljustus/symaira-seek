@@ -281,7 +281,7 @@ func initConfig() {
 	} else {
 		// Save default configuration
 		data, _ := json.MarshalIndent(cfg, "", "  ")
-		os.WriteFile(cfgFile, data, 0644)
+		os.WriteFile(cfgFile, data, 0600)
 	}
 }
 
