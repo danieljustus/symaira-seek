@@ -1,10 +1,15 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
+	"os/signal"
 	"strconv"
+	"syscall"
+	"time"
 
 	"github.com/danieljustus/symaira-seek/internal/db"
 	"github.com/danieljustus/symaira-seek/internal/engine"
@@ -106,6 +111,41 @@ func StartHTTPServer(port int, ollamaURL, model string) error {
 	})
 
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
-	fmt.Printf("HTTP daemon listening on http://%s...\n", addr)
-	return http.ListenAndServe(addr, mux)
+	fmt.Fprintf(os.Stderr, "HTTP daemon listening on http://%s...\n", addr)
+
+	srv := &http.Server{
+		Addr:         addr,
+		Handler:      mux,
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 15 * time.Second,
+		IdleTimeout:  60 * time.Second,
+	}
+
+	errCh := make(chan error, 1)
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			errCh <- err
+		}
+	}()
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+
+	select {
+	case err := <-errCh:
+		return fmt.Errorf("HTTP server error: %w", err)
+	case sig := <-sigCh:
+		fmt.Fprintf(os.Stderr, "Received %s, shutting down gracefully...\n", sig)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := srv.Shutdown(ctx); err != nil {
+		srv.Close()
+		return fmt.Errorf("HTTP server forced shutdown: %w", err)
+	}
+
+	fmt.Fprintf(os.Stderr, "HTTP server stopped.\n")
+	return nil
 }
