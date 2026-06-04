@@ -2,8 +2,6 @@ package mcp
 
 import (
 	"bufio"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -12,11 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
-
 	"github.com/danieljustus/symaira-seek/internal/db"
 	"github.com/danieljustus/symaira-seek/internal/engine"
-	"github.com/danieljustus/symaira-seek/internal/parser"
 )
 
 // JSONRPCRequest represents an incoming JSON-RPC 2.0 request.
@@ -233,8 +228,31 @@ func handleToolCall(reqID interface{}, name string, args map[string]interface{},
 			return
 		}
 
+		// Security: prevent directory traversal and restrict to indexed documents only.
+		cleanPath := filepath.Clean(path)
+		absPath, err := filepath.Abs(cleanPath)
+		if err != nil {
+			sendError(reqID, -32603, "Invalid path: "+err.Error())
+			return
+		}
+		if strings.Contains(absPath, "..") {
+			sendError(reqID, -32603, "Path contains directory traversal characters")
+			return
+		}
+
+		// Verify the file is actually indexed before allowing access.
+		doc, err := dbClient.GetDocument(absPath)
+		if err != nil {
+			sendError(reqID, -32603, "Database error: "+err.Error())
+			return
+		}
+		if doc == nil {
+			sendError(reqID, -32603, "Document is not indexed and cannot be read")
+			return
+		}
+
 		// Read file content
-		data, err := os.ReadFile(path)
+		data, err := os.ReadFile(absPath)
 		if err != nil {
 			sendError(reqID, -32603, "Failed to read file: "+err.Error())
 			return
@@ -333,57 +351,7 @@ func handleToolCall(reqID interface{}, name string, args map[string]interface{},
 
 // IndexSingleFile indexes a single file instead of a directory.
 func IndexSingleFile(dbClient *db.DB, embedder *engine.EmbeddingsGenerator, path string) (string, error) {
-	currentHash, err := parser.GetFileHash(path)
-	if err != nil {
-		return "", err
-	}
-
-	existing, _ := dbClient.GetDocument(path)
-	if existing != nil {
-		if existing.Hash == currentHash {
-			return currentHash, nil
-		}
-		dbClient.DeleteDocument(path)
-	}
-
-	content, err := parser.ParseFile(path)
-	if err != nil {
-		return "", err
-	}
-
-	textChunks := parser.SplitText(content, 1000, 200)
-	embeddings := embedder.GenerateVectors(textChunks)
-
-	var chunks []*db.Chunk
-	for idx, tc := range textChunks {
-		hashSum := sha256.Sum256([]byte(tc))
-		chunkHash := hex.EncodeToString(hashSum[:])
-
-		chunks = append(chunks, &db.Chunk{
-			UUID:         uuid.New().String(),
-			DocumentPath: path,
-			ChunkIndex:   idx,
-			Content:      tc,
-			Embedding:    embeddings[idx],
-			Hash:         chunkHash,
-		})
-	}
-
-	err = dbClient.SaveDocument(&db.Document{
-		Path:      path,
-		Hash:      currentHash,
-		UpdatedAt: time.Now(),
-	})
-	if err != nil {
-		return "", err
-	}
-
-	err = dbClient.SaveChunks(chunks)
-	if err != nil {
-		return "", err
-	}
-
-	return currentHash, nil
+	return engine.IndexFile(dbClient, embedder, path)
 }
 
 func sendResponse(id interface{}, result interface{}) {

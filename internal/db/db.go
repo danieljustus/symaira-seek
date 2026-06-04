@@ -29,6 +29,7 @@ type Chunk struct {
 	Content      string    `json:"content"`
 	Embedding    []float32 `json:"embedding"`
 	Hash         string    `json:"hash"`
+	Norm         float32   `json:"norm"` // Precomputed L2 norm of the embedding vector
 }
 
 // SearchResult wraps a chunk with ranking and score details.
@@ -134,6 +135,7 @@ func (db *DB) initSchema() error {
 			content TEXT NOT NULL,
 			embedding BLOB NOT NULL,
 			hash TEXT NOT NULL,
+			norm REAL DEFAULT 0,
 			FOREIGN KEY(document_path) REFERENCES documents(path) ON DELETE CASCADE
 		);`,
 
@@ -168,6 +170,11 @@ func (db *DB) initSchema() error {
 			return fmt.Errorf("failed executing schema migration: %w (query: %s)", err, q)
 		}
 	}
+
+	// Migration: add norm column for databases created before this field was introduced.
+	// This is allowed to fail if the column already exists.
+	db.conn.Exec(`ALTER TABLE chunks ADD COLUMN norm REAL DEFAULT 0;`)
+
 	return nil
 }
 
@@ -241,8 +248,8 @@ func (db *DB) SaveChunks(chunks []*Chunk) error {
 	}
 	defer tx.Rollback()
 
-	query := `INSERT INTO chunks (uuid, document_path, chunk_index, content, embedding, hash)
-		VALUES (?, ?, ?, ?, ?, ?)`
+	query := `INSERT INTO chunks (uuid, document_path, chunk_index, content, embedding, hash, norm)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`
 
 	stmt, err := tx.Prepare(query)
 	if err != nil {
@@ -251,8 +258,9 @@ func (db *DB) SaveChunks(chunks []*Chunk) error {
 	defer stmt.Close()
 
 	for _, c := range chunks {
+		c.Norm = l2Norm(c.Embedding)
 		embBytes := Float32SliceToBytes(c.Embedding)
-		res, err := stmt.Exec(c.UUID, c.DocumentPath, c.ChunkIndex, c.Content, embBytes, c.Hash)
+		res, err := stmt.Exec(c.UUID, c.DocumentPath, c.ChunkIndex, c.Content, embBytes, c.Hash, c.Norm)
 		if err != nil {
 			return fmt.Errorf("failed to insert chunk: %w", err)
 		}
@@ -322,9 +330,9 @@ func (db *DB) GetStats() (*Stats, error) {
 }
 
 // escapeFTS5Query escapes special characters in an FTS5 query string to
-// prevent syntax errors. Special characters (\", *, (, ), +, -) are
+// prevent syntax errors. Special characters (", *, (, ), +, -, ., ~) are
 // replaced with spaces. The entire query is then wrapped in double quotes
-// to treat it as a phrase, which avoids column-filter syntax issues.
+// to treat it as a phrase, which avoids column-filter and NEAR syntax issues.
 func escapeFTS5Query(query string) string {
 	replacer := strings.NewReplacer(
 		"\"", " ",
@@ -333,6 +341,8 @@ func escapeFTS5Query(query string) string {
 		")", " ",
 		"+", " ",
 		"-", " ",
+		".", " ",
+		"~", " ",
 	)
 	cleaned := replacer.Replace(query)
 	return "\"" + cleaned + "\""
@@ -389,7 +399,7 @@ func (db *DB) SearchVector(queryVec []float32, limit int) ([]*SearchResult, erro
 	offset := 0
 	for {
 		rows, err := db.conn.Query(
-			"SELECT id, embedding FROM chunks ORDER BY id LIMIT ? OFFSET ?",
+			"SELECT id, embedding, norm FROM chunks ORDER BY id LIMIT ? OFFSET ?",
 			vectorBatchSize, offset,
 		)
 		if err != nil {
@@ -400,13 +410,19 @@ func (db *DB) SearchVector(queryVec []float32, limit int) ([]*SearchResult, erro
 		for rows.Next() {
 			var id int64
 			var embBytes []byte
-			if err := rows.Scan(&id, &embBytes); err != nil {
+			var norm float32
+			if err := rows.Scan(&id, &embBytes, &norm); err != nil {
 				rows.Close()
 				return nil, err
 			}
 
 			vec := BytesToFloat32Slice(embBytes)
-			score := CosineSimilarity(queryVec, vec)
+			var score float32
+			if norm > 0 {
+				score = CosineSimilarityWithNorm(queryVec, vec, norm)
+			} else {
+				score = CosineSimilarity(queryVec, vec)
+			}
 			batchCount++
 
 			// Insert into topK maintaining sorted order
@@ -519,4 +535,30 @@ func CosineSimilarity(a, b []float32) float32 {
 		return 0
 	}
 	return float32(dotProduct / (math.Sqrt(normA) * math.Sqrt(normB)))
+}
+
+// CosineSimilarityWithNorm computes cosine similarity when the L2 norm of vector b
+// is already known, avoiding redundant norm calculations during search.
+func CosineSimilarityWithNorm(a, b []float32, normB float32) float32 {
+	if len(a) != len(b) || len(a) == 0 || normB == 0 {
+		return 0
+	}
+	var dotProduct, normA float64
+	for i := 0; i < len(a); i++ {
+		dotProduct += float64(a[i] * b[i])
+		normA += float64(a[i] * a[i])
+	}
+	if normA == 0 {
+		return 0
+	}
+	return float32(dotProduct / (math.Sqrt(normA) * float64(normB)))
+}
+
+// l2Norm computes the Euclidean (L2) norm of a float32 vector.
+func l2Norm(v []float32) float32 {
+	var sum float64
+	for _, x := range v {
+		sum += float64(x * x)
+	}
+	return float32(math.Sqrt(sum))
 }

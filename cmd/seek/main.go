@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
-	"time"
 
 	"github.com/dustin/go-humanize"
 	"github.com/spf13/cobra"
@@ -32,10 +31,9 @@ var (
 	cfgFile      string
 	cfg          Config
 	limitFlag    int
-	jsonFlag     bool
-	watchFlag    bool
-	syncInterval int
-	portFlag     int
+	jsonFlag  bool
+	watchFlag bool
+	portFlag  int
 )
 
 func main() {
@@ -118,42 +116,17 @@ func main() {
 			}
 
 			if watchFlag {
-				interval := syncInterval
-				if interval <= 0 {
-					interval = 5
-				}
 				ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 				defer cancel()
 
-				fmt.Fprintf(os.Stderr, "Starting watch daemon on: %s (Sync every %d seconds)\n", dirPath, interval)
-				for {
-					select {
-					case <-ctx.Done():
-						fmt.Fprintf(os.Stderr, "Received shutdown signal, stopping watch daemon.\n")
-						return nil
-					default:
-					}
-
-					err := engine.IndexDirectory(dbClient, embedder, dirPath)
-					if err != nil {
-						fmt.Fprintf(os.Stderr, "Sync error: %v\n", err)
-					}
-
-					select {
-					case <-ctx.Done():
-						fmt.Fprintf(os.Stderr, "Received shutdown signal, stopping watch daemon.\n")
-						return nil
-					case <-time.After(time.Duration(interval) * time.Second):
-					}
-				}
-			} else {
-				fmt.Fprintf(os.Stderr, "Indexing folder: %s...\n", dirPath)
-				return engine.IndexDirectory(dbClient, embedder, dirPath)
+				fmt.Fprintf(os.Stderr, "Starting watch daemon on: %s (fsnotify event-based)\n", dirPath)
+				return engine.WatchDirectory(ctx, dbClient, embedder, dirPath)
 			}
+			fmt.Fprintf(os.Stderr, "Indexing folder: %s...\n", dirPath)
+			return engine.IndexDirectory(dbClient, embedder, dirPath)
 		},
 	}
 	indexCmd.Flags().BoolVarP(&watchFlag, "watch", "w", false, "Run in background and monitor folder for changes")
-	indexCmd.Flags().IntVar(&syncInterval, "interval", 5, "Sync interval in seconds when watch mode is active")
 	rootCmd.AddCommand(indexCmd)
 
 	// 3. Delete Command
@@ -281,7 +254,7 @@ func initConfig() {
 	} else {
 		// Save default configuration
 		data, _ := json.MarshalIndent(cfg, "", "  ")
-		os.WriteFile(cfgFile, data, 0644)
+		os.WriteFile(cfgFile, data, 0600)
 	}
 }
 
