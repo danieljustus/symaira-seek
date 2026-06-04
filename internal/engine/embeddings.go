@@ -46,8 +46,10 @@ func NewEmbeddingsGenerator() *EmbeddingsGenerator {
 // Uses an LRU in-memory cache to avoid recomputing embeddings for repeated text.
 // Queries Ollama first, falling back to local deterministic hashing if offline.
 func (eg *EmbeddingsGenerator) GenerateVector(text string) []float32 {
+	key := hashKey(text)
+
 	eg.cacheMu.Lock()
-	if elem, ok := eg.cache[text]; ok {
+	if elem, ok := eg.cache[key]; ok {
 		eg.cacheOrder.MoveToFront(elem)
 		eg.cacheMu.Unlock()
 		return elem.Value.(*cacheEntry).value
@@ -59,13 +61,13 @@ func (eg *EmbeddingsGenerator) GenerateVector(text string) []float32 {
 	// Try Ollama first
 	vec, err := eg.queryOllama(text)
 	if err == nil && len(vec) == dims {
-		eg.cachePut(text, vec)
+		eg.cachePut(key, vec)
 		return vec
 	}
 
 	// Local pure-Go fallback vector
 	fallback := GenerateLocalHashVector(text, dims)
-	eg.cachePut(text, fallback)
+	eg.cachePut(key, fallback)
 	return fallback
 }
 
@@ -111,7 +113,8 @@ func (eg *EmbeddingsGenerator) GenerateVectors(texts []string) [][]float32 {
 
 	eg.cacheMu.Lock()
 	for i, t := range texts {
-		if elem, ok := eg.cache[t]; ok {
+		key := hashKey(t)
+		if elem, ok := eg.cache[key]; ok {
 			eg.cacheOrder.MoveToFront(elem)
 			results[i] = elem.Value.(*cacheEntry).value
 		} else {
@@ -135,12 +138,13 @@ func (eg *EmbeddingsGenerator) GenerateVectors(texts []string) [][]float32 {
 	if err == nil && len(batchVectors) == len(uncachedList) {
 		for i, u := range uncachedList {
 			vec := batchVectors[i]
+			key := hashKey(u.text)
 			if len(vec) == dims {
 				results[u.idx] = vec
-				eg.cachePut(u.text, vec)
+				eg.cachePut(key, vec)
 			} else {
 				results[u.idx] = GenerateLocalHashVector(u.text, dims)
-				eg.cachePut(u.text, results[u.idx])
+				eg.cachePut(key, results[u.idx])
 			}
 		}
 		return results
@@ -280,4 +284,11 @@ func isStopWord(w string) bool {
 		"von": true, "zu": true, "mit": true, "auf": true, "für": true, "den": true, "dem": true, "des": true, "im": true, "am": true,
 	}
 	return stops[w]
+}
+
+// hashKey returns a compact hex-encoded SHA-256 hash of the input text.
+// Used as a cache key to avoid storing large raw text strings in memory.
+func hashKey(text string) string {
+	sum := sha256.Sum256([]byte(text))
+	return fmt.Sprintf("%x", sum[:8])
 }
