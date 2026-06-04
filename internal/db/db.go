@@ -322,9 +322,9 @@ func (db *DB) GetStats() (*Stats, error) {
 }
 
 // escapeFTS5Query escapes special characters in an FTS5 query string to
-// prevent syntax errors. Special characters (\", *, (, ), +, -) are
+// prevent syntax errors. Special characters (", *, (, ), +, -, ., ~) are
 // replaced with spaces. The entire query is then wrapped in double quotes
-// to treat it as a phrase, which avoids column-filter syntax issues.
+// to treat it as a phrase, which avoids column-filter and NEAR syntax issues.
 func escapeFTS5Query(query string) string {
 	replacer := strings.NewReplacer(
 		"\"", " ",
@@ -333,6 +333,8 @@ func escapeFTS5Query(query string) string {
 		")", " ",
 		"+", " ",
 		"-", " ",
+		".", " ",
+		"~", " ",
 	)
 	cleaned := replacer.Replace(query)
 	return "\"" + cleaned + "\""
