@@ -35,7 +35,7 @@ var supportedExtensions = map[string]bool{
 
 // IndexDirectory crawls a directory, computes hashes, parses changed files,
 // generates embeddings, saves to DB, and deletes orphan documents.
-func IndexDirectory(dbClient *db.DB, embedder *EmbeddingsGenerator, dirPath string) error {
+func IndexDirectory(dbClient db.Store, embedder Embedder, dirPath string) error {
 	absPath, err := filepath.Abs(dirPath)
 	if err != nil {
 		return fmt.Errorf("failed to get absolute path: %w", err)
@@ -111,7 +111,7 @@ func IndexDirectory(dbClient *db.DB, embedder *EmbeddingsGenerator, dirPath stri
 
 // IndexFile indexes a single file: parses, chunks, embeds, and saves to the database.
 // It handles hash-based change detection and skips unchanged files.
-func IndexFile(dbClient *db.DB, embedder *EmbeddingsGenerator, path string) (string, error) {
+func IndexFile(dbClient db.Store, embedder Embedder, path string) (string, error) {
 	currentHash, err := parser.GetFileHash(path)
 	if err != nil {
 		return "", fmt.Errorf("failed to compute hash for %s: %w", path, err)
@@ -172,7 +172,7 @@ func IndexFile(dbClient *db.DB, embedder *EmbeddingsGenerator, path string) (str
 
 // WatchDirectory watches a directory for changes and re-indexes when files change.
 // It uses fsnotify for efficient event-based watching instead of polling.
-func WatchDirectory(ctx context.Context, dbClient *db.DB, embedder *EmbeddingsGenerator, dirPath string) error {
+func WatchDirectory(ctx context.Context, dbClient db.Store, embedder Embedder, dirPath string) error {
 	absPath, err := filepath.Abs(dirPath)
 	if err != nil {
 		return fmt.Errorf("failed to get absolute path: %w", err)

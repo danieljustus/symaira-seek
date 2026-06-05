@@ -2,13 +2,15 @@ package engine
 
 import (
 	"sort"
-	"sync"
 
 	"github.com/danieljustus/symaira-seek/internal/db"
 )
 
 // SearchHybrid combines BM25 keyword search and semantic vector search using Reciprocal Rank Fusion (RRF).
-func SearchHybrid(dbClient *db.DB, embedder *EmbeddingsGenerator, query string, limit int) ([]*db.SearchResult, error) {
+// Both the persistence layer and the embedder are consumed through their
+// respective interfaces so callers can pass mocks or alternate
+// implementations in tests.
+func SearchHybrid(dbClient db.Store, embedder Embedder, query string, limit int) ([]*db.SearchResult, error) {
 	if query == "" {
 		return nil, nil
 	}
@@ -22,33 +24,32 @@ func SearchHybrid(dbClient *db.DB, embedder *EmbeddingsGenerator, query string, 
 		fetchLimit = 50
 	}
 
-	var bm25Results []*db.SearchResult
-	var vectorResults []*db.SearchResult
-	var vecErr error
+	// 2. Run BM25 first to obtain a candidate set for the vector pre-filter
+	// (issue #38). If BM25 returns nothing useful we fall back to a full
+	// vector scan via SearchVector with an empty candidate list.
+	bm25Results, err := dbClient.SearchBM25(query, fetchLimit)
+	if err != nil {
+		bm25Results = nil
+	}
 
-	var wg sync.WaitGroup
-	wg.Add(2)
-
-	// 2. Perform BM25 Search concurrently
-	go func() {
-		defer wg.Done()
-		var err error
-		bm25Results, err = dbClient.SearchBM25(query, fetchLimit)
-		if err != nil {
-			bm25Results = nil
+	candidateIDs := make([]int64, 0, len(bm25Results))
+	for _, r := range bm25Results {
+		if r != nil && r.Chunk != nil {
+			candidateIDs = append(candidateIDs, r.Chunk.ID)
 		}
-	}()
+	}
 
-	// 3. Perform Vector Search concurrently
-	go func() {
-		defer wg.Done()
-		vectorResults, vecErr = dbClient.SearchVector(queryVec, fetchLimit)
-	}()
-
-	wg.Wait()
-
-	if vecErr != nil {
-		return nil, vecErr
+	var vectorResults []*db.SearchResult
+	if len(candidateIDs) > 0 {
+		vectorResults, err = dbClient.SearchVectorFiltered(queryVec, candidateIDs, fetchLimit)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		vectorResults, err = dbClient.SearchVector(queryVec, fetchLimit)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	// 4. Reciprocal Rank Fusion

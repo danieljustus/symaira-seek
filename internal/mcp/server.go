@@ -32,6 +32,14 @@ type JSONRPCResponse struct {
 
 // StartServer starts the MCP server over stdio.
 func StartServer(cfgOllamaURL, cfgModel string) error {
+	dbClient, err := db.Open()
+	if err != nil {
+		return fmt.Errorf("failed to open database: %w", err)
+	}
+	defer dbClient.Close()
+
+	embedder := engine.NewEmbeddingsGeneratorWithConfig(cfgOllamaURL, cfgModel)
+
 	reader := bufio.NewReader(os.Stdin)
 
 	// Suppress any printing to Stdout in packages.
@@ -56,11 +64,11 @@ func StartServer(cfgOllamaURL, cfgModel string) error {
 			continue
 		}
 
-		handleRequest(&req, cfgOllamaURL, cfgModel)
+		handleRequest(&req, dbClient, embedder)
 	}
 }
 
-func handleRequest(req *JSONRPCRequest, ollamaURL, model string) {
+func handleRequest(req *JSONRPCRequest, dbClient db.Store, embedder engine.Embedder) {
 	switch req.Method {
 	case "initialize":
 		sendResponse(req.ID, map[string]interface{}{
@@ -173,26 +181,14 @@ func handleRequest(req *JSONRPCRequest, ollamaURL, model string) {
 			return
 		}
 
-		handleToolCall(req.ID, params.Name, params.Arguments, ollamaURL, model)
+		handleToolCall(req.ID, params.Name, params.Arguments, dbClient, embedder)
 
 	default:
 		sendError(req.ID, -32601, "Method not found: "+req.Method)
 	}
 }
 
-func handleToolCall(reqID interface{}, name string, args map[string]interface{}, ollamaURL, model string) {
-	dbClient, err := db.Open()
-	if err != nil {
-		sendError(reqID, -32603, "Database error: "+err.Error())
-		return
-	}
-	defer dbClient.Close()
-
-	embedder := &engine.EmbeddingsGenerator{
-		OllamaURL: ollamaURL,
-		Model:     model,
-	}
-
+func handleToolCall(reqID interface{}, name string, args map[string]interface{}, dbClient db.Store, embedder engine.Embedder) {
 	switch name {
 	case "search_documents":
 		query, ok := args["query"].(string)
@@ -228,19 +224,20 @@ func handleToolCall(reqID interface{}, name string, args map[string]interface{},
 			return
 		}
 
-		// Security: prevent directory traversal and restrict to indexed documents only.
+		// Resolve and normalize the path. filepath.Clean collapses any ".."
+		// segments, so a later strings.Contains check on the absolute path is
+		// dead code — the indexed-document whitelist below is the real
+		// authorization boundary.
 		cleanPath := filepath.Clean(path)
 		absPath, err := filepath.Abs(cleanPath)
 		if err != nil {
 			sendError(reqID, -32603, "Invalid path: "+err.Error())
 			return
 		}
-		if strings.Contains(absPath, "..") {
-			sendError(reqID, -32603, "Path contains directory traversal characters")
-			return
-		}
 
-		// Verify the file is actually indexed before allowing access.
+		// Authorization: only allow reading files that are actually in the
+		// local index. This is the primary defense and the only one that
+		// reliably blocks reads of arbitrary filesystem paths.
 		doc, err := dbClient.GetDocument(absPath)
 		if err != nil {
 			sendError(reqID, -32603, "Database error: "+err.Error())
@@ -251,7 +248,6 @@ func handleToolCall(reqID interface{}, name string, args map[string]interface{},
 			return
 		}
 
-		// Read file content
 		data, err := os.ReadFile(absPath)
 		if err != nil {
 			sendError(reqID, -32603, "Failed to read file: "+err.Error())
@@ -350,7 +346,7 @@ func handleToolCall(reqID interface{}, name string, args map[string]interface{},
 }
 
 // IndexSingleFile indexes a single file instead of a directory.
-func IndexSingleFile(dbClient *db.DB, embedder *engine.EmbeddingsGenerator, path string) (string, error) {
+func IndexSingleFile(dbClient db.Store, embedder engine.Embedder, path string) (string, error) {
 	return engine.IndexFile(dbClient, embedder, path)
 }
 

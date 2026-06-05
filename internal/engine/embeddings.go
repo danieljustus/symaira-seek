@@ -42,6 +42,28 @@ func NewEmbeddingsGenerator() *EmbeddingsGenerator {
 	}
 }
 
+// Embedder is the public surface of an embedding generator. Callers depend
+// on the contract, not on the concrete *EmbeddingsGenerator struct, so the
+// HTTP client / cache / mutex plumbing stays encapsulated.
+type Embedder interface {
+	GenerateVector(text string) []float32
+	GenerateVectors(texts []string) [][]float32
+}
+
+// Compile-time check that *EmbeddingsGenerator satisfies Embedder.
+var _ Embedder = (*EmbeddingsGenerator)(nil)
+
+// NewEmbeddingsGeneratorWithConfig builds an EmbeddingsGenerator pre-configured
+// with the given Ollama endpoint and model name. It performs the same internal
+// initialization as NewEmbeddingsGenerator (HTTP client, LRU cache, mutex) so
+// callers can construct one without depending on the unexported fields.
+func NewEmbeddingsGeneratorWithConfig(ollamaURL, model string) *EmbeddingsGenerator {
+	eg := NewEmbeddingsGenerator()
+	eg.OllamaURL = ollamaURL
+	eg.Model = model
+	return eg
+}
+
 // GenerateVector produces a 768-dimensional normalized embedding vector.
 // Uses an LRU in-memory cache to avoid recomputing embeddings for repeated text.
 // Queries Ollama first, falling back to local deterministic hashing if offline.
@@ -286,9 +308,11 @@ func isStopWord(w string) bool {
 	return stops[w]
 }
 
-// hashKey returns a compact hex-encoded SHA-256 hash of the input text.
-// Used as a cache key to avoid storing large raw text strings in memory.
+// hashKey returns a hex-encoded SHA-256 hash of the input text, truncated
+// to 32 hex chars (128 bits of entropy). Used as a cache key to avoid
+// storing large raw text strings in memory while keeping collision risk
+// negligible well past the 10K-entry cache ceiling.
 func hashKey(text string) string {
 	sum := sha256.Sum256([]byte(text))
-	return fmt.Sprintf("%x", sum[:8])
+	return fmt.Sprintf("%x", sum[:16])
 }
