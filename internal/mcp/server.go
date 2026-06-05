@@ -225,19 +225,20 @@ func handleToolCall(reqID interface{}, name string, args map[string]interface{},
 			return
 		}
 
-		// Security: prevent directory traversal and restrict to indexed documents only.
+		// Resolve and normalize the path. filepath.Clean collapses any ".."
+		// segments, so a later strings.Contains check on the absolute path is
+		// dead code — the indexed-document whitelist below is the real
+		// authorization boundary.
 		cleanPath := filepath.Clean(path)
 		absPath, err := filepath.Abs(cleanPath)
 		if err != nil {
 			sendError(reqID, -32603, "Invalid path: "+err.Error())
 			return
 		}
-		if strings.Contains(absPath, "..") {
-			sendError(reqID, -32603, "Path contains directory traversal characters")
-			return
-		}
 
-		// Verify the file is actually indexed before allowing access.
+		// Authorization: only allow reading files that are actually in the
+		// local index. This is the primary defense and the only one that
+		// reliably blocks reads of arbitrary filesystem paths.
 		doc, err := dbClient.GetDocument(absPath)
 		if err != nil {
 			sendError(reqID, -32603, "Database error: "+err.Error())
@@ -248,7 +249,6 @@ func handleToolCall(reqID interface{}, name string, args map[string]interface{},
 			return
 		}
 
-		// Read file content
 		data, err := os.ReadFile(absPath)
 		if err != nil {
 			sendError(reqID, -32603, "Failed to read file: "+err.Error())
