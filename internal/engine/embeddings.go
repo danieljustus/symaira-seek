@@ -308,9 +308,11 @@ func isStopWord(w string) bool {
 	return stops[w]
 }
 
-// hashKey returns a compact hex-encoded SHA-256 hash of the input text.
-// Used as a cache key to avoid storing large raw text strings in memory.
+// hashKey returns a hex-encoded SHA-256 hash of the input text, truncated
+// to 32 hex chars (128 bits of entropy). Used as a cache key to avoid
+// storing large raw text strings in memory while keeping collision risk
+// negligible well past the 10K-entry cache ceiling.
 func hashKey(text string) string {
 	sum := sha256.Sum256([]byte(text))
-	return fmt.Sprintf("%x", sum[:8])
+	return fmt.Sprintf("%x", sum[:16])
 }

@@ -10,6 +10,24 @@ import (
 	"github.com/danieljustus/symaira-seek/internal/db"
 )
 
+// TestHashKeyEntropy is a regression test for issue #39. The cache key
+// must contain enough entropy that distinct texts are statistically
+// guaranteed to produce distinct keys, even at the 10K-entry cache size
+// (and well beyond).
+func TestHashKeyEntropy(t *testing.T) {
+	if got := hashKey("anything"); len(got) != 32 {
+		t.Errorf("expected 32 hex chars (128 bits) in cache key, got %d (%q)", len(got), got)
+	}
+
+	if hashKey("alpha") != hashKey("alpha") {
+		t.Error("hashKey must be deterministic")
+	}
+
+	if hashKey("alpha") == hashKey("beta") {
+		t.Error("hashKey must distinguish different inputs")
+	}
+}
+
 func TestLocalHashVector(t *testing.T) {
 	vec1 := GenerateLocalHashVector("Hello Symaira Seek", 768)
 	vec2 := GenerateLocalHashVector("Hello Symaira Seek", 768)
