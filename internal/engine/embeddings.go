@@ -42,6 +42,17 @@ func NewEmbeddingsGenerator() *EmbeddingsGenerator {
 	}
 }
 
+// Embedder is the public surface of an embedding generator. Callers depend
+// on the contract, not on the concrete *EmbeddingsGenerator struct, so the
+// HTTP client / cache / mutex plumbing stays encapsulated.
+type Embedder interface {
+	GenerateVector(text string) []float32
+	GenerateVectors(texts []string) [][]float32
+}
+
+// Compile-time check that *EmbeddingsGenerator satisfies Embedder.
+var _ Embedder = (*EmbeddingsGenerator)(nil)
+
 // NewEmbeddingsGeneratorWithConfig builds an EmbeddingsGenerator pre-configured
 // with the given Ollama endpoint and model name. It performs the same internal
 // initialization as NewEmbeddingsGenerator (HTTP client, LRU cache, mutex) so

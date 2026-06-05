@@ -87,6 +87,93 @@ func TestNewEmbeddingsGeneratorWithConfig(t *testing.T) {
 	}
 }
 
+// fakeEmbedder is a deterministic in-memory Embedder used to prove that
+// SearchHybrid and the indexer accept the interface, not the concrete
+// struct, and that the tests can substitute behavior without Ollama.
+type fakeEmbedder struct {
+	dim int
+}
+
+func (f *fakeEmbedder) GenerateVector(text string) []float32 {
+	vec := make([]float32, f.dim)
+	for i, b := range []byte(text) {
+		vec[i%f.dim] += float32(b) / 255.0
+	}
+	var sumSquares float64
+	for _, v := range vec {
+		sumSquares += float64(v * v)
+	}
+	if sumSquares > 0 {
+		norm := float32(math.Sqrt(sumSquares))
+		for i := range vec {
+			vec[i] /= norm
+		}
+	} else {
+		vec[0] = 1.0
+	}
+	return vec
+}
+
+func (f *fakeEmbedder) GenerateVectors(texts []string) [][]float32 {
+	out := make([][]float32, len(texts))
+	for i, t := range texts {
+		out[i] = f.GenerateVector(t)
+	}
+	return out
+}
+
+// TestSearchHybridAcceptsEmbedderInterface guards the contract from #35:
+// the indexer must depend on the Embedder interface, not the concrete
+// *EmbeddingsGenerator, so callers can substitute behavior in tests.
+func TestSearchHybridAcceptsEmbedderInterface(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "seek-engine-iface-test")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	originalHome := os.Getenv("HOME")
+	os.Setenv("HOME", tempDir)
+	defer os.Setenv("HOME", originalHome)
+
+	dbClient, err := db.Open()
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer dbClient.Close()
+
+	docPath := filepath.Join(tempDir, "test.md")
+	dbClient.SaveDocument(&db.Document{
+		Path:      docPath,
+		Hash:      "ifacehash",
+		UpdatedAt: time.Now(),
+	})
+
+	var ie Embedder = &fakeEmbedder{dim: 768}
+
+	dbClient.SaveChunks([]*db.Chunk{
+		{
+			UUID:         "iface-uuid-1",
+			DocumentPath: docPath,
+			ChunkIndex:   0,
+			Content:      "interface driven search",
+			Embedding:    ie.GenerateVector("interface driven search"),
+			Hash:         "h1",
+		},
+	})
+
+	res, err := SearchHybrid(dbClient, ie, "interface", 5)
+	if err != nil {
+		t.Fatalf("SearchHybrid with interface embedder failed: %v", err)
+	}
+	if len(res) == 0 {
+		t.Fatalf("expected at least one result")
+	}
+	if res[0].Chunk.UUID != "iface-uuid-1" {
+		t.Errorf("expected iface-uuid-1, got %s", res[0].Chunk.UUID)
+	}
+}
+
 func TestHybridSearch(t *testing.T) {
 	tempDir, err := os.MkdirTemp("", "seek-engine-test")
 	if err != nil {

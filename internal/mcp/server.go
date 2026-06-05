@@ -347,7 +347,7 @@ func handleToolCall(reqID interface{}, name string, args map[string]interface{},
 }
 
 // IndexSingleFile indexes a single file instead of a directory.
-func IndexSingleFile(dbClient *db.DB, embedder *engine.EmbeddingsGenerator, path string) (string, error) {
+func IndexSingleFile(dbClient *db.DB, embedder engine.Embedder, path string) (string, error) {
 	return engine.IndexFile(dbClient, embedder, path)
 }
 
