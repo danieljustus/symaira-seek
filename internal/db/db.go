@@ -46,6 +46,27 @@ type DB struct {
 	conn *sql.DB
 }
 
+// Store is the public surface of the persistence layer used by the MCP and
+// HTTP servers. It exposes the read / search / write operations the
+// servers actually need without leaking the concrete *DB struct or its
+// raw *sql.DB field, which lets tests substitute an in-memory fake.
+type Store interface {
+	Close() error
+	SaveDocument(doc *Document) error
+	DeleteDocument(path string) error
+	GetDocument(path string) (*Document, error)
+	ListDocuments() ([]*Document, error)
+	SaveChunks(chunks []*Chunk) error
+	GetChunksForDocument(docPath string) ([]*Chunk, error)
+	GetStats() (*Stats, error)
+	SearchBM25(queryStr string, limit int) ([]*SearchResult, error)
+	SearchVector(queryVec []float32, limit int) ([]*SearchResult, error)
+	SearchVectorFiltered(queryVec []float32, candidateIDs []int64, limit int) ([]*SearchResult, error)
+}
+
+// Compile-time check that *DB satisfies Store.
+var _ Store = (*DB)(nil)
+
 // Float32SliceToBytes converts a slice of float32 to a byte slice using standard bitwise math.
 func Float32SliceToBytes(slice []float32) []byte {
 	buf := make([]byte, len(slice)*4)
@@ -393,8 +414,30 @@ func (db *DB) SearchBM25(queryStr string, limit int) ([]*SearchResult, error) {
 // enough; users with very large indexes can pre-filter results via BM25
 // before running vector search.
 func (db *DB) SearchVector(queryVec []float32, limit int) ([]*SearchResult, error) {
+	return db.searchVectorRange(queryVec, nil, limit)
+}
+
+// SearchVectorFiltered is like SearchVector but only scans the chunks whose
+// IDs are present in candidateIDs. It is the BM25-pre-filtered path used by
+// SearchHybrid to keep the vector scan linear in the number of keyword
+// candidates rather than the total chunk count. An empty candidateIDs slice
+// triggers a full scan, matching the unfiltered behavior.
+func (db *DB) SearchVectorFiltered(queryVec []float32, candidateIDs []int64, limit int) ([]*SearchResult, error) {
+	return db.searchVectorRange(queryVec, candidateIDs, limit)
+}
+
+func (db *DB) searchVectorRange(queryVec []float32, candidateIDs []int64, limit int) ([]*SearchResult, error) {
 	const vectorBatchSize = 500
 	var topK []*scoredEntry
+
+	// Build a fast lookup set so we can filter the linear scan without
+	// issuing a JOIN that would force FTS5 / chunks_fts back into the
+	// query path. nil candidateIDs means "no pre-filter".
+	candidateSet := make(map[int64]struct{}, len(candidateIDs))
+	for _, id := range candidateIDs {
+		candidateSet[id] = struct{}{}
+	}
+	hasFilter := len(candidateSet) > 0
 
 	offset := 0
 	for {
@@ -414,6 +457,12 @@ func (db *DB) SearchVector(queryVec []float32, limit int) ([]*SearchResult, erro
 			if err := rows.Scan(&id, &embBytes, &norm); err != nil {
 				rows.Close()
 				return nil, err
+			}
+
+			if hasFilter {
+				if _, ok := candidateSet[id]; !ok {
+					continue
+				}
 			}
 
 			vec := BytesToFloat32Slice(embBytes)

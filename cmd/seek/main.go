@@ -59,10 +59,7 @@ func main() {
 			}
 			defer dbClient.Close()
 
-			embedder := &engine.EmbeddingsGenerator{
-				OllamaURL: cfg.OllamaURL,
-				Model:     cfg.Model,
-			}
+			embedder := engine.NewEmbeddingsGeneratorWithConfig(cfg.OllamaURL, cfg.Model)
 
 			results, err := engine.SearchHybrid(dbClient, embedder, query, limitFlag)
 			if err != nil {
@@ -110,10 +107,7 @@ func main() {
 			}
 			defer dbClient.Close()
 
-			embedder := &engine.EmbeddingsGenerator{
-				OllamaURL: cfg.OllamaURL,
-				Model:     cfg.Model,
-			}
+			embedder := engine.NewEmbeddingsGeneratorWithConfig(cfg.OllamaURL, cfg.Model)
 
 			if watchFlag {
 				ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -177,24 +171,43 @@ func main() {
 				return err
 			}
 
+			if jsonFlag {
+				enc := json.NewEncoder(os.Stdout)
+				enc.SetIndent("", "  ")
+				return enc.Encode(stats)
+			}
+
 			fmt.Printf("Indexed Documents: %d\n", stats.DocumentCount)
 			fmt.Printf("Indexed Chunks:    %d\n", stats.ChunkCount)
 			fmt.Printf("Database Size:     %s\n", humanize.Bytes(uint64(stats.DatabaseSize)))
 			return nil
 		},
 	}
+	statusCmd.Flags().BoolVar(&jsonFlag, "json", false, "Output stats in JSON format")
 	rootCmd.AddCommand(statusCmd)
 
 	// 4. Config Command
+	var configSetKey string
+	var configSetValue string
 	configCmd := &cobra.Command{
 		Use:   "config",
 		Short: "View and edit settings",
-		Run: func(cmd *cobra.Command, args []string) {
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if configSetKey != "" {
+				if err := setConfigValue(configSetKey, configSetValue); err != nil {
+					return err
+				}
+				fmt.Fprintf(os.Stderr, "Set %s = %s in %s\n", configSetKey, configSetValue, cfgFile)
+				return nil
+			}
+			fmt.Fprintf(os.Stderr, "Config file: %s\n", cfgFile)
 			enc := json.NewEncoder(os.Stdout)
 			enc.SetIndent("", "  ")
-			enc.Encode(cfg)
+			return enc.Encode(cfg)
 		},
 	}
+	configCmd.Flags().StringVar(&configSetKey, "set-key", "", "Set a config key (e.g. ollama_url, model)")
+	configCmd.Flags().StringVar(&configSetValue, "set-value", "", "Value for the config key set via --set-key")
 	rootCmd.AddCommand(configCmd)
 
 	// 5. Version Command
@@ -256,6 +269,22 @@ func initConfig() {
 		data, _ := json.MarshalIndent(cfg, "", "  ")
 		os.WriteFile(cfgFile, data, 0600)
 	}
+}
+
+func setConfigValue(key, value string) error {
+	switch key {
+	case "ollama_url":
+		cfg.OllamaURL = value
+	case "model":
+		cfg.Model = value
+	default:
+		return fmt.Errorf("unknown config key %q (supported: ollama_url, model)", key)
+	}
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(cfgFile, data, 0600)
 }
 
 func startHTTPServer(port int) error {

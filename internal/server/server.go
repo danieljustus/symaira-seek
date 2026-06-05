@@ -7,7 +7,9 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -58,10 +60,7 @@ func StartHTTPServer(port int, ollamaURL, model string) error {
 			}
 		}
 
-		embedder := &engine.EmbeddingsGenerator{
-			OllamaURL: ollamaURL,
-			Model:     model,
-		}
+		embedder := engine.NewEmbeddingsGeneratorWithConfig(ollamaURL, model)
 
 		results, err := engine.SearchHybrid(dbClient, embedder, query, limit)
 		if err != nil {
@@ -93,20 +92,22 @@ func StartHTTPServer(port int, ollamaURL, model string) error {
 			return
 		}
 
-		embedder := &engine.EmbeddingsGenerator{
-			OllamaURL: ollamaURL,
-			Model:     model,
+		absPath, status, err := validateIndexPath(req.Path)
+		if err != nil {
+			http.Error(w, err.Error(), status)
+			return
 		}
 
-		// Run crawl
-		if err := engine.IndexDirectory(dbClient, embedder, req.Path); err != nil {
+		embedder := engine.NewEmbeddingsGeneratorWithConfig(ollamaURL, model)
+
+		if err := engine.IndexDirectory(dbClient, embedder, absPath); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 
 		json.NewEncoder(w).Encode(map[string]string{
 			"status": "indexed",
-			"path":   req.Path,
+			"path":   absPath,
 		})
 	})
 
@@ -148,4 +149,32 @@ func StartHTTPServer(port int, ollamaURL, model string) error {
 
 	fmt.Fprintf(os.Stderr, "HTTP server stopped.\n")
 	return nil
+}
+
+// validateIndexPath normalizes a user-supplied /index path and checks that
+// it is an existing directory under the user's home. The home-boundary
+// check is the security boundary — the daemon is localhost-only, but a
+// malicious local caller must not be able to instruct the indexer to crawl
+// /etc, ~/.ssh, or other sensitive roots.
+func validateIndexPath(reqPath string) (string, int, error) {
+	absPath, err := filepath.Abs(reqPath)
+	if err != nil {
+		return "", http.StatusBadRequest, fmt.Errorf("invalid path: %w", err)
+	}
+	info, err := os.Stat(absPath)
+	if err != nil {
+		return "", http.StatusBadRequest, fmt.Errorf("path does not exist: %w", err)
+	}
+	if !info.IsDir() {
+		return "", http.StatusBadRequest, fmt.Errorf("path is not a directory: %s", absPath)
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", http.StatusInternalServerError, fmt.Errorf("cannot determine home directory: %w", err)
+	}
+	rel, err := filepath.Rel(home, absPath)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return "", http.StatusForbidden, fmt.Errorf("path is outside the allowed root (%s)", home)
+	}
+	return absPath, http.StatusOK, nil
 }
