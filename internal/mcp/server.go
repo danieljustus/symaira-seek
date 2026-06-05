@@ -32,6 +32,14 @@ type JSONRPCResponse struct {
 
 // StartServer starts the MCP server over stdio.
 func StartServer(cfgOllamaURL, cfgModel string) error {
+	dbClient, err := db.Open()
+	if err != nil {
+		return fmt.Errorf("failed to open database: %w", err)
+	}
+	defer dbClient.Close()
+
+	embedder := engine.NewEmbeddingsGeneratorWithConfig(cfgOllamaURL, cfgModel)
+
 	reader := bufio.NewReader(os.Stdin)
 
 	// Suppress any printing to Stdout in packages.
@@ -56,11 +64,11 @@ func StartServer(cfgOllamaURL, cfgModel string) error {
 			continue
 		}
 
-		handleRequest(&req, cfgOllamaURL, cfgModel)
+		handleRequest(&req, dbClient, embedder)
 	}
 }
 
-func handleRequest(req *JSONRPCRequest, ollamaURL, model string) {
+func handleRequest(req *JSONRPCRequest, dbClient *db.DB, embedder engine.Embedder) {
 	switch req.Method {
 	case "initialize":
 		sendResponse(req.ID, map[string]interface{}{
@@ -173,23 +181,14 @@ func handleRequest(req *JSONRPCRequest, ollamaURL, model string) {
 			return
 		}
 
-		handleToolCall(req.ID, params.Name, params.Arguments, ollamaURL, model)
+		handleToolCall(req.ID, params.Name, params.Arguments, dbClient, embedder)
 
 	default:
 		sendError(req.ID, -32601, "Method not found: "+req.Method)
 	}
 }
 
-func handleToolCall(reqID interface{}, name string, args map[string]interface{}, ollamaURL, model string) {
-	dbClient, err := db.Open()
-	if err != nil {
-		sendError(reqID, -32603, "Database error: "+err.Error())
-		return
-	}
-	defer dbClient.Close()
-
-	embedder := engine.NewEmbeddingsGeneratorWithConfig(ollamaURL, model)
-
+func handleToolCall(reqID interface{}, name string, args map[string]interface{}, dbClient *db.DB, embedder engine.Embedder) {
 	switch name {
 	case "search_documents":
 		query, ok := args["query"].(string)
