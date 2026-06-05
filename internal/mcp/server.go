@@ -14,6 +14,8 @@ import (
 	"github.com/danieljustus/symaira-seek/internal/engine"
 )
 
+const jsonRPCMarshalFailureFrame = `{"jsonrpc":"2.0","id":null,"error":{"code":-32603,"message":"internal error: failed to marshal response"}}`
+
 // JSONRPCRequest represents an incoming JSON-RPC 2.0 request.
 type JSONRPCRequest struct {
 	JSONRPC string          `json:"jsonrpc"`
@@ -351,13 +353,11 @@ func IndexSingleFile(dbClient db.Store, embedder engine.Embedder, path string) (
 }
 
 func sendResponse(id interface{}, result interface{}) {
-	resp := JSONRPCResponse{
+	writeJSONRPCFrame(os.Stdout, os.Stderr, JSONRPCResponse{
 		JSONRPC: "2.0",
 		ID:      id,
 		Result:  result,
-	}
-	data, _ := json.Marshal(resp)
-	os.Stdout.Write(append(data, '\n'))
+	})
 }
 
 func sendToolResponse(id interface{}, text string) {
@@ -374,14 +374,22 @@ func sendToolResponse(id interface{}, text string) {
 }
 
 func sendError(id interface{}, code int, message string) {
-	resp := JSONRPCResponse{
+	writeJSONRPCFrame(os.Stdout, os.Stderr, JSONRPCResponse{
 		JSONRPC: "2.0",
 		ID:      id,
 		Error: map[string]interface{}{
 			"code":    code,
 			"message": message,
 		},
+	})
+}
+
+func writeJSONRPCFrame(stdout, stderr io.Writer, resp JSONRPCResponse) {
+	data, err := json.Marshal(resp)
+	if err != nil {
+		fmt.Fprintf(stderr, "mcp: failed to marshal JSON-RPC response: %v\n", err)
+		stdout.Write([]byte(jsonRPCMarshalFailureFrame + "\n"))
+		return
 	}
-	data, _ := json.Marshal(resp)
-	os.Stdout.Write(append(data, '\n'))
+	stdout.Write(append(data, '\n'))
 }
