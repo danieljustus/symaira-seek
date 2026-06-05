@@ -66,6 +66,28 @@ Export structured search results directly to JSON:
 ./seek status
 ```
 
+Export the same stats as JSON for monitoring pipelines:
+```bash
+./seek status --json
+```
+
+### Configuration
+
+`seek` stores its configuration in `~/.config/symaira-seek/config.json` (overridable with `--config`). The file contains the Ollama endpoint URL and the embedding model name.
+
+View the active configuration (the path is printed to stderr):
+```bash
+./seek config
+```
+
+Set a value without editing the file by hand:
+```bash
+./seek config --set-key ollama_url --set-value http://localhost:11434/api/embeddings
+./seek config --set-key model --set-value mxbai-embed-large
+```
+
+The file is rewritten with mode `0600` on every write. Supported keys are `ollama_url` and `model`.
+
 ---
 
 ## MCP Server Integration
