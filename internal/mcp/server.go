@@ -68,7 +68,7 @@ func StartServer(cfgOllamaURL, cfgModel string) error {
 	}
 }
 
-func handleRequest(req *JSONRPCRequest, dbClient *db.DB, embedder engine.Embedder) {
+func handleRequest(req *JSONRPCRequest, dbClient db.Store, embedder engine.Embedder) {
 	switch req.Method {
 	case "initialize":
 		sendResponse(req.ID, map[string]interface{}{
@@ -188,7 +188,7 @@ func handleRequest(req *JSONRPCRequest, dbClient *db.DB, embedder engine.Embedde
 	}
 }
 
-func handleToolCall(reqID interface{}, name string, args map[string]interface{}, dbClient *db.DB, embedder engine.Embedder) {
+func handleToolCall(reqID interface{}, name string, args map[string]interface{}, dbClient db.Store, embedder engine.Embedder) {
 	switch name {
 	case "search_documents":
 		query, ok := args["query"].(string)
@@ -346,7 +346,7 @@ func handleToolCall(reqID interface{}, name string, args map[string]interface{},
 }
 
 // IndexSingleFile indexes a single file instead of a directory.
-func IndexSingleFile(dbClient *db.DB, embedder engine.Embedder, path string) (string, error) {
+func IndexSingleFile(dbClient db.Store, embedder engine.Embedder, path string) (string, error) {
 	return engine.IndexFile(dbClient, embedder, path)
 }
 

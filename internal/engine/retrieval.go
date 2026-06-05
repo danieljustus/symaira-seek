@@ -8,9 +8,10 @@ import (
 )
 
 // SearchHybrid combines BM25 keyword search and semantic vector search using Reciprocal Rank Fusion (RRF).
-// The embedder is consumed through the Embedder interface so callers can
-// pass a mock or alternate implementation in tests.
-func SearchHybrid(dbClient *db.DB, embedder Embedder, query string, limit int) ([]*db.SearchResult, error) {
+// Both the persistence layer and the embedder are consumed through their
+// respective interfaces so callers can pass mocks or alternate
+// implementations in tests.
+func SearchHybrid(dbClient db.Store, embedder Embedder, query string, limit int) ([]*db.SearchResult, error) {
 	if query == "" {
 		return nil, nil
 	}

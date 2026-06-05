@@ -46,6 +46,26 @@ type DB struct {
 	conn *sql.DB
 }
 
+// Store is the public surface of the persistence layer used by the MCP and
+// HTTP servers. It exposes the read / search / write operations the
+// servers actually need without leaking the concrete *DB struct or its
+// raw *sql.DB field, which lets tests substitute an in-memory fake.
+type Store interface {
+	Close() error
+	SaveDocument(doc *Document) error
+	DeleteDocument(path string) error
+	GetDocument(path string) (*Document, error)
+	ListDocuments() ([]*Document, error)
+	SaveChunks(chunks []*Chunk) error
+	GetChunksForDocument(docPath string) ([]*Chunk, error)
+	GetStats() (*Stats, error)
+	SearchBM25(queryStr string, limit int) ([]*SearchResult, error)
+	SearchVector(queryVec []float32, limit int) ([]*SearchResult, error)
+}
+
+// Compile-time check that *DB satisfies Store.
+var _ Store = (*DB)(nil)
+
 // Float32SliceToBytes converts a slice of float32 to a byte slice using standard bitwise math.
 func Float32SliceToBytes(slice []float32) []byte {
 	buf := make([]byte, len(slice)*4)
