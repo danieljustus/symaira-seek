@@ -171,12 +171,19 @@ func main() {
 				return err
 			}
 
+			if jsonFlag {
+				enc := json.NewEncoder(os.Stdout)
+				enc.SetIndent("", "  ")
+				return enc.Encode(stats)
+			}
+
 			fmt.Printf("Indexed Documents: %d\n", stats.DocumentCount)
 			fmt.Printf("Indexed Chunks:    %d\n", stats.ChunkCount)
 			fmt.Printf("Database Size:     %s\n", humanize.Bytes(uint64(stats.DatabaseSize)))
 			return nil
 		},
 	}
+	statusCmd.Flags().BoolVar(&jsonFlag, "json", false, "Output stats in JSON format")
 	rootCmd.AddCommand(statusCmd)
 
 	// 4. Config Command
