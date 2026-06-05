@@ -49,6 +49,44 @@ func TestLocalHashVector(t *testing.T) {
 	}
 }
 
+// TestNewEmbeddingsGeneratorWithConfig is a regression test for issue #29.
+// The factory must return a fully wired EmbeddingsGenerator (HTTP client,
+// LRU cache, mutex) that produces vectors without a nil-pointer panic.
+// Bare struct construction at CLI/MCP/HTTP call sites was the original
+// runtime denial of service and is exercised by no test in this repo.
+func TestNewEmbeddingsGeneratorWithConfig(t *testing.T) {
+	eg := NewEmbeddingsGeneratorWithConfig("http://localhost:11434/api/embeddings", "nomic-embed-text")
+	if eg == nil {
+		t.Fatal("expected non-nil EmbeddingsGenerator")
+	}
+	if eg.OllamaURL == "" {
+		t.Error("expected OllamaURL to be set from config")
+	}
+	if eg.Model == "" {
+		t.Error("expected Model to be set from config")
+	}
+
+	vec := eg.GenerateVector("regression test for #29")
+	if len(vec) != 768 {
+		t.Errorf("expected 768-dim vector, got %d", len(vec))
+	}
+
+	vec2 := eg.GenerateVector("regression test for #29")
+	if len(vec2) != 768 {
+		t.Errorf("expected cached vector of 768-dim, got %d", len(vec2))
+	}
+
+	batch := eg.GenerateVectors([]string{"alpha", "beta", "gamma"})
+	if len(batch) != 3 {
+		t.Errorf("expected 3 vectors from batch, got %d", len(batch))
+	}
+	for i, v := range batch {
+		if len(v) != 768 {
+			t.Errorf("batch index %d: expected 768-dim vector, got %d", i, len(v))
+		}
+	}
+}
+
 func TestHybridSearch(t *testing.T) {
 	tempDir, err := os.MkdirTemp("", "seek-engine-test")
 	if err != nil {

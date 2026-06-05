@@ -42,6 +42,17 @@ func NewEmbeddingsGenerator() *EmbeddingsGenerator {
 	}
 }
 
+// NewEmbeddingsGeneratorWithConfig builds an EmbeddingsGenerator pre-configured
+// with the given Ollama endpoint and model name. It performs the same internal
+// initialization as NewEmbeddingsGenerator (HTTP client, LRU cache, mutex) so
+// callers can construct one without depending on the unexported fields.
+func NewEmbeddingsGeneratorWithConfig(ollamaURL, model string) *EmbeddingsGenerator {
+	eg := NewEmbeddingsGenerator()
+	eg.OllamaURL = ollamaURL
+	eg.Model = model
+	return eg
+}
+
 // GenerateVector produces a 768-dimensional normalized embedding vector.
 // Uses an LRU in-memory cache to avoid recomputing embeddings for repeated text.
 // Queries Ollama first, falling back to local deterministic hashing if offline.

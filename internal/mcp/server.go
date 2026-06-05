@@ -188,10 +188,7 @@ func handleToolCall(reqID interface{}, name string, args map[string]interface{},
 	}
 	defer dbClient.Close()
 
-	embedder := &engine.EmbeddingsGenerator{
-		OllamaURL: ollamaURL,
-		Model:     model,
-	}
+	embedder := engine.NewEmbeddingsGeneratorWithConfig(ollamaURL, model)
 
 	switch name {
 	case "search_documents":

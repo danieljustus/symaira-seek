@@ -59,10 +59,7 @@ func main() {
 			}
 			defer dbClient.Close()
 
-			embedder := &engine.EmbeddingsGenerator{
-				OllamaURL: cfg.OllamaURL,
-				Model:     cfg.Model,
-			}
+			embedder := engine.NewEmbeddingsGeneratorWithConfig(cfg.OllamaURL, cfg.Model)
 
 			results, err := engine.SearchHybrid(dbClient, embedder, query, limitFlag)
 			if err != nil {
@@ -110,10 +107,7 @@ func main() {
 			}
 			defer dbClient.Close()
 
-			embedder := &engine.EmbeddingsGenerator{
-				OllamaURL: cfg.OllamaURL,
-				Model:     cfg.Model,
-			}
+			embedder := engine.NewEmbeddingsGeneratorWithConfig(cfg.OllamaURL, cfg.Model)
 
 			if watchFlag {
 				ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

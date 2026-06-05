@@ -58,10 +58,7 @@ func StartHTTPServer(port int, ollamaURL, model string) error {
 			}
 		}
 
-		embedder := &engine.EmbeddingsGenerator{
-			OllamaURL: ollamaURL,
-			Model:     model,
-		}
+		embedder := engine.NewEmbeddingsGeneratorWithConfig(ollamaURL, model)
 
 		results, err := engine.SearchHybrid(dbClient, embedder, query, limit)
 		if err != nil {
@@ -93,10 +90,7 @@ func StartHTTPServer(port int, ollamaURL, model string) error {
 			return
 		}
 
-		embedder := &engine.EmbeddingsGenerator{
-			OllamaURL: ollamaURL,
-			Model:     model,
-		}
+		embedder := engine.NewEmbeddingsGeneratorWithConfig(ollamaURL, model)
 
 		// Run crawl
 		if err := engine.IndexDirectory(dbClient, embedder, req.Path); err != nil {
