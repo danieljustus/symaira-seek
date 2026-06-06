@@ -22,7 +22,11 @@ import (
 	"github.com/danieljustus/symaira-seek/internal/server"
 )
 
-const version = "0.1.0"
+// version is the build-time version string, intended to be
+// overridden via -ldflags at build time (issue #48). The default
+// reports a development build marker so an un-overridden binary
+// still prints a meaningful value.
+var version = "0.1.0-dev"
 
 // Config holds user configuration.
 type Config struct {
