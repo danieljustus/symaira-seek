@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -72,21 +73,7 @@ func main() {
 				return enc.Encode(results)
 			}
 
-			if len(results) == 0 {
-				fmt.Fprintln(os.Stderr, "No matching documents found.")
-				return nil
-			}
-
-			for idx, r := range results {
-				fmt.Printf("[%d] Path: %s (Chunk Index: %d)\n", idx+1, r.Chunk.DocumentPath, r.Chunk.ChunkIndex)
-				fmt.Printf("    Score: RRF=%.4f Cosine=%.4f (Ranks: BM25=%d Vector=%d)\n", r.RRFScore, r.CosineScore, r.BM25Rank, r.VectorRank)
-				fmt.Println("    --- Content ---")
-				for _, line := range strings.Split(r.Chunk.Content, "\n") {
-					fmt.Printf("    %s\n", line)
-				}
-				fmt.Println("    ----------------")
-				fmt.Println()
-			}
+			writeSearchHuman(os.Stderr, results)
 			return nil
 		},
 	}
@@ -320,4 +307,21 @@ func startHTTPServer(port int) error {
 
 func startMCPServer() error {
 	return mcp.StartServer(cfg.OllamaURL, cfg.Model)
+}
+
+func writeSearchHuman(w io.Writer, results []*db.SearchResult) {
+	if len(results) == 0 {
+		fmt.Fprintln(w, "No matching documents found.")
+		return
+	}
+	for idx, r := range results {
+		fmt.Fprintf(w, "[%d] Path: %s (Chunk Index: %d)\n", idx+1, r.Chunk.DocumentPath, r.Chunk.ChunkIndex)
+		fmt.Fprintf(w, "    Score: RRF=%.4f Cosine=%.4f (Ranks: BM25=%d Vector=%d)\n", r.RRFScore, r.CosineScore, r.BM25Rank, r.VectorRank)
+		fmt.Fprintln(w, "    --- Content ---")
+		for _, line := range strings.Split(r.Chunk.Content, "\n") {
+			fmt.Fprintf(w, "    %s\n", line)
+		}
+		fmt.Fprintln(w, "    ----------------")
+		fmt.Fprintln(w)
+	}
 }
