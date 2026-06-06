@@ -9,6 +9,129 @@ import (
 	"github.com/danieljustus/symaira-seek/internal/db"
 )
 
+// TestApplyIncrementalChangesTouchesOnlyChangedFiles is a regression
+// test for issue #46.
+func TestApplyIncrementalChangesTouchesOnlyChangedFiles(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "seek-inc-test")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	originalHome := os.Getenv("HOME")
+	os.Setenv("HOME", tempDir)
+	defer os.Setenv("HOME", originalHome)
+
+	dbClient, err := db.Open()
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer dbClient.Close()
+
+	embedder := NewEmbeddingsGenerator()
+
+	docsDir := filepath.Join(tempDir, "docs")
+	if err := os.MkdirAll(docsDir, 0755); err != nil {
+		t.Fatalf("failed to create docs dir: %v", err)
+	}
+	untouched := filepath.Join(docsDir, "untouched.md")
+	if err := os.WriteFile(untouched, []byte("untouched original content"), 0644); err != nil {
+		t.Fatalf("failed to write untouched.md: %v", err)
+	}
+	changed := filepath.Join(docsDir, "changed.md")
+	if err := os.WriteFile(changed, []byte("changed original content"), 0644); err != nil {
+		t.Fatalf("failed to write changed.md: %v", err)
+	}
+
+	if err := IndexDirectory(dbClient, embedder, docsDir); err != nil {
+		t.Fatalf("initial IndexDirectory failed: %v", err)
+	}
+
+	untouchedDoc, err := dbClient.GetDocument(untouched)
+	if err != nil || untouchedDoc == nil {
+		t.Fatalf("expected untouched.md to be indexed before edit, err=%v doc=%v", err, untouchedDoc)
+	}
+	originalUntouchedHash := untouchedDoc.Hash
+
+	if err := os.WriteFile(changed, []byte("changed updated content"), 0644); err != nil {
+		t.Fatalf("failed to update changed.md: %v", err)
+	}
+
+	changes := map[string]struct{}{changed: {}}
+	if err := applyIncrementalChanges(dbClient, embedder, docsDir, changes); err != nil {
+		t.Fatalf("applyIncrementalChanges failed: %v", err)
+	}
+
+	untouchedAfter, err := dbClient.GetDocument(untouched)
+	if err != nil || untouchedAfter == nil {
+		t.Fatalf("untouched.md missing after incremental change: err=%v doc=%v", err, untouchedAfter)
+	}
+	if untouchedAfter.Hash != originalUntouchedHash {
+		t.Errorf("incremental change touched the unrelated file: hash %q -> %q",
+			originalUntouchedHash, untouchedAfter.Hash)
+	}
+
+	changedAfter, err := dbClient.GetDocument(changed)
+	if err != nil || changedAfter == nil {
+		t.Fatalf("changed.md missing after incremental change: err=%v doc=%v", err, changedAfter)
+	}
+	if changedAfter.Hash == originalUntouchedHash {
+		t.Errorf("expected changed.md to be re-indexed with a new hash")
+	}
+}
+
+// TestApplyIncrementalChangesDropsMissingFiles is a regression test
+// for issue #46.
+func TestApplyIncrementalChangesDropsMissingFiles(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "seek-inc-orphan-test")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	originalHome := os.Getenv("HOME")
+	os.Setenv("HOME", tempDir)
+	defer os.Setenv("HOME", originalHome)
+
+	dbClient, err := db.Open()
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer dbClient.Close()
+
+	embedder := NewEmbeddingsGenerator()
+
+	docsDir := filepath.Join(tempDir, "docs")
+	if err := os.MkdirAll(docsDir, 0755); err != nil {
+		t.Fatalf("failed to create docs dir: %v", err)
+	}
+	doomed := filepath.Join(docsDir, "doomed.md")
+	if err := os.WriteFile(doomed, []byte("doomed content"), 0644); err != nil {
+		t.Fatalf("failed to write doomed.md: %v", err)
+	}
+	if err := IndexDirectory(dbClient, embedder, docsDir); err != nil {
+		t.Fatalf("IndexDirectory failed: %v", err)
+	}
+
+	if doc, err := dbClient.GetDocument(doomed); err != nil || doc == nil {
+		t.Fatalf("expected doomed.md to be indexed: err=%v doc=%v", err, doc)
+	}
+
+	if err := os.Remove(doomed); err != nil {
+		t.Fatalf("failed to delete doomed.md: %v", err)
+	}
+	changes := map[string]struct{}{doomed: {}}
+	if err := applyIncrementalChanges(dbClient, embedder, docsDir, changes); err != nil {
+		t.Fatalf("applyIncrementalChanges failed: %v", err)
+	}
+
+	if doc, err := dbClient.GetDocument(doomed); err != nil {
+		t.Fatalf("GetDocument after delete: %v", err)
+	} else if doc != nil {
+		t.Errorf("expected doomed.md to be removed from index, still present: %+v", doc)
+	}
+}
+
 func TestIndexDirectory(t *testing.T) {
 	tempDir, err := os.MkdirTemp("", "seek-sync-test")
 	if err != nil {
