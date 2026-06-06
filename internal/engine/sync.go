@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -88,13 +89,7 @@ func IndexDirectory(dbClient db.Store, embedder Embedder, dirPath string) error 
 		return fmt.Errorf("failed listing existing documents: %w", err)
 	}
 
-	// 3. Process new and changed files
-	for path := range foundPaths {
-		if _, err := IndexFile(dbClient, embedder, path); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: %v\n", err)
-			continue
-		}
-	}
+	processFilesInParallel(dbClient, embedder, foundPaths)
 
 	// 4. Orphan detection: delete DB documents that no longer exist on disk
 	for _, doc := range existingDocs {
@@ -338,5 +333,130 @@ func applyIncrementalChanges(dbClient db.Store, embedder Embedder, absPath strin
 	if indexed > 0 || removed > 0 {
 		fmt.Fprintf(os.Stderr, "Watch: indexed=%d removed=%d\n", indexed, removed)
 	}
+	return nil
+}
+
+var indexParallelism = func() int {
+	n := runtime.NumCPU()
+	if n < 2 {
+		return 2
+	}
+	if n > 8 {
+		return 8
+	}
+	return n
+}()
+
+func processFilesInParallel(dbClient db.Store, embedder Embedder, paths map[string]bool) {
+	if len(paths) == 0 {
+		return
+	}
+
+	workers := indexParallelism
+	if workers > len(paths) {
+		workers = len(paths)
+	}
+
+	type result struct {
+		path   string
+		chunks []*db.Chunk
+		doc    *db.Document
+		err    error
+	}
+
+	jobs := make(chan string, len(paths))
+	prepared := make(chan result, len(paths))
+
+	for p := range paths {
+		jobs <- p
+	}
+	close(jobs)
+
+	var prepWG sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		prepWG.Add(1)
+		go func() {
+			defer prepWG.Done()
+			for path := range jobs {
+				chunks, doc, err := prepareIndex(embedder, path)
+				prepared <- result{path: path, chunks: chunks, doc: doc, err: err}
+			}
+		}()
+	}
+
+	go func() {
+		prepWG.Wait()
+		close(prepared)
+	}()
+
+	for r := range prepared {
+		if r.err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: %v\n", r.err)
+			continue
+		}
+		if err := commitIndex(dbClient, r.path, r.chunks, r.doc); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: %v\n", err)
+			continue
+		}
+	}
+}
+
+func prepareIndex(embedder Embedder, path string) ([]*db.Chunk, *db.Document, error) {
+	currentHash, err := parser.GetFileHash(path)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to compute hash for %s: %w", path, err)
+	}
+
+	content, err := parser.ParseFile(path)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to parse %s: %w", path, err)
+	}
+
+	textChunks := parser.SplitText(content, 1000, 200)
+	embeddings := embedder.GenerateVectors(textChunks)
+
+	chunks := make([]*db.Chunk, 0, len(textChunks))
+	for idx, tc := range textChunks {
+		hashSum := sha256.Sum256([]byte(tc))
+		chunkHash := hex.EncodeToString(hashSum[:])
+		chunks = append(chunks, &db.Chunk{
+			UUID:         uuid.New().String(),
+			DocumentPath: path,
+			ChunkIndex:   idx,
+			Content:      tc,
+			Embedding:    embeddings[idx],
+			Hash:         chunkHash,
+		})
+	}
+
+	return chunks, &db.Document{
+		Path:      path,
+		Hash:      currentHash,
+		UpdatedAt: time.Now(),
+	}, nil
+}
+
+func commitIndex(dbClient db.Store, path string, chunks []*db.Chunk, doc *db.Document) error {
+	existing, err := dbClient.GetDocument(path)
+	if err != nil {
+		return fmt.Errorf("failed to query document from DB: %w", err)
+	}
+	if existing != nil {
+		if existing.Hash == doc.Hash {
+			return nil
+		}
+		if err := dbClient.DeleteDocument(path); err != nil {
+			return fmt.Errorf("failed to delete old document version: %w", err)
+		}
+	}
+
+	if err := dbClient.SaveDocument(doc); err != nil {
+		return fmt.Errorf("failed to save document metadata: %w", err)
+	}
+	if err := dbClient.SaveChunks(chunks); err != nil {
+		return fmt.Errorf("failed to save chunks: %w", err)
+	}
+
+	fmt.Fprintf(os.Stderr, "Indexed: %s (%d chunks)\n", path, len(chunks))
 	return nil
 }

@@ -122,6 +122,12 @@ func Open() (*DB, error) {
 		conn.Close()
 		return nil, fmt.Errorf("failed to enable foreign keys: %w", err)
 	}
+	// Allow concurrent writers (issue #50) to wait for the WAL
+	// write lock instead of failing immediately with SQLITE_BUSY.
+	if _, err := conn.Exec("PRAGMA busy_timeout=5000;"); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("failed to set busy timeout: %w", err)
+	}
 
 	db := &DB{conn: conn}
 	if err := db.initSchema(); err != nil {
