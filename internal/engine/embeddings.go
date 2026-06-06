@@ -392,13 +392,19 @@ func GenerateLocalHashVector(text string, dimensions int) []float32 {
 	return vec
 }
 
+// stopWords is the multilingual stop-word set consulted by
+// isStopWord. It is intentionally read-only after package init so
+// the lookup is a single hash-map probe with no per-call allocation
+// (issue #47).
+var stopWords = map[string]struct{}{
+	"and": {}, "the": {}, "a": {}, "an": {}, "of": {}, "to": {}, "in": {}, "is": {}, "it": {}, "that": {},
+	"und": {}, "der": {}, "die": {}, "das": {}, "ein": {}, "eine": {}, "ist": {}, "es": {}, "dass": {},
+	"von": {}, "zu": {}, "mit": {}, "auf": {}, "für": {}, "den": {}, "dem": {}, "des": {}, "im": {}, "am": {},
+}
+
 func isStopWord(w string) bool {
-	stops := map[string]bool{
-		"and": true, "the": true, "a": true, "an": true, "of": true, "to": true, "in": true, "is": true, "it": true, "that": true,
-		"und": true, "der": true, "die": true, "das": true, "ein": true, "eine": true, "ist": true, "es": true, "dass": true,
-		"von": true, "zu": true, "mit": true, "auf": true, "für": true, "den": true, "dem": true, "des": true, "im": true, "am": true,
-	}
-	return stops[w]
+	_, ok := stopWords[w]
+	return ok
 }
 
 // hashKey returns a hex-encoded SHA-256 hash of the input text, truncated

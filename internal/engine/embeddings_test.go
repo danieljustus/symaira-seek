@@ -231,3 +231,27 @@ func TestQueryOllama_Retries5xx(t *testing.T) {
 		t.Errorf("expected 3-dim vector, got %d", len(vec))
 	}
 }
+
+// TestIsStopWordUsesPackageMap is a regression test for issue #47.
+// The stop-word set must be consulted from the package-level map
+// rather than rebuilt on every call. The set must still classify
+// known stop words (English and German) and reject ordinary tokens.
+func TestIsStopWordUsesPackageMap(t *testing.T) {
+	stopSamples := []string{
+		"and", "the", "a", "an", "of", "to", "in", "is", "it", "that",
+		"und", "der", "die", "das", "ein", "eine", "ist", "es", "dass",
+		"von", "zu", "mit", "auf", "für", "den", "dem", "des", "im", "am",
+	}
+	for _, w := range stopSamples {
+		if !isStopWord(w) {
+			t.Errorf("expected %q to be classified as a stop word", w)
+		}
+	}
+
+	nonStop := []string{"falcon", "database", "golang", "symaira", "search"}
+	for _, w := range nonStop {
+		if isStopWord(w) {
+			t.Errorf("expected %q to NOT be classified as a stop word", w)
+		}
+	}
+}
