@@ -251,23 +251,50 @@ func initConfig() {
 			os.Exit(1)
 		}
 		cfgDir := filepath.Join(home, ".config", "symaira-seek")
-		os.MkdirAll(cfgDir, 0755)
+		if err := os.MkdirAll(cfgDir, 0755); err != nil {
+			fmt.Fprintf(os.Stderr, "seek: could not create config directory %s: %v\n", cfgDir, err)
+		}
 		cfgFile = filepath.Join(cfgDir, "config.json")
 	}
 
-	// Set defaults
-	cfg = Config{
+	cfg = loadOrInitConfig(cfgFile)
+}
+
+func defaultConfig() Config {
+	return Config{
 		OllamaURL: "http://localhost:11434/api/embeddings",
 		Model:     "nomic-embed-text",
 	}
+}
 
-	data, err := os.ReadFile(cfgFile)
-	if err == nil {
-		json.Unmarshal(data, &cfg)
-	} else {
-		// Save default configuration
-		data, _ := json.MarshalIndent(cfg, "", "  ")
-		os.WriteFile(cfgFile, data, 0600)
+func loadOrInitConfig(path string) Config {
+	cfg := defaultConfig()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			fmt.Fprintf(os.Stderr, "seek: could not read config %s: %v; using built-in defaults\n", path, err)
+			return cfg
+		}
+		writeDefaultConfig(path, cfg)
+		return cfg
+	}
+
+	if uErr := json.Unmarshal(data, &cfg); uErr != nil {
+		fmt.Fprintf(os.Stderr, "seek: config %s is malformed (%v); using built-in defaults\n", path, uErr)
+		return defaultConfig()
+	}
+	return cfg
+}
+
+func writeDefaultConfig(path string, cfg Config) {
+	out, mErr := json.MarshalIndent(cfg, "", "  ")
+	if mErr != nil {
+		fmt.Fprintf(os.Stderr, "seek: could not marshal default config: %v\n", mErr)
+		return
+	}
+	if wErr := os.WriteFile(path, out, 0600); wErr != nil {
+		fmt.Fprintf(os.Stderr, "seek: could not write default config to %s: %v\n", path, wErr)
 	}
 }
 
