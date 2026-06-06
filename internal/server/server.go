@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -10,12 +11,53 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/danieljustus/symaira-seek/internal/db"
 	"github.com/danieljustus/symaira-seek/internal/engine"
 )
+
+const (
+	maxHeaderBytes    = 1 << 20
+	maxIndexBodyBytes = 1 << 20
+	indexCooldown     = 5 * time.Second
+)
+
+type rateLimiter struct {
+	mu       sync.Mutex
+	cooldown time.Duration
+	lastSeen map[string]time.Time
+}
+
+func newRateLimiter(cooldown time.Duration) *rateLimiter {
+	return &rateLimiter{
+		cooldown: cooldown,
+		lastSeen: make(map[string]time.Time),
+	}
+}
+
+func (r *rateLimiter) Allow(key string, now time.Time) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if t, ok := r.lastSeen[key]; ok && now.Sub(t) < r.cooldown {
+		return false
+	}
+	r.lastSeen[key] = now
+	if len(r.lastSeen) > 1024 {
+		r.evictStaleLocked(now)
+	}
+	return true
+}
+
+func (r *rateLimiter) evictStaleLocked(now time.Time) {
+	for k, t := range r.lastSeen {
+		if now.Sub(t) >= r.cooldown {
+			delete(r.lastSeen, k)
+		}
+	}
+}
 
 // StartHTTPServer runs the local HTTP REST daemon.
 func StartHTTPServer(port int, ollamaURL, model string) error {
@@ -72,17 +114,28 @@ func StartHTTPServer(port int, ollamaURL, model string) error {
 	})
 
 	// 4. Index folder endpoint
+	indexLimiter := newRateLimiter(indexCooldown)
 	mux.HandleFunc("/index", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+		if !indexLimiter.Allow(r.RemoteAddr, time.Now()) {
+			http.Error(w, "rate limit exceeded for /index", http.StatusTooManyRequests)
+			return
+		}
 
+		r.Body = http.MaxBytesReader(w, r.Body, maxIndexBodyBytes)
 		var req struct {
 			Path string `json:"path"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			var maxErr *http.MaxBytesError
+			if errors.As(err, &maxErr) {
+				http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+				return
+			}
 			http.Error(w, "bad request body: "+err.Error(), http.StatusBadRequest)
 			return
 		}
@@ -115,11 +168,12 @@ func StartHTTPServer(port int, ollamaURL, model string) error {
 	fmt.Fprintf(os.Stderr, "HTTP daemon listening on http://%s...\n", addr)
 
 	srv := &http.Server{
-		Addr:         addr,
-		Handler:      mux,
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 15 * time.Second,
-		IdleTimeout:  60 * time.Second,
+		Addr:           addr,
+		Handler:        mux,
+		ReadTimeout:    15 * time.Second,
+		WriteTimeout:   15 * time.Second,
+		IdleTimeout:    60 * time.Second,
+		MaxHeaderBytes: maxHeaderBytes,
 	}
 
 	errCh := make(chan error, 1)

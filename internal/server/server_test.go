@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // withTempHome points HOME at a temporary directory for the duration of a
@@ -83,5 +84,49 @@ func TestValidateIndexPath_RejectsPathOutsideHome(t *testing.T) {
 		if !strings.Contains(err.Error(), "allowed root") {
 			t.Fatalf("expected error to mention allowed root, got %q", err.Error())
 		}
+	}
+}
+
+func TestRateLimiter_FirstRequestAllowed(t *testing.T) {
+	rl := newRateLimiter(100 * time.Millisecond)
+	now := time.Now()
+	if !rl.Allow("client-a", now) {
+		t.Fatal("first request from a key must be allowed")
+	}
+}
+
+func TestRateLimiter_BlocksWithinCooldown(t *testing.T) {
+	rl := newRateLimiter(100 * time.Millisecond)
+	now := time.Now()
+	if !rl.Allow("client-a", now) {
+		t.Fatal("first request must be allowed")
+	}
+	if rl.Allow("client-a", now.Add(50*time.Millisecond)) {
+		t.Fatal("second request within cooldown must be blocked")
+	}
+}
+
+func TestRateLimiter_AllowsAfterCooldown(t *testing.T) {
+	rl := newRateLimiter(50 * time.Millisecond)
+	now := time.Now()
+	if !rl.Allow("client-a", now) {
+		t.Fatal("first request must be allowed")
+	}
+	if !rl.Allow("client-a", now.Add(100*time.Millisecond)) {
+		t.Fatal("request after cooldown must be allowed")
+	}
+}
+
+func TestRateLimiter_KeysAreIsolated(t *testing.T) {
+	rl := newRateLimiter(1 * time.Second)
+	now := time.Now()
+	if !rl.Allow("client-a", now) {
+		t.Fatal("first request from a must be allowed")
+	}
+	if !rl.Allow("client-b", now) {
+		t.Fatal("first request from b must be allowed, even when a is rate-limited")
+	}
+	if rl.Allow("client-a", now) {
+		t.Fatal("a must remain rate-limited until cooldown elapses")
 	}
 }
