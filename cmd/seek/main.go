@@ -8,8 +8,10 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/dustin/go-humanize"
 	"github.com/spf13/cobra"
@@ -24,8 +26,11 @@ const version = "0.1.0"
 
 // Config holds user configuration.
 type Config struct {
-	OllamaURL string `json:"ollama_url"`
-	Model     string `json:"model"`
+	OllamaURL      string `json:"ollama_url"`
+	Model          string `json:"model"`
+	TimeoutSeconds int    `json:"timeout_seconds"`
+	RetryCount     int    `json:"retry_count"`
+	RetryBackoffMS int    `json:"retry_backoff_ms"`
 }
 
 var (
@@ -60,7 +65,7 @@ func main() {
 			}
 			defer dbClient.Close()
 
-			embedder := engine.NewEmbeddingsGeneratorWithConfig(cfg.OllamaURL, cfg.Model)
+			embedder := engine.NewEmbeddingsGeneratorWithOllamaConfig(cfg.ollamaConfig())
 
 			results, err := engine.SearchHybrid(dbClient, embedder, query, limitFlag)
 			if err != nil {
@@ -94,7 +99,7 @@ func main() {
 			}
 			defer dbClient.Close()
 
-			embedder := engine.NewEmbeddingsGeneratorWithConfig(cfg.OllamaURL, cfg.Model)
+			embedder := engine.NewEmbeddingsGeneratorWithOllamaConfig(cfg.ollamaConfig())
 
 			if watchFlag {
 				ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -249,8 +254,21 @@ func initConfig() {
 
 func defaultConfig() Config {
 	return Config{
-		OllamaURL: "http://localhost:11434/api/embeddings",
-		Model:     "nomic-embed-text",
+		OllamaURL:      "http://localhost:11434/api/embeddings",
+		Model:          "nomic-embed-text",
+		TimeoutSeconds: 120,
+		RetryCount:     2,
+		RetryBackoffMS: 500,
+	}
+}
+
+func (c Config) ollamaConfig() engine.OllamaConfig {
+	return engine.OllamaConfig{
+		URL:          c.OllamaURL,
+		Model:        c.Model,
+		Timeout:      time.Duration(c.TimeoutSeconds) * time.Second,
+		RetryCount:   c.RetryCount,
+		RetryBackoff: time.Duration(c.RetryBackoffMS) * time.Millisecond,
 	}
 }
 
@@ -291,8 +309,26 @@ func setConfigValue(key, value string) error {
 		cfg.OllamaURL = value
 	case "model":
 		cfg.Model = value
+	case "timeout_seconds":
+		n, err := strconv.Atoi(value)
+		if err != nil || n <= 0 {
+			return fmt.Errorf("invalid %s value %q (must be a positive integer)", key, value)
+		}
+		cfg.TimeoutSeconds = n
+	case "retry_count":
+		n, err := strconv.Atoi(value)
+		if err != nil || n < 0 {
+			return fmt.Errorf("invalid %s value %q (must be a non-negative integer)", key, value)
+		}
+		cfg.RetryCount = n
+	case "retry_backoff_ms":
+		n, err := strconv.Atoi(value)
+		if err != nil || n <= 0 {
+			return fmt.Errorf("invalid %s value %q (must be a positive integer)", key, value)
+		}
+		cfg.RetryBackoffMS = n
 	default:
-		return fmt.Errorf("unknown config key %q (supported: ollama_url, model)", key)
+		return fmt.Errorf("unknown config key %q (supported: ollama_url, model, timeout_seconds, retry_count, retry_backoff_ms)", key)
 	}
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
@@ -302,11 +338,11 @@ func setConfigValue(key, value string) error {
 }
 
 func startHTTPServer(port int) error {
-	return server.StartHTTPServer(port, cfg.OllamaURL, cfg.Model)
+	return server.StartHTTPServer(port, cfg.ollamaConfig())
 }
 
 func startMCPServer() error {
-	return mcp.StartServer(cfg.OllamaURL, cfg.Model)
+	return mcp.StartServer(cfg.ollamaConfig())
 }
 
 func writeSearchHuman(w io.Writer, results []*db.SearchResult) {

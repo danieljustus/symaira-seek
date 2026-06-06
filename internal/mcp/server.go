@@ -33,14 +33,14 @@ type JSONRPCResponse struct {
 }
 
 // StartServer starts the MCP server over stdio.
-func StartServer(cfgOllamaURL, cfgModel string) error {
+func StartServer(cfg engine.OllamaConfig) error {
 	dbClient, err := db.Open()
 	if err != nil {
 		return fmt.Errorf("failed to open database: %w", err)
 	}
 	defer dbClient.Close()
 
-	embedder := engine.NewEmbeddingsGeneratorWithConfig(cfgOllamaURL, cfgModel)
+	embedder := engine.NewEmbeddingsGeneratorWithOllamaConfig(cfg)
 
 	reader := bufio.NewReader(os.Stdin)
 

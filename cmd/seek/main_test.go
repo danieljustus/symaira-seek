@@ -120,8 +120,43 @@ func TestDefaultConfig_StableValues(t *testing.T) {
 	if got.Model == "" {
 		t.Error("default Model must be non-empty")
 	}
+	if got.TimeoutSeconds <= 0 {
+		t.Error("default TimeoutSeconds must be positive")
+	}
+	if got.RetryCount < 0 {
+		t.Error("default RetryCount must be non-negative")
+	}
+	if got.RetryBackoffMS <= 0 {
+		t.Error("default RetryBackoffMS must be positive")
+	}
 	if got != defaultConfig() {
 		t.Error("defaultConfig must be deterministic")
+	}
+}
+
+func TestConfig_OllamaConfig(t *testing.T) {
+	c := Config{
+		OllamaURL:      "http://x.test/api",
+		Model:          "m",
+		TimeoutSeconds: 30,
+		RetryCount:     4,
+		RetryBackoffMS: 250,
+	}
+	oc := c.ollamaConfig()
+	if oc.URL != c.OllamaURL {
+		t.Errorf("URL: got %q, want %q", oc.URL, c.OllamaURL)
+	}
+	if oc.Model != c.Model {
+		t.Errorf("Model: got %q, want %q", oc.Model, c.Model)
+	}
+	if oc.Timeout.Seconds() != 30 {
+		t.Errorf("Timeout: got %v, want 30s", oc.Timeout)
+	}
+	if oc.RetryCount != 4 {
+		t.Errorf("RetryCount: got %d, want 4", oc.RetryCount)
+	}
+	if oc.RetryBackoff.Milliseconds() != 250 {
+		t.Errorf("RetryBackoff: got %v, want 250ms", oc.RetryBackoff)
 	}
 }
 
@@ -159,6 +194,56 @@ func TestWriteSearchHuman_OneResultRendersToWriter(t *testing.T) {
 	}
 	if !strings.Contains(out, "first line") || !strings.Contains(out, "second line") {
 		t.Errorf("expected chunk content lines in output, got %q", out)
+	}
+}
+
+func TestSetConfigValue_AcceptsTimeoutSeconds(t *testing.T) {
+	dir := t.TempDir()
+	cfgFile = filepath.Join(dir, "config.json")
+	cfg = defaultConfig()
+	defer func() { cfg = defaultConfig() }()
+
+	if err := setConfigValue("timeout_seconds", "45"); err != nil {
+		t.Fatalf("setConfigValue(timeout_seconds): %v", err)
+	}
+	if cfg.TimeoutSeconds != 45 {
+		t.Errorf("expected TimeoutSeconds=45, got %d", cfg.TimeoutSeconds)
+	}
+}
+
+func TestSetConfigValue_AcceptsRetryCount(t *testing.T) {
+	dir := t.TempDir()
+	cfgFile = filepath.Join(dir, "config.json")
+	cfg = defaultConfig()
+	defer func() { cfg = defaultConfig() }()
+
+	if err := setConfigValue("retry_count", "5"); err != nil {
+		t.Fatalf("setConfigValue(retry_count): %v", err)
+	}
+	if cfg.RetryCount != 5 {
+		t.Errorf("expected RetryCount=5, got %d", cfg.RetryCount)
+	}
+}
+
+func TestSetConfigValue_RejectsInvalidTimeout(t *testing.T) {
+	dir := t.TempDir()
+	cfgFile = filepath.Join(dir, "config.json")
+	cfg = defaultConfig()
+	defer func() { cfg = defaultConfig() }()
+
+	if err := setConfigValue("timeout_seconds", "zero"); err == nil {
+		t.Error("expected error for non-numeric timeout")
+	}
+}
+
+func TestSetConfigValue_RejectsUnknownKey(t *testing.T) {
+	dir := t.TempDir()
+	cfgFile = filepath.Join(dir, "config.json")
+	cfg = defaultConfig()
+	defer func() { cfg = defaultConfig() }()
+
+	if err := setConfigValue("not-a-key", "x"); err == nil {
+		t.Error("expected error for unknown key")
 	}
 }
 

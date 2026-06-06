@@ -60,7 +60,7 @@ func (r *rateLimiter) evictStaleLocked(now time.Time) {
 }
 
 // StartHTTPServer runs the local HTTP REST daemon.
-func StartHTTPServer(port int, ollamaURL, model string) error {
+func StartHTTPServer(port int, ollamaCfg engine.OllamaConfig) error {
 	dbClient, err := db.Open()
 	if err != nil {
 		return fmt.Errorf("failed to open database: %w", err)
@@ -102,7 +102,7 @@ func StartHTTPServer(port int, ollamaURL, model string) error {
 			}
 		}
 
-		embedder := engine.NewEmbeddingsGeneratorWithConfig(ollamaURL, model)
+		embedder := engine.NewEmbeddingsGeneratorWithOllamaConfig(ollamaCfg)
 
 		results, err := engine.SearchHybrid(dbClient, embedder, query, limit)
 		if err != nil {
@@ -151,7 +151,7 @@ func StartHTTPServer(port int, ollamaURL, model string) error {
 			return
 		}
 
-		embedder := engine.NewEmbeddingsGeneratorWithConfig(ollamaURL, model)
+		embedder := engine.NewEmbeddingsGeneratorWithOllamaConfig(ollamaCfg)
 
 		if err := engine.IndexDirectory(dbClient, embedder, absPath); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)

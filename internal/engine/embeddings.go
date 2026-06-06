@@ -7,23 +7,35 @@ import (
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
+	"io"
 	"math"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
 )
 
-const maxEmbeddingCacheSize = 10000
+const (
+	maxEmbeddingCacheSize = 10000
+
+	defaultOllamaTimeout    = 120 * time.Second
+	defaultOllamaRetries    = 2
+	defaultOllamaBackoff    = 500 * time.Millisecond
+	defaultOllamaMaxBackoff = 8 * time.Second
+)
 
 // EmbeddingsGenerator manages Ollama queries and the pure-Go hashing fallback.
 type EmbeddingsGenerator struct {
-	OllamaURL  string
-	Model      string
-	httpClient *http.Client
-	cache      map[string]*list.Element
-	cacheOrder *list.List
-	cacheMu    sync.Mutex
+	OllamaURL   string
+	Model       string
+	Timeout     time.Duration
+	RetryCount  int
+	RetryBackoff time.Duration
+	httpClient  *http.Client
+	cache       map[string]*list.Element
+	cacheOrder  *list.List
+	cacheMu     sync.Mutex
 }
 
 type cacheEntry struct {
@@ -31,15 +43,22 @@ type cacheEntry struct {
 	value []float32
 }
 
+func newEmbeddingsGenerator() *EmbeddingsGenerator {
+	return &EmbeddingsGenerator{
+		OllamaURL:    "http://localhost:11434/api/embeddings",
+		Model:        "nomic-embed-text",
+		Timeout:      defaultOllamaTimeout,
+		RetryCount:   defaultOllamaRetries,
+		RetryBackoff: defaultOllamaBackoff,
+		httpClient:   &http.Client{Timeout: defaultOllamaTimeout},
+		cache:        make(map[string]*list.Element),
+		cacheOrder:   list.New(),
+	}
+}
+
 // NewEmbeddingsGenerator sets up the standard engine configuration.
 func NewEmbeddingsGenerator() *EmbeddingsGenerator {
-	return &EmbeddingsGenerator{
-		OllamaURL:  "http://localhost:11434/api/embeddings",
-		Model:      "nomic-embed-text",
-		httpClient: &http.Client{Timeout: 120 * time.Second},
-		cache:      make(map[string]*list.Element),
-		cacheOrder: list.New(),
-	}
+	return newEmbeddingsGenerator()
 }
 
 // Embedder is the public surface of an embedding generator. Callers depend
@@ -53,14 +72,58 @@ type Embedder interface {
 // Compile-time check that *EmbeddingsGenerator satisfies Embedder.
 var _ Embedder = (*EmbeddingsGenerator)(nil)
 
+// OllamaConfig bundles the user-tunable knobs for the embeddings
+// generator. Zero values fall back to package defaults.
+type OllamaConfig struct {
+	URL          string
+	Model        string
+	Timeout      time.Duration
+	RetryCount   int
+	RetryBackoff time.Duration
+}
+
+func (c OllamaConfig) applyDefaults() OllamaConfig {
+	if c.URL == "" {
+		c.URL = "http://localhost:11434/api/embeddings"
+	}
+	if c.Model == "" {
+		c.Model = "nomic-embed-text"
+	}
+	if c.Timeout <= 0 {
+		c.Timeout = defaultOllamaTimeout
+	}
+	if c.RetryCount <= 0 {
+		c.RetryCount = defaultOllamaRetries
+	}
+	if c.RetryBackoff <= 0 {
+		c.RetryBackoff = defaultOllamaBackoff
+	}
+	return c
+}
+
 // NewEmbeddingsGeneratorWithConfig builds an EmbeddingsGenerator pre-configured
 // with the given Ollama endpoint and model name. It performs the same internal
 // initialization as NewEmbeddingsGenerator (HTTP client, LRU cache, mutex) so
 // callers can construct one without depending on the unexported fields.
 func NewEmbeddingsGeneratorWithConfig(ollamaURL, model string) *EmbeddingsGenerator {
-	eg := NewEmbeddingsGenerator()
+	eg := newEmbeddingsGenerator()
 	eg.OllamaURL = ollamaURL
 	eg.Model = model
+	return eg
+}
+
+// NewEmbeddingsGeneratorWithOllamaConfig builds an EmbeddingsGenerator
+// from a fully-populated OllamaConfig. Zero values fall back to package
+// defaults; negative retry counts are clamped to zero.
+func NewEmbeddingsGeneratorWithOllamaConfig(cfg OllamaConfig) *EmbeddingsGenerator {
+	cfg = cfg.applyDefaults()
+	eg := newEmbeddingsGenerator()
+	eg.OllamaURL = cfg.URL
+	eg.Model = cfg.Model
+	eg.Timeout = cfg.Timeout
+	eg.RetryCount = cfg.RetryCount
+	eg.RetryBackoff = cfg.RetryBackoff
+	eg.httpClient = &http.Client{Timeout: cfg.Timeout}
 	return eg
 }
 
@@ -189,23 +252,12 @@ func (eg *EmbeddingsGenerator) queryOllama(text string) ([]float32, error) {
 		return nil, err
 	}
 
-	resp, err := eg.httpClient.Post(eg.OllamaURL, "application/json", bytes.NewBuffer(reqBody))
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("ollama returned HTTP %d", resp.StatusCode)
-	}
-
 	var res struct {
 		Embedding []float32 `json:"embedding"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
+	if err := eg.doOllamaRequest(reqBody, &res); err != nil {
 		return nil, err
 	}
-
 	return res.Embedding, nil
 }
 
@@ -221,24 +273,65 @@ func (eg *EmbeddingsGenerator) queryOllamaBatch(texts []string) ([][]float32, er
 		return nil, err
 	}
 
-	resp, err := eg.httpClient.Post(eg.OllamaURL, "application/json", bytes.NewBuffer(reqBody))
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("ollama batch returned HTTP %d", resp.StatusCode)
-	}
-
 	var res struct {
 		Embeddings [][]float32 `json:"embeddings"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
+	if err := eg.doOllamaRequest(reqBody, &res); err != nil {
 		return nil, err
 	}
-
 	return res.Embeddings, nil
+}
+
+func (eg *EmbeddingsGenerator) doOllamaRequest(reqBody []byte, result interface{}) error {
+	backoff := eg.RetryBackoff
+	if backoff <= 0 {
+		backoff = defaultOllamaBackoff
+	}
+	maxBackoff := defaultOllamaMaxBackoff
+	retries := eg.RetryCount
+	if retries < 0 {
+		retries = 0
+	}
+
+	var lastErr error
+	for attempt := 0; attempt <= retries; attempt++ {
+		if attempt > 0 {
+			fmt.Fprintf(os.Stderr, "engine: ollama retry %d/%d after %v (last error: %v)\n", attempt, retries, backoff, lastErr)
+			time.Sleep(backoff)
+			backoff *= 2
+			if backoff > maxBackoff {
+				backoff = maxBackoff
+			}
+		}
+
+		req, err := http.NewRequest(http.MethodPost, eg.OllamaURL, bytes.NewReader(reqBody))
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := eg.httpClient.Do(req)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+
+		if resp.StatusCode >= 500 {
+			lastErr = fmt.Errorf("ollama returned HTTP %d", resp.StatusCode)
+			io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+			continue
+		}
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+			resp.Body.Close()
+			return fmt.Errorf("ollama returned HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		}
+
+		defer resp.Body.Close()
+		return json.NewDecoder(resp.Body).Decode(result)
+	}
+	return fmt.Errorf("ollama: exhausted %d retries: %w", retries, lastErr)
 }
 
 // GenerateLocalHashVector utilizes the "Hashing Trick" to produce a normalized
