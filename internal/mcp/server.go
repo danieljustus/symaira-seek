@@ -70,6 +70,13 @@ func StartServer(cfgOllamaURL, cfgModel string) error {
 }
 
 func handleRequest(req *JSONRPCRequest, dbClient db.Store, embedder engine.Embedder) {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(os.Stderr, "MCP handler panicked: %v\n", r)
+			sendError(req.ID, -32603, "Internal error: handler panicked")
+		}
+	}()
+
 	switch req.Method {
 	case "initialize":
 		sendResponse(req.ID, map[string]interface{}{
