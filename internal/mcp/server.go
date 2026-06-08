@@ -12,6 +12,7 @@ import (
 
 	"github.com/danieljustus/symaira-seek/internal/db"
 	"github.com/danieljustus/symaira-seek/internal/engine"
+	"github.com/danieljustus/symaira-seek/internal/pathutil"
 )
 
 // JSONRPCRequest represents an incoming JSON-RPC 2.0 request.
@@ -317,21 +318,26 @@ func handleToolCall(reqID interface{}, name string, args map[string]interface{},
 			return
 		}
 
-		info, err := os.Stat(path)
+		absPath, err := pathutil.RestrictToHome(path)
+		if err != nil {
+			sendError(reqID, -32603, "Path error: "+err.Error())
+			return
+		}
+
+		info, err := os.Stat(absPath)
 		if err != nil {
 			sendError(reqID, -32603, "Path error: "+err.Error())
 			return
 		}
 
 		if info.IsDir() {
-			err = engine.IndexDirectory(dbClient, embedder, path)
+			err = engine.IndexDirectory(dbClient, embedder, absPath)
 			if err != nil {
 				sendError(reqID, -32603, "Indexing failed: "+err.Error())
 				return
 			}
-			sendToolResponse(reqID, fmt.Sprintf("Successfully indexed directory: %s", path))
+			sendToolResponse(reqID, fmt.Sprintf("Successfully indexed directory: %s", absPath))
 		} else {
-			absPath, _ := filepath.Abs(path)
 			hash, err := IndexSingleFile(dbClient, embedder, absPath)
 			if err != nil {
 				sendError(reqID, -32603, "Failed to index file: "+err.Error())
