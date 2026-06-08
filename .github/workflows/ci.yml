@@ -27,7 +27,9 @@ jobs:
           install-go: false
 
       - name: Govulncheck
-        run: go install golang.org/x/vuln/cmd/govulncheck@latest && govulncheck ./... || echo "govulncheck: found stdlib vulnerabilities (non-blocking)"
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./... || echo "govulncheck: non-zero exit (likely stdlib vulns)"
 
       - name: Build
         run: go build ./...
