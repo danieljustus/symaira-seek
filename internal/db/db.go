@@ -297,7 +297,7 @@ func (db *DB) SaveChunks(chunks []*Chunk) error {
 
 // GetChunksForDocument retrieves all chunks associated with a document path.
 func (db *DB) GetChunksForDocument(docPath string) ([]*Chunk, error) {
-	query := "SELECT id, uuid, document_path, chunk_index, content, embedding, hash FROM chunks WHERE document_path = ? ORDER BY chunk_index ASC"
+	query := "SELECT id, uuid, document_path, chunk_index, content, embedding, hash, norm FROM chunks WHERE document_path = ? ORDER BY chunk_index ASC"
 	rows, err := db.conn.Query(query, docPath)
 	if err != nil {
 		return nil, err
@@ -308,7 +308,7 @@ func (db *DB) GetChunksForDocument(docPath string) ([]*Chunk, error) {
 	for rows.Next() {
 		var c Chunk
 		var embBytes []byte
-		if err := rows.Scan(&c.ID, &c.UUID, &c.DocumentPath, &c.ChunkIndex, &c.Content, &embBytes, &c.Hash); err != nil {
+		if err := rows.Scan(&c.ID, &c.UUID, &c.DocumentPath, &c.ChunkIndex, &c.Content, &embBytes, &c.Hash, &c.Norm); err != nil {
 			return nil, err
 		}
 		c.Embedding = BytesToFloat32Slice(embBytes)
