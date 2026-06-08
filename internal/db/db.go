@@ -193,8 +193,12 @@ func (db *DB) initSchema() error {
 	}
 
 	// Migration: add norm column for databases created before this field was introduced.
-	// This is allowed to fail if the column already exists.
-	db.conn.Exec(`ALTER TABLE chunks ADD COLUMN norm REAL DEFAULT 0;`)
+	// An error is expected if the column already exists; other errors are logged.
+	if _, err := db.conn.Exec(`ALTER TABLE chunks ADD COLUMN norm REAL DEFAULT 0;`); err != nil {
+		if !strings.Contains(err.Error(), "duplicate column") {
+			fmt.Fprintf(os.Stderr, "initSchema: ALTER TABLE chunks ADD COLUMN norm failed: %v\n", err)
+		}
+	}
 
 	return nil
 }
