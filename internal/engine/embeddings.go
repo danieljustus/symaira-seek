@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/sync/singleflight"
 )
 
 const maxEmbeddingCacheSize = 10000
@@ -24,6 +26,7 @@ type EmbeddingsGenerator struct {
 	cache      map[string]*list.Element
 	cacheOrder *list.List
 	cacheMu    sync.Mutex
+	sf         singleflight.Group
 }
 
 type cacheEntry struct {
@@ -160,9 +163,21 @@ func (eg *EmbeddingsGenerator) GenerateVectors(texts []string) [][]float32 {
 		uncachedTexts[i] = u.text
 	}
 
-	// Try batch Ollama query
-	batchVectors, err := eg.queryOllamaBatch(uncachedTexts)
-	if err == nil && len(batchVectors) == len(uncachedList) {
+	var batchVectors [][]float32
+	var batchErr error
+	// Try batch Ollama query, deduplicated via singleflight so concurrent
+	// goroutines requesting the same uncached texts make only one HTTP call.
+	{
+		batchKey := hashKey(strings.Join(uncachedTexts, "\x00"))
+		res, sfErr, _ := eg.sf.Do(batchKey, func() (interface{}, error) {
+			return eg.queryOllamaBatch(uncachedTexts)
+		})
+		if sfErr == nil && res != nil {
+			batchVectors = res.([][]float32)
+		}
+		batchErr = sfErr
+	}
+	if batchErr == nil && len(batchVectors) == len(uncachedList) {
 		for i, u := range uncachedList {
 			vec := batchVectors[i]
 			key := hashKey(u.text)
