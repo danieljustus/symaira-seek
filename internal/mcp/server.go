@@ -9,9 +9,11 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/danieljustus/symaira-seek/internal/db"
 	"github.com/danieljustus/symaira-seek/internal/engine"
+	"github.com/danieljustus/symaira-seek/internal/pathutil"
 )
 
 // JSONRPCRequest represents an incoming JSON-RPC 2.0 request.
@@ -69,6 +71,13 @@ func StartServer(cfgOllamaURL, cfgModel string) error {
 }
 
 func handleRequest(req *JSONRPCRequest, dbClient db.Store, embedder engine.Embedder) {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(os.Stderr, "MCP handler panicked: %v\n", r)
+			sendError(req.ID, -32603, "Internal error: handler panicked")
+		}
+	}()
+
 	switch req.Method {
 	case "initialize":
 		sendResponse(req.ID, map[string]interface{}{
@@ -142,10 +151,10 @@ func handleRequest(req *JSONRPCRequest, dbClient db.Store, embedder engine.Embed
 							"type":        "string",
 							"description": "The topic or concept to extract context for",
 						},
-						"max_tokens": map[string]interface{}{
-							"type":        "integer",
-							"description": "Maximum character length of the combined context (default 4000)",
-						},
+				"max_chars": map[string]interface{}{
+					"type":        "integer",
+					"description": "Maximum character count (Unicode code points) of the combined context (default 4000). Deprecated: max_tokens accepted for backward compatibility.",
+				},
 					},
 					"required": []string{"topic"},
 				},
@@ -287,7 +296,9 @@ func handleToolCall(reqID interface{}, name string, args map[string]interface{},
 		}
 
 		maxChars := 4000
-		if maxVal, ok := args["max_tokens"].(float64); ok {
+		if maxVal, ok := args["max_chars"].(float64); ok {
+			maxChars = int(maxVal)
+		} else if maxVal, ok := args["max_tokens"].(float64); ok {
 			maxChars = int(maxVal)
 		}
 
@@ -298,14 +309,21 @@ func handleToolCall(reqID interface{}, name string, args map[string]interface{},
 		}
 
 		var textBuilder strings.Builder
-		textBuilder.WriteString(fmt.Sprintf("=== CONTEXT FOR TOPIC: %s ===\n", topic))
+		runeCount := 0
+		header := fmt.Sprintf("=== CONTEXT FOR TOPIC: %s ===\n", topic)
+		textBuilder.WriteString(header)
+		runeCount += utf8.RuneCountInString(header)
 		for _, r := range results {
-			if textBuilder.Len()+len(r.Chunk.Content) > maxChars {
+			chunkRunes := utf8.RuneCountInString(r.Chunk.Content)
+			if runeCount+chunkRunes > maxChars {
 				break
 			}
-			textBuilder.WriteString(fmt.Sprintf("Source: %s (Chunk %d)\n", r.Chunk.DocumentPath, r.Chunk.ChunkIndex))
+			src := fmt.Sprintf("Source: %s (Chunk %d)\n", r.Chunk.DocumentPath, r.Chunk.ChunkIndex)
+			sep := "\n---\n"
+			textBuilder.WriteString(src)
 			textBuilder.WriteString(r.Chunk.Content)
-			textBuilder.WriteString("\n---\n")
+			textBuilder.WriteString(sep)
+			runeCount += utf8.RuneCountInString(src) + chunkRunes + utf8.RuneCountInString(sep)
 		}
 
 		sendToolResponse(reqID, textBuilder.String())
@@ -317,21 +335,26 @@ func handleToolCall(reqID interface{}, name string, args map[string]interface{},
 			return
 		}
 
-		info, err := os.Stat(path)
+		absPath, err := pathutil.RestrictToHome(path)
+		if err != nil {
+			sendError(reqID, -32603, "Path error: "+err.Error())
+			return
+		}
+
+		info, err := os.Stat(absPath)
 		if err != nil {
 			sendError(reqID, -32603, "Path error: "+err.Error())
 			return
 		}
 
 		if info.IsDir() {
-			err = engine.IndexDirectory(dbClient, embedder, path)
+			err = engine.IndexDirectory(dbClient, embedder, absPath)
 			if err != nil {
 				sendError(reqID, -32603, "Indexing failed: "+err.Error())
 				return
 			}
-			sendToolResponse(reqID, fmt.Sprintf("Successfully indexed directory: %s", path))
+			sendToolResponse(reqID, fmt.Sprintf("Successfully indexed directory: %s", absPath))
 		} else {
-			absPath, _ := filepath.Abs(path)
 			hash, err := IndexSingleFile(dbClient, embedder, absPath)
 			if err != nil {
 				sendError(reqID, -32603, "Failed to index file: "+err.Error())
