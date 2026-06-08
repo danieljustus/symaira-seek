@@ -352,8 +352,9 @@ func (db *DB) GetStats() (*Stats, error) {
 
 // escapeFTS5Query escapes special characters in an FTS5 query string to
 // prevent syntax errors. Special characters (", *, (, ), +, -, ., ~) are
-// replaced with spaces. The entire query is then wrapped in double quotes
-// to treat it as a phrase, which avoids column-filter and NEAR syntax issues.
+// replaced with spaces. The resulting tokens are joined with "AND" so that
+// multi-word queries and symbol-bearing terms (e.g. "C++", ".NET", "node.js")
+// produce correct BM25 recall instead of being treated as exact phrases.
 func escapeFTS5Query(query string) string {
 	replacer := strings.NewReplacer(
 		"\"", " ",
@@ -366,7 +367,11 @@ func escapeFTS5Query(query string) string {
 		"~", " ",
 	)
 	cleaned := replacer.Replace(query)
-	return "\"" + cleaned + "\""
+	tokens := strings.Fields(cleaned)
+	if len(tokens) == 0 {
+		return ""
+	}
+	return strings.Join(tokens, " AND ")
 }
 
 // SearchBM25 performs a keyword search on the FTS5 virtual table.
