@@ -193,8 +193,12 @@ func (db *DB) initSchema() error {
 	}
 
 	// Migration: add norm column for databases created before this field was introduced.
-	// This is allowed to fail if the column already exists.
-	db.conn.Exec(`ALTER TABLE chunks ADD COLUMN norm REAL DEFAULT 0;`)
+	// An error is expected if the column already exists; other errors are logged.
+	if _, err := db.conn.Exec(`ALTER TABLE chunks ADD COLUMN norm REAL DEFAULT 0;`); err != nil {
+		if !strings.Contains(err.Error(), "duplicate column") {
+			fmt.Fprintf(os.Stderr, "initSchema: ALTER TABLE chunks ADD COLUMN norm failed: %v\n", err)
+		}
+	}
 
 	return nil
 }
@@ -297,7 +301,7 @@ func (db *DB) SaveChunks(chunks []*Chunk) error {
 
 // GetChunksForDocument retrieves all chunks associated with a document path.
 func (db *DB) GetChunksForDocument(docPath string) ([]*Chunk, error) {
-	query := "SELECT id, uuid, document_path, chunk_index, content, embedding, hash FROM chunks WHERE document_path = ? ORDER BY chunk_index ASC"
+	query := "SELECT id, uuid, document_path, chunk_index, content, embedding, hash, norm FROM chunks WHERE document_path = ? ORDER BY chunk_index ASC"
 	rows, err := db.conn.Query(query, docPath)
 	if err != nil {
 		return nil, err
@@ -308,7 +312,7 @@ func (db *DB) GetChunksForDocument(docPath string) ([]*Chunk, error) {
 	for rows.Next() {
 		var c Chunk
 		var embBytes []byte
-		if err := rows.Scan(&c.ID, &c.UUID, &c.DocumentPath, &c.ChunkIndex, &c.Content, &embBytes, &c.Hash); err != nil {
+		if err := rows.Scan(&c.ID, &c.UUID, &c.DocumentPath, &c.ChunkIndex, &c.Content, &embBytes, &c.Hash, &c.Norm); err != nil {
 			return nil, err
 		}
 		c.Embedding = BytesToFloat32Slice(embBytes)
@@ -352,8 +356,9 @@ func (db *DB) GetStats() (*Stats, error) {
 
 // escapeFTS5Query escapes special characters in an FTS5 query string to
 // prevent syntax errors. Special characters (", *, (, ), +, -, ., ~) are
-// replaced with spaces. The entire query is then wrapped in double quotes
-// to treat it as a phrase, which avoids column-filter and NEAR syntax issues.
+// replaced with spaces. The resulting tokens are joined with "AND" so that
+// multi-word queries and symbol-bearing terms (e.g. "C++", ".NET", "node.js")
+// produce correct BM25 recall instead of being treated as exact phrases.
 func escapeFTS5Query(query string) string {
 	replacer := strings.NewReplacer(
 		"\"", " ",
@@ -366,7 +371,11 @@ func escapeFTS5Query(query string) string {
 		"~", " ",
 	)
 	cleaned := replacer.Replace(query)
-	return "\"" + cleaned + "\""
+	tokens := strings.Fields(cleaned)
+	if len(tokens) == 0 {
+		return ""
+	}
+	return strings.Join(tokens, " AND ")
 }
 
 // SearchBM25 performs a keyword search on the FTS5 virtual table.
