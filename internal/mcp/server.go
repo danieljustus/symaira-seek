@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/danieljustus/symaira-seek/internal/db"
 	"github.com/danieljustus/symaira-seek/internal/engine"
@@ -150,10 +151,10 @@ func handleRequest(req *JSONRPCRequest, dbClient db.Store, embedder engine.Embed
 							"type":        "string",
 							"description": "The topic or concept to extract context for",
 						},
-						"max_tokens": map[string]interface{}{
-							"type":        "integer",
-							"description": "Maximum character length of the combined context (default 4000)",
-						},
+				"max_chars": map[string]interface{}{
+					"type":        "integer",
+					"description": "Maximum character count (Unicode code points) of the combined context (default 4000). Deprecated: max_tokens accepted for backward compatibility.",
+				},
 					},
 					"required": []string{"topic"},
 				},
@@ -295,7 +296,9 @@ func handleToolCall(reqID interface{}, name string, args map[string]interface{},
 		}
 
 		maxChars := 4000
-		if maxVal, ok := args["max_tokens"].(float64); ok {
+		if maxVal, ok := args["max_chars"].(float64); ok {
+			maxChars = int(maxVal)
+		} else if maxVal, ok := args["max_tokens"].(float64); ok {
 			maxChars = int(maxVal)
 		}
 
@@ -306,14 +309,21 @@ func handleToolCall(reqID interface{}, name string, args map[string]interface{},
 		}
 
 		var textBuilder strings.Builder
-		textBuilder.WriteString(fmt.Sprintf("=== CONTEXT FOR TOPIC: %s ===\n", topic))
+		runeCount := 0
+		header := fmt.Sprintf("=== CONTEXT FOR TOPIC: %s ===\n", topic)
+		textBuilder.WriteString(header)
+		runeCount += utf8.RuneCountInString(header)
 		for _, r := range results {
-			if textBuilder.Len()+len(r.Chunk.Content) > maxChars {
+			chunkRunes := utf8.RuneCountInString(r.Chunk.Content)
+			if runeCount+chunkRunes > maxChars {
 				break
 			}
-			textBuilder.WriteString(fmt.Sprintf("Source: %s (Chunk %d)\n", r.Chunk.DocumentPath, r.Chunk.ChunkIndex))
+			src := fmt.Sprintf("Source: %s (Chunk %d)\n", r.Chunk.DocumentPath, r.Chunk.ChunkIndex)
+			sep := "\n---\n"
+			textBuilder.WriteString(src)
 			textBuilder.WriteString(r.Chunk.Content)
-			textBuilder.WriteString("\n---\n")
+			textBuilder.WriteString(sep)
+			runeCount += utf8.RuneCountInString(src) + chunkRunes + utf8.RuneCountInString(sep)
 		}
 
 		sendToolResponse(reqID, textBuilder.String())
