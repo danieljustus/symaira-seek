@@ -20,6 +20,16 @@ import (
 	"github.com/danieljustus/symaira-seek/internal/parser"
 )
 
+// isWithinDir reports whether path is dir itself or located inside dir.
+// It uses a trailing path separator to avoid false matches where one
+// directory name is a string prefix of another (e.g. /docs vs /docs2).
+func isWithinDir(path, dir string) bool {
+	if path == dir {
+		return true
+	}
+	return strings.HasPrefix(path, dir+string(os.PathSeparator))
+}
+
 var supportedExtensions = map[string]bool{
 	".md":   true,
 	".txt":  true,
@@ -93,7 +103,7 @@ func IndexDirectory(dbClient db.Store, embedder Embedder, dirPath string) error 
 
 	// 4. Orphan detection: delete DB documents that no longer exist on disk
 	for _, doc := range existingDocs {
-		if strings.HasPrefix(doc.Path, absPath) && !foundPaths[doc.Path] {
+		if isWithinDir(doc.Path, absPath) && !foundPaths[doc.Path] {
 			err = dbClient.DeleteDocument(doc.Path)
 			if err != nil {
 				return fmt.Errorf("failed to delete orphaned document %s: %w", doc.Path, err)
@@ -273,7 +283,7 @@ func applyIncrementalChanges(dbClient db.Store, embedder Embedder, absPath strin
 	indexed := 0
 	removed := 0
 	for path := range changed {
-		if !strings.HasPrefix(path, absPath) {
+		if !isWithinDir(path, absPath) {
 			continue
 		}
 
@@ -317,7 +327,7 @@ func applyIncrementalChanges(dbClient db.Store, embedder Embedder, absPath strin
 		return fmt.Errorf("failed listing existing documents: %w", err)
 	}
 	for _, doc := range existingDocs {
-		if !strings.HasPrefix(doc.Path, absPath) {
+		if !isWithinDir(doc.Path, absPath) {
 			continue
 		}
 		if _, statErr := os.Stat(doc.Path); statErr == nil {
@@ -358,10 +368,11 @@ func processFilesInParallel(dbClient db.Store, embedder Embedder, paths map[stri
 	}
 
 	type result struct {
-		path   string
-		chunks []*db.Chunk
-		doc    *db.Document
-		err    error
+		path    string
+		chunks  []*db.Chunk
+		doc     *db.Document
+		err     error
+		skipped bool
 	}
 
 	jobs := make(chan string, len(paths))
@@ -378,8 +389,8 @@ func processFilesInParallel(dbClient db.Store, embedder Embedder, paths map[stri
 		go func() {
 			defer prepWG.Done()
 			for path := range jobs {
-				chunks, doc, err := prepareIndex(embedder, path)
-				prepared <- result{path: path, chunks: chunks, doc: doc, err: err}
+				chunks, doc, skipped, err := prepareIndex(dbClient, embedder, path)
+				prepared <- result{path: path, chunks: chunks, doc: doc, err: err, skipped: skipped}
 			}
 		}()
 	}
@@ -390,6 +401,9 @@ func processFilesInParallel(dbClient db.Store, embedder Embedder, paths map[stri
 	}()
 
 	for r := range prepared {
+		if r.skipped {
+			continue
+		}
 		if r.err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: %v\n", r.err)
 			continue
@@ -401,15 +415,23 @@ func processFilesInParallel(dbClient db.Store, embedder Embedder, paths map[stri
 	}
 }
 
-func prepareIndex(embedder Embedder, path string) ([]*db.Chunk, *db.Document, error) {
+func prepareIndex(dbClient db.Store, embedder Embedder, path string) ([]*db.Chunk, *db.Document, bool, error) {
 	currentHash, err := parser.GetFileHash(path)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to compute hash for %s: %w", path, err)
+		return nil, nil, false, fmt.Errorf("failed to compute hash for %s: %w", path, err)
+	}
+
+	existing, err := dbClient.GetDocument(path)
+	if err != nil {
+		return nil, nil, false, fmt.Errorf("failed to query document from DB: %w", err)
+	}
+	if existing != nil && existing.Hash == currentHash {
+		return nil, nil, true, nil
 	}
 
 	content, err := parser.ParseFile(path)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to parse %s: %w", path, err)
+		return nil, nil, false, fmt.Errorf("failed to parse %s: %w", path, err)
 	}
 
 	textChunks := parser.SplitText(content, 1000, 200)
@@ -433,7 +455,7 @@ func prepareIndex(embedder Embedder, path string) ([]*db.Chunk, *db.Document, er
 		Path:      path,
 		Hash:      currentHash,
 		UpdatedAt: time.Now(),
-	}, nil
+	}, false, nil
 }
 
 func commitIndex(dbClient db.Store, path string, chunks []*db.Chunk, doc *db.Document) error {

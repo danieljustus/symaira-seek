@@ -21,17 +21,25 @@ func RestrictToHome(reqPath string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("invalid path: %w", err)
 	}
-	_, err = os.Stat(absPath)
+
+	resolved, err := filepath.EvalSymlinks(absPath)
 	if err != nil {
 		return "", fmt.Errorf("path does not exist: %w", err)
 	}
+
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("cannot determine home directory: %w", err)
 	}
-	rel, err := filepath.Rel(home, absPath)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
-		return "", fmt.Errorf("access denied: path %q is outside the allowed root (%s)", absPath, home)
+
+	homeResolved, err := filepath.EvalSymlinks(home)
+	if err != nil {
+		return "", fmt.Errorf("cannot resolve home directory: %w", err)
 	}
-	return absPath, nil
+
+	rel, err := filepath.Rel(homeResolved, resolved)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return "", fmt.Errorf("access denied: path %q is outside the allowed root (%s)", resolved, homeResolved)
+	}
+	return resolved, nil
 }

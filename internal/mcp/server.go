@@ -18,6 +18,10 @@ import (
 
 const jsonRPCMarshalFailureFrame = `{"jsonrpc":"2.0","id":null,"error":{"code":-32603,"message":"internal error: failed to marshal response"}}`
 
+// ServerVersion is the version reported in the MCP initialize handshake.
+// Set this from main.go before starting the MCP server.
+var ServerVersion = "dev"
+
 // JSONRPCRequest represents an incoming JSON-RPC 2.0 request.
 type JSONRPCRequest struct {
 	JSONRPC string          `json:"jsonrpc"`
@@ -87,10 +91,10 @@ func handleRequest(req *JSONRPCRequest, dbClient db.Store, embedder engine.Embed
 			"capabilities": map[string]interface{}{
 				"tools": map[string]interface{}{},
 			},
-			"serverInfo": map[string]string{
-				"name":    "symaira-seek",
-				"version": "0.1.0",
-			},
+		"serverInfo": map[string]string{
+			"name":    "symaira-seek",
+			"version": ServerVersion,
+		},
 		})
 
 	case "notifications/initialized":

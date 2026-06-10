@@ -230,6 +230,38 @@ func TestHandleRequestInitialize(t *testing.T) {
 	}
 }
 
+// TestInitializeReportsServerVersion verifies that the initialize
+// response reports ServerVersion, not a hardcoded string (issue #73).
+func TestInitializeReportsServerVersion(t *testing.T) {
+	original := ServerVersion
+	ServerVersion = "test-version-42"
+	defer func() { ServerVersion = original }()
+
+	req := &JSONRPCRequest{
+		JSONRPC: "2.0",
+		ID:      float64(1),
+		Method:  "initialize",
+	}
+
+	got, err := pipeStdout(func() {
+		handleRequest(req, nil, nil)
+	})
+	if err != nil {
+		t.Fatalf("pipeStdout failed: %v", err)
+	}
+
+	var resp JSONRPCResponse
+	if err := json.Unmarshal([]byte(strings.TrimSpace(got)), &resp); err != nil {
+		t.Fatalf("failed to unmarshal response: %v\ngot: %s", err, got)
+	}
+
+	result := resp.Result.(map[string]interface{})
+	si := result["serverInfo"].(map[string]interface{})
+	if si["version"] != "test-version-42" {
+		t.Errorf("serverInfo.version = %q, want %q", si["version"], "test-version-42")
+	}
+}
+
 // TestHandleRequestToolsList verifies the tools/list response.
 func TestHandleRequestToolsList(t *testing.T) {
 	req := &JSONRPCRequest{
