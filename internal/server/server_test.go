@@ -30,8 +30,9 @@ func TestValidateIndexPath_AcceptsDirectoryUnderHome(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
-	if got != subdir {
-		t.Fatalf("expected %s, got %s", subdir, got)
+	resolved, _ := filepath.EvalSymlinks(subdir)
+	if got != resolved {
+		t.Fatalf("expected %s, got %s", resolved, got)
 	}
 }
 
