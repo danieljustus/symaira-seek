@@ -132,3 +132,59 @@ Die letzte Phase öffnet die Retrieval-Engine für AI-Agents und andere Systempr
 3. **Abschluss & Testabdeckung**:
    - Validierung der End-to-End-Pipeline.
    - Unit-Tests für DB, Parser, Cosine Similarity und RRF-Fusion.
+
+---
+
+## Performance Trade-offs: Vector Search (CGO-free, single-pass)
+
+### Background
+The vector scan in `internal/db/db.go` is a linear cosine-similarity
+sweep over every chunk stored in SQLite. The CGO-free constraint
+(we use `modernc.org/sqlite`, see Phase 1) rules out native ANN
+libraries such as hnswlib or FAISS, so we accept O(n) scans and
+compensate by keeping the per-call cost low.
+
+### Score-then-fetch vs single-fetch
+The earlier implementation paginated the chunks table in batches of
+500, scored each row by reading only `(id, embedding, norm)`, kept
+a top-K window, and then issued a second query (`SELECT ... WHERE
+id IN (...)`) to fetch the full payload for the winners. This is
+two round-trips: N score queries (paginated) plus one detail
+query, but the second query is tiny (only top-K rows).
+
+The current implementation in `searchVectorSinglePass` collapses
+both into a single round-trip: one `SELECT` that pulls the full
+chunk payload (`id, uuid, document_path, chunk_index, content,
+embedding, hash, norm`) while scoring, and only retains the top-K
+rows in memory. Trade-off:
+
+- **Single-fetch wins for small-to-medium indexes** (the target
+  use-case: thousands of chunks per user, a few MB of content).
+  The per-row payload is larger, but the elimination of the
+  second round-trip is a clear net win. Measured on 1000 chunks:
+  ~3.3 ms / query vs ~3.6 ms for the paginated two-pass path
+  (`BenchmarkSearchVectorSinglePass` vs
+  `BenchmarkSearchVectorTwoPass` in `internal/db/db_test.go`).
+- **Two-pass remains attractive for very large indexes** where
+  reading every chunk's `content` column during scoring costs
+  more than the second round-trip. The previous implementation is
+  preserved as `searchVectorTwoPass` solely to keep the
+  benchmark reproducible; production callers must use the
+  single-pass path via `SearchVector` / `SearchVectorFiltered`.
+
+### Why not an ANN index?
+Adding `hnswlib`, FAISS, or sqlite-vss would require either
+re-introducing CGO (which the repo's `AGENTS.md` explicitly
+forbids) or shipping a pure-Go ANN library that pulls in
+significant new dependencies. The CGO-free constraint is
+deliberate so the binary remains statically linkable on every
+target. The single-pass linear scan is "good enough" for the
+index sizes the tool is designed to handle; users with very
+large corpora can pre-filter via BM25 before vector search
+(see `SearchVectorFiltered`).
+
+### Top-K window memory
+The single-pass loop keeps at most `limit` rows in memory at any
+time (a descending-sorted `[]*SearchResult` window). Even with
+millions of chunks the per-call memory footprint is bounded by
+`limit` chunks.

@@ -122,6 +122,12 @@ func Open() (*DB, error) {
 		conn.Close()
 		return nil, fmt.Errorf("failed to enable foreign keys: %w", err)
 	}
+	// Allow concurrent writers (issue #50) to wait for the WAL
+	// write lock instead of failing immediately with SQLITE_BUSY.
+	if _, err := conn.Exec("PRAGMA busy_timeout=5000;"); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("failed to set busy timeout: %w", err)
+	}
 
 	db := &DB{conn: conn}
 	if err := db.initSchema(); err != nil {
@@ -416,14 +422,18 @@ func (db *DB) SearchBM25(queryStr string, limit int) ([]*SearchResult, error) {
 
 // SearchVector performs Cosine Similarity search over chunks.
 //
-// This function uses a full-table scan with batched pagination to avoid
-// loading all embeddings into memory at once. An approximate nearest-neighbor
-// (ANN) index is not used here to keep the database layer CGO-free and
-// dependency-light. For small to medium index sizes this linear scan is fast
-// enough; users with very large indexes can pre-filter results via BM25
-// before running vector search.
+// For unfiltered full-corpus scans we issue a single query that
+// selects the embedding, norm, and the full chunk payload together
+// (issue #49). This replaces the previous two-query approach
+// (paginated scan for scoring followed by a second pass to fetch
+// top-K details) which paid the cost of N round-trips even though
+// only one was strictly needed for the score computation. The
+// per-row payload is larger, but for the small-to-medium index
+// sizes this tool targets (the CGO-free SQLite + linear scan trade-
+// off is documented in ARCHITECTURE_PLAN.md) the single round-trip
+// is a clear net win.
 func (db *DB) SearchVector(queryVec []float32, limit int) ([]*SearchResult, error) {
-	return db.searchVectorRange(queryVec, nil, limit)
+	return db.searchVectorSinglePass(queryVec, nil, limit)
 }
 
 // SearchVectorFiltered is like SearchVector but only scans the chunks whose
@@ -432,16 +442,125 @@ func (db *DB) SearchVector(queryVec []float32, limit int) ([]*SearchResult, erro
 // candidates rather than the total chunk count. An empty candidateIDs slice
 // triggers a full scan, matching the unfiltered behavior.
 func (db *DB) SearchVectorFiltered(queryVec []float32, candidateIDs []int64, limit int) ([]*SearchResult, error) {
-	return db.searchVectorRange(queryVec, candidateIDs, limit)
+	return db.searchVectorSinglePass(queryVec, candidateIDs, limit)
 }
 
-func (db *DB) searchVectorRange(queryVec []float32, candidateIDs []int64, limit int) ([]*SearchResult, error) {
+// searchVectorSinglePass scores every chunk in one query and only
+// retains the top-K full chunk payloads in memory. When candidateIDs
+// is non-empty the WHERE clause restricts the scan to those chunk
+// IDs, which keeps the BM25-pre-filtered path cheap without
+// requiring a second round-trip for top-K details. A two-pass
+// "score-then-fetch" variant is preserved in the benchmark file for
+// direct head-to-head comparison; see BenchmarkSearchVector.
+func (db *DB) searchVectorSinglePass(queryVec []float32, candidateIDs []int64, limit int) ([]*SearchResult, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+
+	var (
+		rows *sql.Rows
+		err  error
+	)
+	if len(candidateIDs) == 0 {
+		rows, err = db.conn.Query(searchVectorSinglePassSelect)
+	} else {
+		rows, err = db.conn.Query(buildFilteredSelect(len(candidateIDs)), int64SliceArgs(candidateIDs)...)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	results := make([]*SearchResult, 0, limit)
+	for rows.Next() {
+		var c Chunk
+		var embBytes []byte
+		var norm float32
+		if err := rows.Scan(&c.ID, &c.UUID, &c.DocumentPath, &c.ChunkIndex, &c.Content, &embBytes, &c.Hash, &norm); err != nil {
+			return nil, err
+		}
+		c.Embedding = BytesToFloat32Slice(embBytes)
+		c.Norm = norm
+
+		var score float32
+		if norm > 0 {
+			score = CosineSimilarityWithNorm(queryVec, c.Embedding, norm)
+		} else {
+			score = CosineSimilarity(queryVec, c.Embedding)
+		}
+
+		// Maintain a sorted top-K window (highest score first);
+		// everything below the window is discarded immediately so
+		// we never hold a full result set for very large indexes.
+		if len(results) < limit {
+			results = appendSortedByScoreDesc(results, &SearchResult{
+				Chunk:       &c,
+				CosineScore: score,
+			})
+		} else if score > results[limit-1].CosineScore {
+			results = appendSortedByScoreDesc(results[:limit-1], &SearchResult{
+				Chunk:       &c,
+				CosineScore: score,
+			})
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	for i, r := range results {
+		r.VectorRank = i + 1
+	}
+	return results, nil
+}
+
+// searchVectorSinglePassSelect is the unfiltered scoring query: it
+// pulls every column the SearchResult needs in a single round-trip
+// so the previous "score then fetch top-K details" two-query path
+// is no longer required (issue #49).
+const searchVectorSinglePassSelect = "SELECT id, uuid, document_path, chunk_index, content, embedding, hash, norm FROM chunks"
+
+// buildFilteredSelect returns a SELECT statement whose IN-list has
+// exactly n placeholders. The number of bound IDs at call time
+// drives both the SQL and the argument list, so the driver never
+// sees a placeholder/argument mismatch.
+func buildFilteredSelect(n int) string {
+	if n <= 0 {
+		return searchVectorSinglePassSelect
+	}
+	return "SELECT id, uuid, document_path, chunk_index, content, embedding, hash, norm FROM chunks WHERE id IN (" + strings.Repeat("?,", n-1) + "?)"
+}
+
+func int64SliceArgs(ids []int64) []interface{} {
+	out := make([]interface{}, len(ids))
+	for i, id := range ids {
+		out[i] = id
+	}
+	return out
+}
+
+// appendSortedByScoreDesc inserts res into a descending CosineScore
+// ordered list and returns the new slice. Caller is responsible for
+// trimming to the desired window size before calling.
+func appendSortedByScoreDesc(list []*SearchResult, res *SearchResult) []*SearchResult {
+	pos := sort.Search(len(list), func(i int) bool {
+		return list[i].CosineScore < res.CosineScore
+	})
+	list = append(list, nil)
+	copy(list[pos+1:], list[pos:len(list)-1])
+	list[pos] = res
+	return list
+}
+
+// searchVectorTwoPass is the previous "score then fetch" path. It
+// is retained solely for the benchmark in db_test.go so the
+// single-pass replacement can be measured against the old behavior
+// (issue #49). Production callers should use searchVectorSinglePass
+// via SearchVector / SearchVectorFiltered.
+func (db *DB) searchVectorTwoPass(queryVec []float32, candidateIDs []int64, limit int) ([]*SearchResult, error) {
 	const vectorBatchSize = 500
 	var topK []*scoredEntry
 
-	// Build a fast lookup set so we can filter the linear scan without
-	// issuing a JOIN that would force FTS5 / chunks_fts back into the
-	// query path. nil candidateIDs means "no pre-filter".
 	candidateSet := make(map[int64]struct{}, len(candidateIDs))
 	for _, id := range candidateIDs {
 		candidateSet[id] = struct{}{}
@@ -483,13 +602,12 @@ func (db *DB) searchVectorRange(queryVec []float32, candidateIDs []int64, limit 
 			}
 			batchCount++
 
-			// Insert into topK maintaining sorted order
 			topK = insertSorted(topK, &scoredEntry{id: id, score: score}, limit)
 		}
 		rows.Close()
 
 		if batchCount < vectorBatchSize {
-			break // Last page
+			break
 		}
 		offset += vectorBatchSize
 	}
@@ -498,7 +616,6 @@ func (db *DB) searchVectorRange(queryVec []float32, candidateIDs []int64, limit 
 		return nil, nil
 	}
 
-	// Collect the top K IDs and mapping maps
 	scoreMap := make(map[int64]float32)
 	idOrderMap := make(map[int64]int)
 	topIDs := make([]interface{}, len(topK))
@@ -508,7 +625,6 @@ func (db *DB) searchVectorRange(queryVec []float32, candidateIDs []int64, limit 
 		idOrderMap[s.id] = i
 	}
 
-	// Query details for ONLY the top K chunk IDs
 	placeholders := make([]string, len(topK))
 	for i := range placeholders {
 		placeholders[i] = "?"
@@ -540,12 +656,10 @@ func (db *DB) searchVectorRange(queryVec []float32, candidateIDs []int64, limit 
 		})
 	}
 
-	// Re-sort results back into correct similarity score order
 	sort.Slice(unsortedResults, func(i, j int) bool {
 		return idOrderMap[unsortedResults[i].Chunk.ID] < idOrderMap[unsortedResults[j].Chunk.ID]
 	})
 
-	// Set rank values
 	for i, res := range unsortedResults {
 		res.VectorRank = i + 1
 	}

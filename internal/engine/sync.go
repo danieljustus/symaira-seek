@@ -8,7 +8,9 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
@@ -87,13 +89,7 @@ func IndexDirectory(dbClient db.Store, embedder Embedder, dirPath string) error 
 		return fmt.Errorf("failed listing existing documents: %w", err)
 	}
 
-	// 3. Process new and changed files
-	for path := range foundPaths {
-		if _, err := IndexFile(dbClient, embedder, path); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: %v\n", err)
-			continue
-		}
-	}
+	processFilesInParallel(dbClient, embedder, foundPaths)
 
 	// 4. Orphan detection: delete DB documents that no longer exist on disk
 	for _, doc := range existingDocs {
@@ -211,9 +207,13 @@ func WatchDirectory(ctx context.Context, dbClient db.Store, embedder Embedder, d
 		return fmt.Errorf("initial sync failed: %w", err)
 	}
 
-	// Debounce timer to batch rapid events
+	// Debounce timer to batch rapid events. The debounce window collects
+	// all changed paths so a single file edit only re-indexes that file
+	// (issue #46) instead of forcing a full directory crawl.
 	var debounceTimer *time.Timer
 	const debounceDelay = 500 * time.Millisecond
+	pendingChanges := make(map[string]struct{})
+	var pendingMu sync.Mutex
 
 	for {
 		select {
@@ -229,7 +229,6 @@ func WatchDirectory(ctx context.Context, dbClient db.Store, embedder Embedder, d
 				event.Op&fsnotify.Remove == fsnotify.Remove ||
 				event.Op&fsnotify.Rename == fsnotify.Rename {
 
-				// If a new directory is created, add it to the watcher
 				if event.Op&fsnotify.Create == fsnotify.Create {
 					info, err := os.Stat(event.Name)
 					if err == nil && info.IsDir() {
@@ -237,14 +236,24 @@ func WatchDirectory(ctx context.Context, dbClient db.Store, embedder Embedder, d
 					}
 				}
 
-				// Debounce: reset timer on each event
+				pendingMu.Lock()
+				pendingChanges[event.Name] = struct{}{}
+				pendingMu.Unlock()
+
 				if debounceTimer != nil {
 					debounceTimer.Stop()
 				}
 				debounceTimer = time.AfterFunc(debounceDelay, func() {
-					fmt.Fprintf(os.Stderr, "Change detected, re-indexing: %s\n", absPath)
-					if err := IndexDirectory(dbClient, embedder, absPath); err != nil {
-						fmt.Fprintf(os.Stderr, "Re-index error: %v\n", err)
+					pendingMu.Lock()
+					changed := make(map[string]struct{}, len(pendingChanges))
+					for p := range pendingChanges {
+						changed[p] = struct{}{}
+					}
+					pendingChanges = make(map[string]struct{})
+					pendingMu.Unlock()
+
+					if err := applyIncrementalChanges(dbClient, embedder, absPath, changed); err != nil {
+						fmt.Fprintf(os.Stderr, "Incremental re-index error: %v\n", err)
 					}
 				})
 			}
@@ -256,4 +265,198 @@ func WatchDirectory(ctx context.Context, dbClient db.Store, embedder Embedder, d
 			fmt.Fprintf(os.Stderr, "Watcher error: %v\n", err)
 		}
 	}
+}
+
+// applyIncrementalChanges re-indexes each changed path and drops
+// documents whose backing file no longer exists.
+func applyIncrementalChanges(dbClient db.Store, embedder Embedder, absPath string, changed map[string]struct{}) error {
+	indexed := 0
+	removed := 0
+	for path := range changed {
+		if !strings.HasPrefix(path, absPath) {
+			continue
+		}
+
+		info, err := os.Stat(path)
+		if err != nil {
+			if os.IsNotExist(err) {
+				if delErr := dbClient.DeleteDocument(path); delErr != nil {
+					fmt.Fprintf(os.Stderr, "Warning: failed to delete %s: %v\n", path, delErr)
+				} else {
+					removed++
+				}
+				continue
+			}
+			fmt.Fprintf(os.Stderr, "Warning: stat %s: %v\n", path, err)
+			continue
+		}
+
+		if info.IsDir() {
+			continue
+		}
+
+		ext := strings.ToLower(filepath.Ext(path))
+		if !supportedExtensions[ext] {
+			continue
+		}
+
+		if _, err := IndexFile(dbClient, embedder, path); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: %v\n", err)
+			continue
+		}
+		indexed++
+	}
+
+	// A Rename event that moves a tracked file out of the watched
+	// tree does not produce a second event for the original path, so
+	// sweep documents under absPath and drop any whose backing file
+	// has disappeared. This matches IndexDirectory's orphan behavior
+	// without forcing a full directory walk.
+	existingDocs, err := dbClient.ListDocuments()
+	if err != nil {
+		return fmt.Errorf("failed listing existing documents: %w", err)
+	}
+	for _, doc := range existingDocs {
+		if !strings.HasPrefix(doc.Path, absPath) {
+			continue
+		}
+		if _, statErr := os.Stat(doc.Path); statErr == nil {
+			continue
+		}
+		if delErr := dbClient.DeleteDocument(doc.Path); delErr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to drop orphan %s: %v\n", doc.Path, delErr)
+			continue
+		}
+		removed++
+	}
+
+	if indexed > 0 || removed > 0 {
+		fmt.Fprintf(os.Stderr, "Watch: indexed=%d removed=%d\n", indexed, removed)
+	}
+	return nil
+}
+
+var indexParallelism = func() int {
+	n := runtime.NumCPU()
+	if n < 2 {
+		return 2
+	}
+	if n > 8 {
+		return 8
+	}
+	return n
+}()
+
+func processFilesInParallel(dbClient db.Store, embedder Embedder, paths map[string]bool) {
+	if len(paths) == 0 {
+		return
+	}
+
+	workers := indexParallelism
+	if workers > len(paths) {
+		workers = len(paths)
+	}
+
+	type result struct {
+		path   string
+		chunks []*db.Chunk
+		doc    *db.Document
+		err    error
+	}
+
+	jobs := make(chan string, len(paths))
+	prepared := make(chan result, len(paths))
+
+	for p := range paths {
+		jobs <- p
+	}
+	close(jobs)
+
+	var prepWG sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		prepWG.Add(1)
+		go func() {
+			defer prepWG.Done()
+			for path := range jobs {
+				chunks, doc, err := prepareIndex(embedder, path)
+				prepared <- result{path: path, chunks: chunks, doc: doc, err: err}
+			}
+		}()
+	}
+
+	go func() {
+		prepWG.Wait()
+		close(prepared)
+	}()
+
+	for r := range prepared {
+		if r.err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: %v\n", r.err)
+			continue
+		}
+		if err := commitIndex(dbClient, r.path, r.chunks, r.doc); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: %v\n", err)
+			continue
+		}
+	}
+}
+
+func prepareIndex(embedder Embedder, path string) ([]*db.Chunk, *db.Document, error) {
+	currentHash, err := parser.GetFileHash(path)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to compute hash for %s: %w", path, err)
+	}
+
+	content, err := parser.ParseFile(path)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to parse %s: %w", path, err)
+	}
+
+	textChunks := parser.SplitText(content, 1000, 200)
+	embeddings := embedder.GenerateVectors(textChunks)
+
+	chunks := make([]*db.Chunk, 0, len(textChunks))
+	for idx, tc := range textChunks {
+		hashSum := sha256.Sum256([]byte(tc))
+		chunkHash := hex.EncodeToString(hashSum[:])
+		chunks = append(chunks, &db.Chunk{
+			UUID:         uuid.New().String(),
+			DocumentPath: path,
+			ChunkIndex:   idx,
+			Content:      tc,
+			Embedding:    embeddings[idx],
+			Hash:         chunkHash,
+		})
+	}
+
+	return chunks, &db.Document{
+		Path:      path,
+		Hash:      currentHash,
+		UpdatedAt: time.Now(),
+	}, nil
+}
+
+func commitIndex(dbClient db.Store, path string, chunks []*db.Chunk, doc *db.Document) error {
+	existing, err := dbClient.GetDocument(path)
+	if err != nil {
+		return fmt.Errorf("failed to query document from DB: %w", err)
+	}
+	if existing != nil {
+		if existing.Hash == doc.Hash {
+			return nil
+		}
+		if err := dbClient.DeleteDocument(path); err != nil {
+			return fmt.Errorf("failed to delete old document version: %w", err)
+		}
+	}
+
+	if err := dbClient.SaveDocument(doc); err != nil {
+		return fmt.Errorf("failed to save document metadata: %w", err)
+	}
+	if err := dbClient.SaveChunks(chunks); err != nil {
+		return fmt.Errorf("failed to save chunks: %w", err)
+	}
+
+	fmt.Fprintf(os.Stderr, "Indexed: %s (%d chunks)\n", path, len(chunks))
+	return nil
 }

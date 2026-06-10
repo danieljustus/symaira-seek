@@ -4,11 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/dustin/go-humanize"
 	"github.com/spf13/cobra"
@@ -19,12 +22,19 @@ import (
 	"github.com/danieljustus/symaira-seek/internal/server"
 )
 
-const version = "0.1.0"
+// version is the build-time version string, intended to be
+// overridden via -ldflags at build time (issue #48). The default
+// reports a development build marker so an un-overridden binary
+// still prints a meaningful value.
+var version = "0.1.0-dev"
 
 // Config holds user configuration.
 type Config struct {
-	OllamaURL string `json:"ollama_url"`
-	Model     string `json:"model"`
+	OllamaURL      string `json:"ollama_url"`
+	Model          string `json:"model"`
+	TimeoutSeconds int    `json:"timeout_seconds"`
+	RetryCount     int    `json:"retry_count"`
+	RetryBackoffMS int    `json:"retry_backoff_ms"`
 }
 
 var (
@@ -59,7 +69,7 @@ func main() {
 			}
 			defer dbClient.Close()
 
-			embedder := engine.NewEmbeddingsGeneratorWithConfig(cfg.OllamaURL, cfg.Model)
+			embedder := engine.NewEmbeddingsGeneratorWithOllamaConfig(cfg.ollamaConfig())
 
 			results, err := engine.SearchHybrid(dbClient, embedder, query, limitFlag)
 			if err != nil {
@@ -72,21 +82,7 @@ func main() {
 				return enc.Encode(results)
 			}
 
-			if len(results) == 0 {
-				fmt.Fprintln(os.Stderr, "No matching documents found.")
-				return nil
-			}
-
-			for idx, r := range results {
-				fmt.Printf("[%d] Path: %s (Chunk Index: %d)\n", idx+1, r.Chunk.DocumentPath, r.Chunk.ChunkIndex)
-				fmt.Printf("    Score: RRF=%.4f Cosine=%.4f (Ranks: BM25=%d Vector=%d)\n", r.RRFScore, r.CosineScore, r.BM25Rank, r.VectorRank)
-				fmt.Println("    --- Content ---")
-				for _, line := range strings.Split(r.Chunk.Content, "\n") {
-					fmt.Printf("    %s\n", line)
-				}
-				fmt.Println("    ----------------")
-				fmt.Println()
-			}
+			writeSearchHuman(os.Stderr, results)
 			return nil
 		},
 	}
@@ -107,7 +103,7 @@ func main() {
 			}
 			defer dbClient.Close()
 
-			embedder := engine.NewEmbeddingsGeneratorWithConfig(cfg.OllamaURL, cfg.Model)
+			embedder := engine.NewEmbeddingsGeneratorWithOllamaConfig(cfg.ollamaConfig())
 
 			if watchFlag {
 				ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -251,23 +247,63 @@ func initConfig() {
 			fmt.Fprintf(os.Stderr, "Warning: $HOME not set, using %s for config directory\n", home)
 		}
 		cfgDir := filepath.Join(home, ".config", "symaira-seek")
-		os.MkdirAll(cfgDir, 0755)
+		if err := os.MkdirAll(cfgDir, 0755); err != nil {
+			fmt.Fprintf(os.Stderr, "seek: could not create config directory %s: %v\n", cfgDir, err)
+		}
 		cfgFile = filepath.Join(cfgDir, "config.json")
 	}
 
-	// Set defaults
-	cfg = Config{
-		OllamaURL: "http://localhost:11434/api/embeddings",
-		Model:     "nomic-embed-text",
+	cfg = loadOrInitConfig(cfgFile)
+}
+
+func defaultConfig() Config {
+	return Config{
+		OllamaURL:      "http://localhost:11434/api/embeddings",
+		Model:          "nomic-embed-text",
+		TimeoutSeconds: 120,
+		RetryCount:     2,
+		RetryBackoffMS: 500,
+	}
+}
+
+func (c Config) ollamaConfig() engine.OllamaConfig {
+	return engine.OllamaConfig{
+		URL:          c.OllamaURL,
+		Model:        c.Model,
+		Timeout:      time.Duration(c.TimeoutSeconds) * time.Second,
+		RetryCount:   c.RetryCount,
+		RetryBackoff: time.Duration(c.RetryBackoffMS) * time.Millisecond,
+	}
+}
+
+func loadOrInitConfig(path string) Config {
+	cfg := defaultConfig()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			fmt.Fprintf(os.Stderr, "seek: could not read config %s: %v; using built-in defaults\n", path, err)
+			return cfg
+		}
+		writeDefaultConfig(path, cfg)
+		return cfg
 	}
 
-	data, err := os.ReadFile(cfgFile)
-	if err == nil {
-		json.Unmarshal(data, &cfg)
-	} else {
-		// Save default configuration
-		data, _ := json.MarshalIndent(cfg, "", "  ")
-		os.WriteFile(cfgFile, data, 0600)
+	if uErr := json.Unmarshal(data, &cfg); uErr != nil {
+		fmt.Fprintf(os.Stderr, "seek: config %s is malformed (%v); using built-in defaults\n", path, uErr)
+		return defaultConfig()
+	}
+	return cfg
+}
+
+func writeDefaultConfig(path string, cfg Config) {
+	out, mErr := json.MarshalIndent(cfg, "", "  ")
+	if mErr != nil {
+		fmt.Fprintf(os.Stderr, "seek: could not marshal default config: %v\n", mErr)
+		return
+	}
+	if wErr := os.WriteFile(path, out, 0600); wErr != nil {
+		fmt.Fprintf(os.Stderr, "seek: could not write default config to %s: %v\n", path, wErr)
 	}
 }
 
@@ -277,8 +313,26 @@ func setConfigValue(key, value string) error {
 		cfg.OllamaURL = value
 	case "model":
 		cfg.Model = value
+	case "timeout_seconds":
+		n, err := strconv.Atoi(value)
+		if err != nil || n <= 0 {
+			return fmt.Errorf("invalid %s value %q (must be a positive integer)", key, value)
+		}
+		cfg.TimeoutSeconds = n
+	case "retry_count":
+		n, err := strconv.Atoi(value)
+		if err != nil || n < 0 {
+			return fmt.Errorf("invalid %s value %q (must be a non-negative integer)", key, value)
+		}
+		cfg.RetryCount = n
+	case "retry_backoff_ms":
+		n, err := strconv.Atoi(value)
+		if err != nil || n <= 0 {
+			return fmt.Errorf("invalid %s value %q (must be a positive integer)", key, value)
+		}
+		cfg.RetryBackoffMS = n
 	default:
-		return fmt.Errorf("unknown config key %q (supported: ollama_url, model)", key)
+		return fmt.Errorf("unknown config key %q (supported: ollama_url, model, timeout_seconds, retry_count, retry_backoff_ms)", key)
 	}
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
@@ -288,9 +342,26 @@ func setConfigValue(key, value string) error {
 }
 
 func startHTTPServer(port int) error {
-	return server.StartHTTPServer(port, cfg.OllamaURL, cfg.Model)
+	return server.StartHTTPServer(port, cfg.ollamaConfig())
 }
 
 func startMCPServer() error {
-	return mcp.StartServer(cfg.OllamaURL, cfg.Model)
+	return mcp.StartServer(cfg.ollamaConfig())
+}
+
+func writeSearchHuman(w io.Writer, results []*db.SearchResult) {
+	if len(results) == 0 {
+		fmt.Fprintln(w, "No matching documents found.")
+		return
+	}
+	for idx, r := range results {
+		fmt.Fprintf(w, "[%d] Path: %s (Chunk Index: %d)\n", idx+1, r.Chunk.DocumentPath, r.Chunk.ChunkIndex)
+		fmt.Fprintf(w, "    Score: RRF=%.4f Cosine=%.4f (Ranks: BM25=%d Vector=%d)\n", r.RRFScore, r.CosineScore, r.BM25Rank, r.VectorRank)
+		fmt.Fprintln(w, "    --- Content ---")
+		for _, line := range strings.Split(r.Chunk.Content, "\n") {
+			fmt.Fprintf(w, "    %s\n", line)
+		}
+		fmt.Fprintln(w, "    ----------------")
+		fmt.Fprintln(w)
+	}
 }

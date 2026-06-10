@@ -4,6 +4,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -178,5 +179,93 @@ func TestDatabaseOperations(t *testing.T) {
 	stats2, _ := db.GetStats()
 	if stats2.DocumentCount != 0 || stats2.ChunkCount != 0 {
 		t.Errorf("expected 0 docs and 0 chunks in stats after deletion, got %+v", stats2)
+	}
+}
+
+// seedBenchmarkDB populates d with nChunks chunks whose embeddings
+// are 768-dim normalized random-ish vectors. The seeding cost is
+// excluded from the timed benchmark via b.ResetTimer below.
+func seedBenchmarkDB(b *testing.B, d *DB, nChunks int) {
+	b.Helper()
+	docPath := "/bench/doc.md"
+	if err := d.SaveDocument(&Document{Path: docPath, Hash: "bench", UpdatedAt: time.Now()}); err != nil {
+		b.Fatalf("SaveDocument: %v", err)
+	}
+	chunks := make([]*Chunk, nChunks)
+	for i := 0; i < nChunks; i++ {
+		emb := make([]float32, 768)
+		for j := range emb {
+			emb[j] = float32(i+j) / float32(nChunks+j+1)
+		}
+		var sumSquares float64
+		for _, v := range emb {
+			sumSquares += float64(v * v)
+		}
+		norm := float32(math.Sqrt(sumSquares))
+		if norm > 0 {
+			for j := range emb {
+				emb[j] /= norm
+			}
+		}
+		chunks[i] = &Chunk{
+			UUID:         "bench-" + strconv.Itoa(i),
+			DocumentPath: docPath,
+			ChunkIndex:   i,
+			Content:      "bench content",
+			Embedding:    emb,
+			Hash:         "bench-hash",
+		}
+	}
+	if err := d.SaveChunks(chunks); err != nil {
+		b.Fatalf("SaveChunks: %v", err)
+	}
+}
+
+// BenchmarkSearchVectorSinglePass vs BenchmarkSearchVectorTwoPass
+// measures the impact of issue #49's single-pass rewrite. The
+// single-pass variant issues one query for the full chunk payload
+// (embedding + content + metadata) and keeps a top-K window in
+// memory; the two-pass variant issues a paginated scoring query
+// followed by a top-K detail query.
+//
+// Run with:
+//   go test -bench=BenchmarkSearchVector -benchtime=2s ./internal/db
+func BenchmarkSearchVectorSinglePass(b *testing.B) {
+	d := setupDB(b)
+	const nChunks = 1000
+	seedBenchmarkDB(b, d, nChunks)
+	query := make([]float32, 768)
+	for i := range query {
+		query[i] = 0.5
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		results, err := d.SearchVector(query, 10)
+		if err != nil {
+			b.Fatalf("SearchVector: %v", err)
+		}
+		if len(results) == 0 {
+			b.Fatal("expected non-empty results")
+		}
+	}
+}
+
+func BenchmarkSearchVectorTwoPass(b *testing.B) {
+	d := setupDB(b)
+	const nChunks = 1000
+	seedBenchmarkDB(b, d, nChunks)
+	query := make([]float32, 768)
+	for i := range query {
+		query[i] = 0.5
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		results, err := d.searchVectorTwoPass(query, nil, 10)
+		if err != nil {
+			b.Fatalf("searchVectorTwoPass: %v", err)
+		}
+		if len(results) == 0 {
+			b.Fatal("expected non-empty results")
+		}
 	}
 }
