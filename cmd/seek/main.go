@@ -346,6 +346,7 @@ func startHTTPServer(port int) error {
 }
 
 func startMCPServer() error {
+	mcp.ServerVersion = version
 	return mcp.StartServer(cfg.ollamaConfig())
 }
 
