@@ -10,6 +10,69 @@ import (
 	"github.com/danieljustus/symaira-seek/internal/db"
 )
 
+// TestIndexDirectorySiblingPrefix is a regression test for issue #66.
+// Re-indexing a directory must never delete documents that live in a
+// sibling directory whose name shares a string prefix (e.g. /docs vs /docs2).
+func TestIndexDirectorySiblingPrefix(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "seek-sibling-test")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	t.Setenv("HOME", tempDir)
+
+	dbClient, err := db.Open()
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer dbClient.Close()
+
+	embedder := &fakeEmbedder{dim: 768}
+
+	docsDir := filepath.Join(tempDir, "docs")
+	docs2Dir := filepath.Join(tempDir, "docs2")
+	if err := os.MkdirAll(docsDir, 0755); err != nil {
+		t.Fatalf("mkdir docs: %v", err)
+	}
+	if err := os.MkdirAll(docs2Dir, 0755); err != nil {
+		t.Fatalf("mkdir docs2: %v", err)
+	}
+
+	file1 := filepath.Join(docsDir, "a.md")
+	file2 := filepath.Join(docs2Dir, "b.md")
+	if err := os.WriteFile(file1, []byte("content in docs"), 0644); err != nil {
+		t.Fatalf("write a.md: %v", err)
+	}
+	if err := os.WriteFile(file2, []byte("content in docs2"), 0644); err != nil {
+		t.Fatalf("write b.md: %v", err)
+	}
+
+	if err := IndexDirectory(dbClient, embedder, docsDir); err != nil {
+		t.Fatalf("index docs: %v", err)
+	}
+	if err := IndexDirectory(dbClient, embedder, docs2Dir); err != nil {
+		t.Fatalf("index docs2: %v", err)
+	}
+
+	doc2, err := dbClient.GetDocument(file2)
+	if err != nil || doc2 == nil {
+		t.Fatalf("docs2/b.md not indexed after initial pass")
+	}
+
+	if err := IndexDirectory(dbClient, embedder, docsDir); err != nil {
+		t.Fatalf("re-index docs: %v", err)
+	}
+
+	doc2After, err := dbClient.GetDocument(file2)
+	if err != nil {
+		t.Fatalf("GetDocument after re-index: %v", err)
+	}
+	if doc2After == nil {
+		t.Error("docs2/b.md was deleted from index after re-indexing sibling docs/ — orphan cleanup used plain HasPrefix")
+	}
+}
+
 // TestApplyIncrementalChangesTouchesOnlyChangedFiles is a regression
 // test for issue #46.
 func TestApplyIncrementalChangesTouchesOnlyChangedFiles(t *testing.T) {

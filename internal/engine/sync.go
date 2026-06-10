@@ -20,6 +20,16 @@ import (
 	"github.com/danieljustus/symaira-seek/internal/parser"
 )
 
+// isWithinDir reports whether path is dir itself or located inside dir.
+// It uses a trailing path separator to avoid false matches where one
+// directory name is a string prefix of another (e.g. /docs vs /docs2).
+func isWithinDir(path, dir string) bool {
+	if path == dir {
+		return true
+	}
+	return strings.HasPrefix(path, dir+string(os.PathSeparator))
+}
+
 var supportedExtensions = map[string]bool{
 	".md":   true,
 	".txt":  true,
@@ -93,7 +103,7 @@ func IndexDirectory(dbClient db.Store, embedder Embedder, dirPath string) error 
 
 	// 4. Orphan detection: delete DB documents that no longer exist on disk
 	for _, doc := range existingDocs {
-		if strings.HasPrefix(doc.Path, absPath) && !foundPaths[doc.Path] {
+		if isWithinDir(doc.Path, absPath) && !foundPaths[doc.Path] {
 			err = dbClient.DeleteDocument(doc.Path)
 			if err != nil {
 				return fmt.Errorf("failed to delete orphaned document %s: %w", doc.Path, err)
@@ -273,7 +283,7 @@ func applyIncrementalChanges(dbClient db.Store, embedder Embedder, absPath strin
 	indexed := 0
 	removed := 0
 	for path := range changed {
-		if !strings.HasPrefix(path, absPath) {
+		if !isWithinDir(path, absPath) {
 			continue
 		}
 
@@ -317,7 +327,7 @@ func applyIncrementalChanges(dbClient db.Store, embedder Embedder, absPath strin
 		return fmt.Errorf("failed listing existing documents: %w", err)
 	}
 	for _, doc := range existingDocs {
-		if !strings.HasPrefix(doc.Path, absPath) {
+		if !isWithinDir(doc.Path, absPath) {
 			continue
 		}
 		if _, statErr := os.Stat(doc.Path); statErr == nil {
