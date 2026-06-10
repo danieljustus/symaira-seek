@@ -163,6 +163,16 @@ func (eg *EmbeddingsGenerator) GenerateVector(text string) []float32 {
 	return fallback
 }
 
+// batchURL returns the Ollama endpoint for batch embedding requests.
+// The legacy /api/embeddings endpoint only supports single prompts;
+// batch requests must use the newer /api/embed endpoint instead.
+func (eg *EmbeddingsGenerator) batchURL() string {
+	if strings.HasSuffix(eg.OllamaURL, "/api/embeddings") {
+		return eg.OllamaURL[:len(eg.OllamaURL)-len("/api/embeddings")] + "/api/embed"
+	}
+	return eg.OllamaURL
+}
+
 func (eg *EmbeddingsGenerator) cachePut(key string, value []float32) {
 	eg.cacheMu.Lock()
 	defer eg.cacheMu.Unlock()
@@ -255,6 +265,9 @@ func (eg *EmbeddingsGenerator) GenerateVectors(texts []string) [][]float32 {
 	}
 
 	// Fall back to individual queries with caching
+	if batchErr != nil {
+		fmt.Fprintf(os.Stderr, "engine: batch embedding failed (%v), falling back to per-text requests\n", batchErr)
+	}
 	for _, u := range uncachedList {
 		results[u.idx] = eg.GenerateVector(u.text)
 	}
@@ -274,7 +287,7 @@ func (eg *EmbeddingsGenerator) queryOllama(text string) ([]float32, error) {
 	var res struct {
 		Embedding []float32 `json:"embedding"`
 	}
-	if err := eg.doOllamaRequest(reqBody, &res); err != nil {
+	if err := eg.doOllamaRequest(eg.OllamaURL, reqBody, &res); err != nil {
 		return nil, err
 	}
 	return res.Embedding, nil
@@ -295,13 +308,13 @@ func (eg *EmbeddingsGenerator) queryOllamaBatch(texts []string) ([][]float32, er
 	var res struct {
 		Embeddings [][]float32 `json:"embeddings"`
 	}
-	if err := eg.doOllamaRequest(reqBody, &res); err != nil {
+	if err := eg.doOllamaRequest(eg.batchURL(), reqBody, &res); err != nil {
 		return nil, err
 	}
 	return res.Embeddings, nil
 }
 
-func (eg *EmbeddingsGenerator) doOllamaRequest(reqBody []byte, result interface{}) error {
+func (eg *EmbeddingsGenerator) doOllamaRequest(url string, reqBody []byte, result interface{}) error {
 	backoff := eg.RetryBackoff
 	if backoff <= 0 {
 		backoff = defaultOllamaBackoff
@@ -323,7 +336,7 @@ func (eg *EmbeddingsGenerator) doOllamaRequest(reqBody []byte, result interface{
 			}
 		}
 
-		req, err := http.NewRequest(http.MethodPost, eg.OllamaURL, bytes.NewReader(reqBody))
+		req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(reqBody))
 		if err != nil {
 			return err
 		}
