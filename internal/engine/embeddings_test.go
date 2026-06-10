@@ -329,6 +329,70 @@ func TestGenerateVectors_BatchUsesCorrectEndpoint(t *testing.T) {
 	}
 }
 
+// TestAllConstructorsHaveRedirectProtection verifies that every public
+// constructor produces an HTTP client that refuses to follow redirects
+// (issue #68).
+func TestAllConstructorsHaveRedirectProtection(t *testing.T) {
+	constructors := []struct {
+		name string
+		eg   *EmbeddingsGenerator
+	}{
+		{"NewEmbeddingsGenerator", NewEmbeddingsGenerator()},
+		{"NewEmbeddingsGeneratorWithConfig", NewEmbeddingsGeneratorWithConfig("http://localhost:11434/api/embeddings", "test")},
+		{"NewEmbeddingsGeneratorWithOllamaConfig", NewEmbeddingsGeneratorWithOllamaConfig(OllamaConfig{})},
+	}
+
+	for _, tc := range constructors {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.eg.httpClient.CheckRedirect == nil {
+				t.Error("CheckRedirect is nil — redirect protection is missing")
+			}
+			// Verify it returns ErrUseLastResponse
+			err := tc.eg.httpClient.CheckRedirect(nil, nil)
+			if err != http.ErrUseLastResponse {
+				t.Errorf("expected ErrUseLastResponse, got %v", err)
+			}
+		})
+	}
+}
+
+// TestRedirectNotFollowed verifies that the embedder does not follow
+// a 301 redirect (issue #68).
+func TestRedirectNotFollowed(t *testing.T) {
+	var redirectHits int32
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&redirectHits, 1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer target.Close()
+
+	var redirectorHits int32
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&redirectorHits, 1)
+		http.Redirect(w, r, target.URL, http.StatusMovedPermanently)
+	}))
+	defer redirector.Close()
+
+	eg := NewEmbeddingsGeneratorWithOllamaConfig(OllamaConfig{
+		URL:          redirector.URL + "/api/embeddings",
+		Model:        "test",
+		RetryCount:   0,
+		RetryBackoff: 1 * time.Millisecond,
+	})
+
+	_, err := eg.queryOllama("test")
+	if err == nil {
+		t.Fatal("expected error from redirect response")
+	}
+
+	if got := atomic.LoadInt32(&redirectorHits); got != 1 {
+		t.Errorf("expected 1 hit on redirector, got %d", got)
+	}
+	if got := atomic.LoadInt32(&redirectHits); got != 0 {
+		t.Errorf("expected 0 hits on redirect target (redirect was followed!), got %d", got)
+	}
+}
+
 func TestIsStopWordUsesPackageMap(t *testing.T) {
 	stopSamples := []string{
 		"and", "the", "a", "an", "of", "to", "in", "is", "it", "that",

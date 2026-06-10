@@ -53,19 +53,20 @@ func newEmbeddingsGenerator() *EmbeddingsGenerator {
 		Timeout:      defaultOllamaTimeout,
 		RetryCount:   defaultOllamaRetries,
 		RetryBackoff: defaultOllamaBackoff,
-		httpClient:   &http.Client{Timeout: defaultOllamaTimeout},
-		cache:        make(map[string]*list.Element),
-		cacheOrder:   list.New(),
+		httpClient: &http.Client{
+			Timeout: defaultOllamaTimeout,
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		},
+		cache:      make(map[string]*list.Element),
+		cacheOrder: list.New(),
 	}
 }
 
 // NewEmbeddingsGenerator sets up the standard engine configuration.
 func NewEmbeddingsGenerator() *EmbeddingsGenerator {
-	gen := newEmbeddingsGenerator()
-	gen.httpClient.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-		return http.ErrUseLastResponse
-	}
-	return gen
+	return newEmbeddingsGenerator()
 }
 
 // Embedder is the public surface of an embedding generator. Callers depend
@@ -130,7 +131,7 @@ func NewEmbeddingsGeneratorWithOllamaConfig(cfg OllamaConfig) *EmbeddingsGenerat
 	eg.Timeout = cfg.Timeout
 	eg.RetryCount = cfg.RetryCount
 	eg.RetryBackoff = cfg.RetryBackoff
-	eg.httpClient = &http.Client{Timeout: cfg.Timeout}
+	eg.httpClient.Timeout = cfg.Timeout
 	return eg
 }
 
