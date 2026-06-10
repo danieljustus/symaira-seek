@@ -10,6 +10,71 @@ import (
 	"github.com/danieljustus/symaira-seek/internal/db"
 )
 
+// TestParallelIndexSkipsUnchangedFiles is a regression test for issue #70.
+// The parallel indexing path must check the file hash before generating
+// embeddings, so unchanged files are not re-embedded on every index run.
+func TestParallelIndexSkipsUnchangedFiles(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "seek-parallel-hash-test")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	t.Setenv("HOME", tempDir)
+
+	dbClient, err := db.Open()
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer dbClient.Close()
+
+	embedder := &countingEmbedder{dim: 768}
+
+	docsDir := filepath.Join(tempDir, "docs")
+	if err := os.MkdirAll(docsDir, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	file1 := filepath.Join(docsDir, "a.md")
+	file2 := filepath.Join(docsDir, "b.md")
+	if err := os.WriteFile(file1, []byte("content one"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := os.WriteFile(file2, []byte("content two"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	paths := map[string]bool{file1: true, file2: true}
+	processFilesInParallel(dbClient, embedder, paths)
+
+	if embedder.calls != 2 {
+		t.Fatalf("first run: expected 2 embedding calls, got %d", embedder.calls)
+	}
+
+	embedder.calls = 0
+	processFilesInParallel(dbClient, embedder, paths)
+
+	if embedder.calls != 0 {
+		t.Errorf("second run: expected 0 embedding calls for unchanged files, got %d", embedder.calls)
+	}
+}
+
+// countingEmbedder wraps fakeEmbedder and counts GenerateVectors calls.
+type countingEmbedder struct {
+	dim   int
+	calls int
+}
+
+func (c *countingEmbedder) GenerateVector(text string) []float32 {
+	c.calls++
+	return (&fakeEmbedder{dim: c.dim}).GenerateVector(text)
+}
+
+func (c *countingEmbedder) GenerateVectors(texts []string) [][]float32 {
+	c.calls++
+	return (&fakeEmbedder{dim: c.dim}).GenerateVectors(texts)
+}
+
 // TestIndexDirectorySiblingPrefix is a regression test for issue #66.
 // Re-indexing a directory must never delete documents that live in a
 // sibling directory whose name shares a string prefix (e.g. /docs vs /docs2).
