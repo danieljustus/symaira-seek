@@ -29,6 +29,13 @@ Ensure you have [Go](https://go.dev/) installed.
 go build -o seek cmd/seek/main.go
 ```
 
+To inject a version string at build time, set `main.version` via `-ldflags`. The CI workflow derives the value from the current git tag (or a `0.0.0-dev+<short-sha>` fallback) and passes it automatically:
+```bash
+VERSION="0.2.0"
+go build -ldflags "-s -w -X main.version=${VERSION}" -o seek cmd/seek/main.go
+./seek version
+```
+
 ### Run Tests
 ```bash
 go test -v ./...

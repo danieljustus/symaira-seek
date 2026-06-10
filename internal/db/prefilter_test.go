@@ -34,7 +34,7 @@ func makeChunk(uuid, docPath string, idx int, content string, baseIdx int) *Chun
 	}
 }
 
-func setupDB(t *testing.T) *DB {
+func setupDB(t testing.TB) *DB {
 	t.Helper()
 	tempDir, err := os.MkdirTemp("", "seek-db-prefilter-test")
 	if err != nil {
