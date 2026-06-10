@@ -10,6 +10,134 @@ import (
 	"github.com/danieljustus/symaira-seek/internal/db"
 )
 
+// TestParallelIndexSkipsUnchangedFiles is a regression test for issue #70.
+// The parallel indexing path must check the file hash before generating
+// embeddings, so unchanged files are not re-embedded on every index run.
+func TestParallelIndexSkipsUnchangedFiles(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "seek-parallel-hash-test")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	t.Setenv("HOME", tempDir)
+
+	dbClient, err := db.Open()
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer dbClient.Close()
+
+	embedder := &countingEmbedder{dim: 768}
+
+	docsDir := filepath.Join(tempDir, "docs")
+	if err := os.MkdirAll(docsDir, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	file1 := filepath.Join(docsDir, "a.md")
+	file2 := filepath.Join(docsDir, "b.md")
+	if err := os.WriteFile(file1, []byte("content one"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := os.WriteFile(file2, []byte("content two"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	paths := map[string]bool{file1: true, file2: true}
+	processFilesInParallel(dbClient, embedder, paths)
+
+	if embedder.calls != 2 {
+		t.Fatalf("first run: expected 2 embedding calls, got %d", embedder.calls)
+	}
+
+	embedder.calls = 0
+	processFilesInParallel(dbClient, embedder, paths)
+
+	if embedder.calls != 0 {
+		t.Errorf("second run: expected 0 embedding calls for unchanged files, got %d", embedder.calls)
+	}
+}
+
+// countingEmbedder wraps fakeEmbedder and counts GenerateVectors calls.
+type countingEmbedder struct {
+	dim   int
+	calls int
+}
+
+func (c *countingEmbedder) GenerateVector(text string) []float32 {
+	c.calls++
+	return (&fakeEmbedder{dim: c.dim}).GenerateVector(text)
+}
+
+func (c *countingEmbedder) GenerateVectors(texts []string) [][]float32 {
+	c.calls++
+	return (&fakeEmbedder{dim: c.dim}).GenerateVectors(texts)
+}
+
+// TestIndexDirectorySiblingPrefix is a regression test for issue #66.
+// Re-indexing a directory must never delete documents that live in a
+// sibling directory whose name shares a string prefix (e.g. /docs vs /docs2).
+func TestIndexDirectorySiblingPrefix(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "seek-sibling-test")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	t.Setenv("HOME", tempDir)
+
+	dbClient, err := db.Open()
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer dbClient.Close()
+
+	embedder := &fakeEmbedder{dim: 768}
+
+	docsDir := filepath.Join(tempDir, "docs")
+	docs2Dir := filepath.Join(tempDir, "docs2")
+	if err := os.MkdirAll(docsDir, 0755); err != nil {
+		t.Fatalf("mkdir docs: %v", err)
+	}
+	if err := os.MkdirAll(docs2Dir, 0755); err != nil {
+		t.Fatalf("mkdir docs2: %v", err)
+	}
+
+	file1 := filepath.Join(docsDir, "a.md")
+	file2 := filepath.Join(docs2Dir, "b.md")
+	if err := os.WriteFile(file1, []byte("content in docs"), 0644); err != nil {
+		t.Fatalf("write a.md: %v", err)
+	}
+	if err := os.WriteFile(file2, []byte("content in docs2"), 0644); err != nil {
+		t.Fatalf("write b.md: %v", err)
+	}
+
+	if err := IndexDirectory(dbClient, embedder, docsDir); err != nil {
+		t.Fatalf("index docs: %v", err)
+	}
+	if err := IndexDirectory(dbClient, embedder, docs2Dir); err != nil {
+		t.Fatalf("index docs2: %v", err)
+	}
+
+	doc2, err := dbClient.GetDocument(file2)
+	if err != nil || doc2 == nil {
+		t.Fatalf("docs2/b.md not indexed after initial pass")
+	}
+
+	if err := IndexDirectory(dbClient, embedder, docsDir); err != nil {
+		t.Fatalf("re-index docs: %v", err)
+	}
+
+	doc2After, err := dbClient.GetDocument(file2)
+	if err != nil {
+		t.Fatalf("GetDocument after re-index: %v", err)
+	}
+	if doc2After == nil {
+		t.Error("docs2/b.md was deleted from index after re-indexing sibling docs/ — orphan cleanup used plain HasPrefix")
+	}
+}
+
 // TestApplyIncrementalChangesTouchesOnlyChangedFiles is a regression
 // test for issue #46.
 func TestApplyIncrementalChangesTouchesOnlyChangedFiles(t *testing.T) {

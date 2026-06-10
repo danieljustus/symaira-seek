@@ -112,6 +112,59 @@ func StartHTTPServer(port int, ollamaCfg engine.OllamaConfig) error {
 		json.NewEncoder(w).Encode(results)
 	})
 
+	// 3a. SSE streaming search endpoint
+	mux.HandleFunc("/search/stream", func(w http.ResponseWriter, r *http.Request) {
+		query := r.URL.Query().Get("q")
+		if query == "" {
+			http.Error(w, "missing query parameter 'q'", http.StatusBadRequest)
+			return
+		}
+
+		limit := 5
+		if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
+			if parsed, err := strconv.Atoi(limitStr); err == nil && parsed > 0 {
+				limit = parsed
+			}
+		}
+
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+
+		embedder := engine.NewEmbeddingsGeneratorWithOllamaConfig(ollamaCfg)
+
+		results, err := engine.SearchHybrid(dbClient, embedder, query, limit)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		for _, res := range results {
+			select {
+			case <-r.Context().Done():
+				return
+			default:
+			}
+
+			data, err := json.Marshal(res)
+			if err != nil {
+				continue
+			}
+			fmt.Fprintf(w, "event: result\ndata: %s\n\n", data)
+			flusher.Flush()
+		}
+
+		doneData, _ := json.Marshal(map[string]int{"count": len(results)})
+		fmt.Fprintf(w, "event: done\ndata: %s\n\n", doneData)
+		flusher.Flush()
+	})
+
 	// 4. Index folder endpoint
 	indexLimiter := newRateLimiter(indexCooldown)
 	mux.HandleFunc("/index", func(w http.ResponseWriter, r *http.Request) {

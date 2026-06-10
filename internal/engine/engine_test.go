@@ -191,6 +191,99 @@ func TestSearchHybridAcceptsEmbedderInterface(t *testing.T) {
 	}
 }
 
+// TestSearchHybridSemanticOnlyMatch is a regression test for issue #65.
+// A chunk with high cosine similarity but zero keyword overlap must appear
+// in SearchHybrid results even when BM25 has hits on other chunks.
+func TestSearchHybridSemanticOnlyMatch(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "seek-hybrid-semantic-test")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	t.Setenv("HOME", tempDir)
+
+	dbClient, err := db.Open()
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer dbClient.Close()
+
+	docPath := filepath.Join(tempDir, "test.md")
+	dbClient.SaveDocument(&db.Document{
+		Path:      docPath,
+		Hash:      "semhash",
+		UpdatedAt: time.Now(),
+	})
+
+	embedder := &fakeEmbedder{dim: 768}
+
+	// Chunk A: contains the query keyword "falcon"
+	textA := "The swift falcon soars above the mountains"
+	// Chunk B: no keyword overlap with "falcon" but semantically similar
+	// (both are about birds/flight) — we'll make its embedding close to A's
+	textB := "A bird flies high over peaks"
+
+	embeddingA := embedder.GenerateVector(textA)
+	embeddingB := embedder.GenerateVector(textB)
+
+	// Make B's embedding artificially similar to A's so cosine sim is high
+	// even though there's zero keyword overlap with "falcon"
+	for i := range embeddingB {
+		embeddingB[i] = embeddingA[i]*0.9 + embeddingB[i]*0.1
+	}
+	// Re-normalize
+	var sumSquares float64
+	for _, v := range embeddingB {
+		sumSquares += float64(v * v)
+	}
+	norm := float32(math.Sqrt(sumSquares))
+	for i := range embeddingB {
+		embeddingB[i] /= norm
+	}
+
+	dbClient.SaveChunks([]*db.Chunk{
+		{
+			UUID:         "uuid-keyword",
+			DocumentPath: docPath,
+			ChunkIndex:   0,
+			Content:      textA,
+			Embedding:    embeddingA,
+			Hash:         "ha",
+		},
+		{
+			UUID:         "uuid-semantic",
+			DocumentPath: docPath,
+			ChunkIndex:   1,
+			Content:      textB,
+			Embedding:    embeddingB,
+			Hash:         "hb",
+		},
+	})
+
+	// Search for "falcon" — BM25 will find chunk A but not chunk B.
+	// The fix ensures chunk B still appears via full vector scan.
+	res, err := SearchHybrid(dbClient, embedder, "falcon", 10)
+	if err != nil {
+		t.Fatalf("SearchHybrid failed: %v", err)
+	}
+
+	if len(res) < 2 {
+		t.Fatalf("expected at least 2 results (keyword + semantic-only match), got %d", len(res))
+	}
+
+	found := make(map[string]bool)
+	for _, r := range res {
+		found[r.Chunk.UUID] = true
+	}
+	if !found["uuid-keyword"] {
+		t.Error("expected uuid-keyword (BM25 match) in results")
+	}
+	if !found["uuid-semantic"] {
+		t.Error("expected uuid-semantic (semantic-only match) in results — vector search was likely still filtered by BM25 candidates")
+	}
+}
+
 func TestHybridSearch(t *testing.T) {
 	tempDir, err := os.MkdirTemp("", "seek-engine-test")
 	if err != nil {
