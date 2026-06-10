@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,6 +16,7 @@ import (
 
 	"github.com/danieljustus/symaira-seek/internal/db"
 	"github.com/danieljustus/symaira-seek/internal/engine"
+	"github.com/danieljustus/symaira-seek/internal/pathutil"
 )
 
 const (
@@ -145,9 +145,9 @@ func StartHTTPServer(port int, ollamaCfg engine.OllamaConfig) error {
 			return
 		}
 
-		absPath, status, err := validateIndexPath(req.Path)
+		absPath, err := pathutil.RestrictToHome(req.Path)
 		if err != nil {
-			http.Error(w, err.Error(), status)
+			http.Error(w, err.Error(), http.StatusForbidden)
 			return
 		}
 
@@ -205,30 +205,4 @@ func StartHTTPServer(port int, ollamaCfg engine.OllamaConfig) error {
 	return nil
 }
 
-// validateIndexPath normalizes a user-supplied /index path and checks that
-// it is an existing directory under the user's home. The home-boundary
-// check is the security boundary — the daemon is localhost-only, but a
-// malicious local caller must not be able to instruct the indexer to crawl
-// /etc, ~/.ssh, or other sensitive roots.
-func validateIndexPath(reqPath string) (string, int, error) {
-	absPath, err := filepath.Abs(reqPath)
-	if err != nil {
-		return "", http.StatusBadRequest, fmt.Errorf("invalid path: %w", err)
-	}
-	info, err := os.Stat(absPath)
-	if err != nil {
-		return "", http.StatusBadRequest, fmt.Errorf("path does not exist: %w", err)
-	}
-	if !info.IsDir() {
-		return "", http.StatusBadRequest, fmt.Errorf("path is not a directory: %s", absPath)
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", http.StatusInternalServerError, fmt.Errorf("cannot determine home directory: %w", err)
-	}
-	rel, err := filepath.Rel(home, absPath)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
-		return "", http.StatusForbidden, fmt.Errorf("path is outside the allowed root (%s)", home)
-	}
-	return absPath, http.StatusOK, nil
-}
+

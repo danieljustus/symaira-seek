@@ -14,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/sync/singleflight"
 )
 
 const (
@@ -27,15 +29,16 @@ const (
 
 // EmbeddingsGenerator manages Ollama queries and the pure-Go hashing fallback.
 type EmbeddingsGenerator struct {
-	OllamaURL   string
-	Model       string
-	Timeout     time.Duration
-	RetryCount  int
+	OllamaURL    string
+	Model        string
+	Timeout      time.Duration
+	RetryCount   int
 	RetryBackoff time.Duration
-	httpClient  *http.Client
-	cache       map[string]*list.Element
-	cacheOrder  *list.List
-	cacheMu     sync.Mutex
+	httpClient   *http.Client
+	cache        map[string]*list.Element
+	cacheOrder   *list.List
+	cacheMu      sync.Mutex
+	sf           singleflight.Group
 }
 
 type cacheEntry struct {
@@ -58,7 +61,11 @@ func newEmbeddingsGenerator() *EmbeddingsGenerator {
 
 // NewEmbeddingsGenerator sets up the standard engine configuration.
 func NewEmbeddingsGenerator() *EmbeddingsGenerator {
-	return newEmbeddingsGenerator()
+	gen := newEmbeddingsGenerator()
+	gen.httpClient.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	return gen
 }
 
 // Embedder is the public surface of an embedding generator. Callers depend
@@ -218,9 +225,21 @@ func (eg *EmbeddingsGenerator) GenerateVectors(texts []string) [][]float32 {
 		uncachedTexts[i] = u.text
 	}
 
-	// Try batch Ollama query
-	batchVectors, err := eg.queryOllamaBatch(uncachedTexts)
-	if err == nil && len(batchVectors) == len(uncachedList) {
+	var batchVectors [][]float32
+	var batchErr error
+	// Try batch Ollama query, deduplicated via singleflight so concurrent
+	// goroutines requesting the same uncached texts make only one HTTP call.
+	{
+		batchKey := hashKey(strings.Join(uncachedTexts, "\x00"))
+		res, sfErr, _ := eg.sf.Do(batchKey, func() (interface{}, error) {
+			return eg.queryOllamaBatch(uncachedTexts)
+		})
+		if sfErr == nil && res != nil {
+			batchVectors = res.([][]float32)
+		}
+		batchErr = sfErr
+	}
+	if batchErr == nil && len(batchVectors) == len(uncachedList) {
 		for i, u := range uncachedList {
 			vec := batchVectors[i]
 			key := hashKey(u.text)

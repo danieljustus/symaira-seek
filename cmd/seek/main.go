@@ -38,9 +38,9 @@ type Config struct {
 }
 
 var (
-	cfgFile      string
-	cfg          Config
-	limitFlag    int
+	cfgFile   string
+	cfg       Config
+	limitFlag int
 	jsonFlag  bool
 	watchFlag bool
 	portFlag  int
@@ -243,8 +243,8 @@ func initConfig() {
 	if cfgFile == "" {
 		home, err := os.UserHomeDir()
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "Error locating home directory:", err)
-			os.Exit(1)
+			home = os.TempDir()
+			fmt.Fprintf(os.Stderr, "Warning: $HOME not set, using %s for config directory\n", home)
 		}
 		cfgDir := filepath.Join(home, ".config", "symaira-seek")
 		if err := os.MkdirAll(cfgDir, 0755); err != nil {

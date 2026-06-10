@@ -19,7 +19,8 @@ func TestHashKeyEntropy(t *testing.T) {
 		t.Errorf("expected 32 hex chars (128 bits) in cache key, got %d (%q)", len(got), got)
 	}
 
-	if hashKey("alpha") != hashKey("alpha") {
+	h := hashKey("alpha")
+	if h != hashKey("alpha") {
 		t.Error("hashKey must be deterministic")
 	}
 
@@ -150,9 +151,7 @@ func TestSearchHybridAcceptsEmbedderInterface(t *testing.T) {
 	}
 	defer os.RemoveAll(tempDir)
 
-	originalHome := os.Getenv("HOME")
-	os.Setenv("HOME", tempDir)
-	defer os.Setenv("HOME", originalHome)
+	t.Setenv("HOME", tempDir)
 
 	dbClient, err := db.Open()
 	if err != nil {
@@ -199,9 +198,7 @@ func TestHybridSearch(t *testing.T) {
 	}
 	defer os.RemoveAll(tempDir)
 
-	originalHome := os.Getenv("HOME")
-	os.Setenv("HOME", tempDir)
-	defer os.Setenv("HOME", originalHome)
+	t.Setenv("HOME", tempDir)
 
 	dbClient, err := db.Open()
 	if err != nil {
