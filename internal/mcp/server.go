@@ -239,10 +239,6 @@ func handleToolCall(reqID interface{}, name string, args map[string]interface{},
 			return
 		}
 
-		// Resolve and normalize the path. filepath.Clean collapses any ".."
-		// segments, so a later strings.Contains check on the absolute path is
-		// dead code — the indexed-document whitelist below is the real
-		// authorization boundary.
 		cleanPath := filepath.Clean(path)
 		absPath, err := filepath.Abs(cleanPath)
 		if err != nil {
@@ -250,10 +246,16 @@ func handleToolCall(reqID interface{}, name string, args map[string]interface{},
 			return
 		}
 
-		// Authorization: only allow reading files that are actually in the
-		// local index. This is the primary defense and the only one that
-		// reliably blocks reads of arbitrary filesystem paths.
-		doc, err := dbClient.GetDocument(absPath)
+		// Resolve symlinks before the index lookup. If a file was replaced
+		// by a symlink after indexing, the resolved path will differ from
+		// the indexed path and the request is rejected.
+		resolvedPath, err := filepath.EvalSymlinks(absPath)
+		if err != nil {
+			sendError(reqID, -32603, "Path does not exist: "+err.Error())
+			return
+		}
+
+		doc, err := dbClient.GetDocument(resolvedPath)
 		if err != nil {
 			sendError(reqID, -32603, "Database error: "+err.Error())
 			return
@@ -263,13 +265,29 @@ func handleToolCall(reqID interface{}, name string, args map[string]interface{},
 			return
 		}
 
-		data, err := os.ReadFile(absPath)
+		// Read with a size cap to prevent unbounded memory usage.
+		const maxReadBytes = 10 << 20 // 10 MB
+		f, err := os.Open(resolvedPath)
+		if err != nil {
+			sendError(reqID, -32603, "Failed to read file: "+err.Error())
+			return
+		}
+		defer f.Close()
+
+		limitedReader := io.LimitReader(f, maxReadBytes+1)
+		data, err := io.ReadAll(limitedReader)
 		if err != nil {
 			sendError(reqID, -32603, "Failed to read file: "+err.Error())
 			return
 		}
 
-		sendToolResponse(reqID, string(data))
+		content := string(data)
+		if int64(len(data)) > maxReadBytes {
+			content = content[:maxReadBytes]
+			content += "\n\n[Truncated: file exceeds 10 MB read limit]"
+		}
+
+		sendToolResponse(reqID, content)
 
 	case "list_documents":
 		folderPrefix, _ := args["folder"].(string)

@@ -5,10 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -58,6 +61,91 @@ func (r *rateLimiter) evictStaleLocked(now time.Time) {
 	}
 }
 
+// isLocalhostHost reports whether host is a localhost address (127.0.0.1 or
+// localhost), optionally with a port suffix.
+func isLocalhostHost(host string) bool {
+	// Strip port if present.
+	hostname := host
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		hostname = h
+	}
+	return hostname == "127.0.0.1" || hostname == "localhost" || hostname == "::1"
+}
+
+// isLocalhostOrigin reports whether origin is a localhost origin (http or
+// https scheme with a localhost host).
+func isLocalhostOrigin(origin string) bool {
+	u, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return false
+	}
+	return isLocalhostHost(u.Host)
+}
+
+// hostValidation wraps an http.Handler and rejects requests whose Host header
+// does not point to a localhost address (DNS-rebinding protection).
+func hostValidation(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !isLocalhostHost(r.Host) {
+			http.Error(w, "forbidden: non-localhost host", http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// originValidation wraps an http.Handler and rejects requests whose Origin
+// header, when present, does not point to a localhost origin (cross-origin
+// protection).
+func originValidation(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if origin := r.Header.Get("Origin"); origin != "" {
+			if !isLocalhostOrigin(origin) {
+				http.Error(w, "forbidden: cross-origin request", http.StatusForbidden)
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// contentTypeEnforcement wraps an http.Handler and rejects POST requests to
+// /index that lack Content-Type: application/json.
+func contentTypeEnforcement(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/index" {
+			ct := r.Header.Get("Content-Type")
+			if !strings.HasPrefix(ct, "application/json") {
+				http.Error(w, "unsupported media type: Content-Type must be application/json", http.StatusUnsupportedMediaType)
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// bearerTokenAuth wraps an http.Handler and checks the SEEK_API_TOKEN
+// environment variable. If set, requests must include a matching Bearer token
+// in the Authorization header.
+func bearerTokenAuth(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		expected := os.Getenv("SEEK_API_TOKEN")
+		if expected == "" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		auth := r.Header.Get("Authorization")
+		if !strings.HasPrefix(auth, "Bearer ") || strings.TrimPrefix(auth, "Bearer ") != expected {
+			http.Error(w, "unauthorized: invalid or missing Bearer token", http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 // StartHTTPServer runs the local HTTP REST daemon.
 func StartHTTPServer(port int, ollamaCfg engine.OllamaConfig) error {
 	dbClient, err := db.Open()
@@ -65,6 +153,8 @@ func StartHTTPServer(port int, ollamaCfg engine.OllamaConfig) error {
 		return fmt.Errorf("failed to open database: %w", err)
 	}
 	defer dbClient.Close()
+
+	embedder := engine.NewEmbeddingsGeneratorWithOllamaConfig(ollamaCfg)
 
 	mux := http.NewServeMux()
 
@@ -101,8 +191,6 @@ func StartHTTPServer(port int, ollamaCfg engine.OllamaConfig) error {
 			}
 		}
 
-		embedder := engine.NewEmbeddingsGeneratorWithOllamaConfig(ollamaCfg)
-
 		results, err := engine.SearchHybrid(dbClient, embedder, query, limit)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -136,8 +224,6 @@ func StartHTTPServer(port int, ollamaCfg engine.OllamaConfig) error {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("Connection", "keep-alive")
-
-		embedder := engine.NewEmbeddingsGeneratorWithOllamaConfig(ollamaCfg)
 
 		results, err := engine.SearchHybrid(dbClient, embedder, query, limit)
 		if err != nil {
@@ -203,8 +289,6 @@ func StartHTTPServer(port int, ollamaCfg engine.OllamaConfig) error {
 			return
 		}
 
-		embedder := engine.NewEmbeddingsGeneratorWithOllamaConfig(ollamaCfg)
-
 		if err := engine.IndexDirectory(dbClient, embedder, absPath); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -221,7 +305,7 @@ func StartHTTPServer(port int, ollamaCfg engine.OllamaConfig) error {
 
 	srv := &http.Server{
 		Addr:           addr,
-		Handler:        mux,
+		Handler:        hostValidation(originValidation(contentTypeEnforcement(bearerTokenAuth(mux)))),
 		ReadTimeout:    15 * time.Second,
 		WriteTimeout:   15 * time.Second,
 		IdleTimeout:    60 * time.Second,

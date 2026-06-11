@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -667,7 +668,7 @@ func TestHandleToolCallInvalidParams(t *testing.T) {
 		JSONRPC: "2.0",
 		ID:      float64(1),
 		Method:  "tools/call",
-		Params:  mustRaw(`{"name": 123}`), // name should be a string
+		Params:  mustRaw(`{"name": 123}`),
 	}
 
 	got, err := pipeStdout(func() {
@@ -688,6 +689,109 @@ func TestHandleToolCallInvalidParams(t *testing.T) {
 	errMap := resp.Error.(map[string]interface{})
 	if int(errMap["code"].(float64)) != -32602 {
 		t.Errorf("error code = %v, want -32602", errMap["code"])
+	}
+}
+
+func TestReadDocument_SymlinkSwapRejected(t *testing.T) {
+	tmpDir := t.TempDir()
+	origFile := filepath.Join(tmpDir, "original.txt")
+	sensitiveFile := filepath.Join(tmpDir, "secret.txt")
+
+	if err := os.WriteFile(origFile, []byte("indexed content"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sensitiveFile, []byte("secret data"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	resolvedOrigFile, err := filepath.EvalSymlinks(origFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	store := &fakeStore{
+		getDocFunc: func(path string) (*db.Document, error) {
+			if path == resolvedOrigFile {
+				return &db.Document{Path: resolvedOrigFile}, nil
+			}
+			return nil, nil
+		},
+	}
+
+	os.Remove(origFile)
+	if err := os.Symlink(sensitiveFile, origFile); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := pipeStdout(func() {
+		handleToolCall(float64(1), "read_document", map[string]interface{}{
+			"path": origFile,
+		}, store, nil)
+	})
+	if err != nil {
+		t.Fatalf("pipeStdout failed: %v", err)
+	}
+
+	var resp JSONRPCResponse
+	if err := json.Unmarshal([]byte(strings.TrimSpace(got)), &resp); err != nil {
+		t.Fatalf("failed to unmarshal response: %v\ngot: %s", err, got)
+	}
+
+	if resp.Error == nil {
+		t.Fatal("expected error for symlink-swap path")
+	}
+}
+
+func TestReadDocument_LargeFileTruncated(t *testing.T) {
+	tmpDir := t.TempDir()
+	bigFile := filepath.Join(tmpDir, "big.txt")
+
+	bigContent := strings.Repeat("A", 11<<20) // 11 MB
+	if err := os.WriteFile(bigFile, []byte(bigContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	resolvedBigFile, err := filepath.EvalSymlinks(bigFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	store := &fakeStore{
+		getDocFunc: func(path string) (*db.Document, error) {
+			if path == resolvedBigFile {
+				return &db.Document{Path: resolvedBigFile}, nil
+			}
+			return nil, nil
+		},
+	}
+
+	got, err := pipeStdout(func() {
+		handleToolCall(float64(1), "read_document", map[string]interface{}{
+			"path": bigFile,
+		}, store, nil)
+	})
+	if err != nil {
+		t.Fatalf("pipeStdout failed: %v", err)
+	}
+
+	var resp JSONRPCResponse
+	if err := json.Unmarshal([]byte(strings.TrimSpace(got)), &resp); err != nil {
+		t.Fatalf("failed to unmarshal response: %v\ngot: %s", err, got)
+	}
+
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %v", resp.Error)
+	}
+
+	result := resp.Result.(map[string]interface{})
+	content := result["content"].([]interface{})
+	text := content[0].(map[string]interface{})["text"].(string)
+
+	if !strings.HasSuffix(text, "[Truncated: file exceeds 10 MB read limit]") {
+		t.Error("expected truncation notice at end of content")
+	}
+	if len(text) > 11<<20 {
+		t.Errorf("content too large: %d bytes", len(text))
 	}
 }
 

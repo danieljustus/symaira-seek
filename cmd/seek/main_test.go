@@ -247,6 +247,46 @@ func TestSetConfigValue_RejectsUnknownKey(t *testing.T) {
 	}
 }
 
+func TestSetConfigValue_RejectsEmptyModel(t *testing.T) {
+	dir := t.TempDir()
+	cfgFile = filepath.Join(dir, "config.json")
+	cfg = defaultConfig()
+	defer func() { cfg = defaultConfig() }()
+
+	if err := setConfigValue("model", ""); err == nil {
+		t.Error("expected error for empty model value")
+	} else if !strings.Contains(err.Error(), "--set-value is required") {
+		t.Errorf("expected actionable error message, got %q", err.Error())
+	}
+}
+
+func TestSetConfigValue_RejectsEmptyOllamaURL(t *testing.T) {
+	dir := t.TempDir()
+	cfgFile = filepath.Join(dir, "config.json")
+	cfg = defaultConfig()
+	defer func() { cfg = defaultConfig() }()
+
+	if err := setConfigValue("ollama_url", ""); err == nil {
+		t.Error("expected error for empty ollama_url value")
+	} else if !strings.Contains(err.Error(), "--set-value is required") {
+		t.Errorf("expected actionable error message, got %q", err.Error())
+	}
+}
+
+func TestSetConfigValue_AcceptsValidModel(t *testing.T) {
+	dir := t.TempDir()
+	cfgFile = filepath.Join(dir, "config.json")
+	cfg = defaultConfig()
+	defer func() { cfg = defaultConfig() }()
+
+	if err := setConfigValue("model", "mxbai-embed-large"); err != nil {
+		t.Fatalf("setConfigValue(model): %v", err)
+	}
+	if cfg.Model != "mxbai-embed-large" {
+		t.Errorf("expected Model=mxbai-embed-large, got %q", cfg.Model)
+	}
+}
+
 func captureStderr(t *testing.T, fn func()) string {
 	t.Helper()
 	old := os.Stderr

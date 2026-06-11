@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"sync"
 
 	"github.com/danieljustus/symaira-seek/internal/db"
 )
@@ -26,18 +27,35 @@ func SearchHybrid(dbClient db.Store, embedder Embedder, query string, limit int)
 		fetchLimit = 50
 	}
 
-	// 2. Run BM25 and full vector scan in parallel (logically).
+	// 2. Run BM25 and full vector scan concurrently.
 	// The vector leg always runs a full scan so that semantically related
 	// chunks without keyword overlap are never excluded (issue #65).
-	bm25Results, err := dbClient.SearchBM25(query, fetchLimit)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "warning: BM25 search failed, falling back to vector-only: %v\n", err)
+	var (
+		bm25Results []*db.SearchResult
+		bm25Err     error
+		vectorResults []*db.SearchResult
+		vectorErr   error
+		wg          sync.WaitGroup
+	)
+
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		bm25Results, bm25Err = dbClient.SearchBM25(query, fetchLimit)
+	}()
+	go func() {
+		defer wg.Done()
+		vectorResults, vectorErr = dbClient.SearchVector(queryVec, fetchLimit)
+	}()
+	wg.Wait()
+
+	if bm25Err != nil {
+		fmt.Fprintf(os.Stderr, "warning: BM25 search failed, falling back to vector-only: %v\n", bm25Err)
 		bm25Results = nil
 	}
 
-	vectorResults, err := dbClient.SearchVector(queryVec, fetchLimit)
-	if err != nil {
-		return nil, err
+	if vectorErr != nil {
+		return nil, vectorErr
 	}
 
 	// 4. Reciprocal Rank Fusion

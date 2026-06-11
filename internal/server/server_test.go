@@ -15,6 +15,223 @@ import (
 	"github.com/danieljustus/symaira-seek/internal/pathutil"
 )
 
+func TestIsLocalhostHost(t *testing.T) {
+	tests := []struct {
+		host string
+		want bool
+	}{
+		{"127.0.0.1", true},
+		{"127.0.0.1:8080", true},
+		{"localhost", true},
+		{"localhost:3000", true},
+		{"::1", true},
+		{"evil.com", false},
+		{"attacker.example.com:80", false},
+		{"192.168.1.1", false},
+		{"", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.host, func(t *testing.T) {
+			got := isLocalhostHost(tt.host)
+			if got != tt.want {
+				t.Errorf("isLocalhostHost(%q) = %v, want %v", tt.host, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIsLocalhostOrigin(t *testing.T) {
+	tests := []struct {
+		origin string
+		want   bool
+	}{
+		{"http://localhost:3000", true},
+		{"https://127.0.0.1:8080", true},
+		{"http://localhost", true},
+		{"http://evil.com", false},
+		{"https://attacker.example.com", false},
+		{"ftp://localhost", false},
+		{"not-a-url", false},
+		{"", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.origin, func(t *testing.T) {
+			got := isLocalhostOrigin(tt.origin)
+			if got != tt.want {
+				t.Errorf("isLocalhostOrigin(%q) = %v, want %v", tt.origin, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestHostValidation_RejectsNonLocalhost(t *testing.T) {
+	handler := hostValidation(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest("GET", "/health", nil)
+	req.Host = "evil.com"
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusForbidden {
+		t.Errorf("expected 403, got %d", rr.Code)
+	}
+}
+
+func TestHostValidation_AcceptsLocalhost(t *testing.T) {
+	handler := hostValidation(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest("GET", "/health", nil)
+	req.Host = "127.0.0.1:8080"
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", rr.Code)
+	}
+}
+
+func TestOriginValidation_RejectsCrossOrigin(t *testing.T) {
+	handler := originValidation(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest("GET", "/search", nil)
+	req.Host = "127.0.0.1:8788"
+	req.Header.Set("Origin", "http://evil.com")
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusForbidden {
+		t.Errorf("expected 403, got %d", rr.Code)
+	}
+}
+
+func TestOriginValidation_AcceptsLocalhost(t *testing.T) {
+	handler := originValidation(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest("GET", "/search", nil)
+	req.Host = "127.0.0.1:8788"
+	req.Header.Set("Origin", "http://localhost:3000")
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", rr.Code)
+	}
+}
+
+func TestOriginValidation_AllowsNoOrigin(t *testing.T) {
+	handler := originValidation(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest("GET", "/search", nil)
+	req.Host = "127.0.0.1:8788"
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", rr.Code)
+	}
+}
+
+func TestContentTypeEnforcement_RejectsWrongType(t *testing.T) {
+	handler := contentTypeEnforcement(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest("POST", "/index", strings.NewReader(`{"path":"/tmp"}`))
+	req.Header.Set("Content-Type", "text/plain")
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnsupportedMediaType {
+		t.Errorf("expected 415, got %d", rr.Code)
+	}
+}
+
+func TestContentTypeEnforcement_AcceptsJSON(t *testing.T) {
+	handler := contentTypeEnforcement(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest("POST", "/index", strings.NewReader(`{"path":"/tmp"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", rr.Code)
+	}
+}
+
+func TestContentTypeEnforcement_SkipsNonIndexPaths(t *testing.T) {
+	handler := contentTypeEnforcement(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest("POST", "/other", strings.NewReader("data"))
+	req.Header.Set("Content-Type", "text/plain")
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", rr.Code)
+	}
+}
+
+func TestBearerTokenAuth_NoTokenRequired(t *testing.T) {
+	t.Setenv("SEEK_API_TOKEN", "")
+	handler := bearerTokenAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest("GET", "/health", nil)
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", rr.Code)
+	}
+}
+
+func TestBearerTokenAuth_RejectsMissingToken(t *testing.T) {
+	t.Setenv("SEEK_API_TOKEN", "secret123")
+	handler := bearerTokenAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest("GET", "/health", nil)
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401, got %d", rr.Code)
+	}
+}
+
+func TestBearerTokenAuth_AcceptsValidToken(t *testing.T) {
+	t.Setenv("SEEK_API_TOKEN", "secret123")
+	handler := bearerTokenAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest("GET", "/health", nil)
+	req.Header.Set("Authorization", "Bearer secret123")
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", rr.Code)
+	}
+}
+
 // withTempHome points HOME at a temporary directory for the duration of a
 // test so pathutil.RestrictToHome's UserHomeDir() lookup is hermetic.
 func withTempHome(t *testing.T) string {

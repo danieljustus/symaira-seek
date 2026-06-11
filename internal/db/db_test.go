@@ -1,10 +1,13 @@
 package db
 
 import (
+	"fmt"
 	"math"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -268,4 +271,135 @@ func BenchmarkSearchVectorTwoPass(b *testing.B) {
 			b.Fatal("expected non-empty results")
 		}
 	}
+}
+
+type scoredEntry struct {
+	id    int64
+	score float32
+}
+
+func insertSorted(list []*scoredEntry, item *scoredEntry, maxLen int) []*scoredEntry {
+	pos := sort.Search(len(list), func(i int) bool {
+		return list[i].score < item.score
+	})
+
+	if len(list) < maxLen {
+		list = append(list, nil)
+		copy(list[pos+1:], list[pos:len(list)-1])
+		list[pos] = item
+	} else if pos < maxLen {
+		copy(list[pos+1:], list[pos:maxLen-1])
+		list[pos] = item
+	}
+	return list
+}
+
+func (db *DB) searchVectorTwoPass(queryVec []float32, candidateIDs []int64, limit int) ([]*SearchResult, error) {
+	const vectorBatchSize = 500
+	var topK []*scoredEntry
+
+	candidateSet := make(map[int64]struct{}, len(candidateIDs))
+	for _, id := range candidateIDs {
+		candidateSet[id] = struct{}{}
+	}
+	hasFilter := len(candidateSet) > 0
+
+	offset := 0
+	for {
+		rows, err := db.conn.Query(
+			"SELECT id, embedding, norm FROM chunks ORDER BY id LIMIT ? OFFSET ?",
+			vectorBatchSize, offset,
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		batchCount := 0
+		for rows.Next() {
+			var id int64
+			var embBytes []byte
+			var norm float32
+			if err := rows.Scan(&id, &embBytes, &norm); err != nil {
+				rows.Close()
+				return nil, err
+			}
+
+			if hasFilter {
+				if _, ok := candidateSet[id]; !ok {
+					continue
+				}
+			}
+
+			vec := BytesToFloat32Slice(embBytes)
+			var score float32
+			if norm > 0 {
+				score = CosineSimilarityWithNorm(queryVec, vec, norm)
+			} else {
+				score = CosineSimilarity(queryVec, vec)
+			}
+			batchCount++
+
+			topK = insertSorted(topK, &scoredEntry{id: id, score: score}, limit)
+		}
+		rows.Close()
+
+		if batchCount < vectorBatchSize {
+			break
+		}
+		offset += vectorBatchSize
+	}
+
+	if len(topK) == 0 {
+		return nil, nil
+	}
+
+	scoreMap := make(map[int64]float32)
+	idOrderMap := make(map[int64]int)
+	topIDs := make([]interface{}, len(topK))
+	for i, s := range topK {
+		topIDs[i] = s.id
+		scoreMap[s.id] = s.score
+		idOrderMap[s.id] = i
+	}
+
+	placeholders := make([]string, len(topK))
+	for i := range placeholders {
+		placeholders[i] = "?"
+	}
+	query := fmt.Sprintf(
+		"SELECT id, uuid, document_path, chunk_index, content, embedding, hash FROM chunks WHERE id IN (%s)",
+		strings.Join(placeholders, ","),
+	)
+
+	detailRows, err := db.conn.Query(query, topIDs...)
+	if err != nil {
+		return nil, err
+	}
+	defer detailRows.Close()
+
+	unsortedResults := make([]*SearchResult, 0, len(topK))
+	for detailRows.Next() {
+		var c Chunk
+		var embBytes []byte
+		if err := detailRows.Scan(&c.ID, &c.UUID, &c.DocumentPath, &c.ChunkIndex, &c.Content, &embBytes, &c.Hash); err != nil {
+			return nil, err
+		}
+		c.Embedding = BytesToFloat32Slice(embBytes)
+
+		unsortedResults = append(unsortedResults, &SearchResult{
+			Chunk:       &c,
+			VectorRank:  0,
+			CosineScore: scoreMap[c.ID],
+		})
+	}
+
+	sort.Slice(unsortedResults, func(i, j int) bool {
+		return idOrderMap[unsortedResults[i].Chunk.ID] < idOrderMap[unsortedResults[j].Chunk.ID]
+	})
+
+	for i, res := range unsortedResults {
+		res.VectorRank = i + 1
+	}
+
+	return unsortedResults, nil
 }
