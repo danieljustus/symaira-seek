@@ -36,6 +36,14 @@ It exposes multiple interfaces:
 
 ## Installation & Setup
 
+### Homebrew (macOS/Linux)
+
+Install via Homebrew tap:
+
+```bash
+brew install danieljustus/symaira-seek/symaira-seek
+```
+
 ### Pre-built Binaries (Recommended)
 
 Download the latest release for your platform from [GitHub Releases](https://github.com/danieljustus/symaira-seek/releases):
