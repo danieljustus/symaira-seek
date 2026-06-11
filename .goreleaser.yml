@@ -63,3 +63,16 @@ release:
   draft: false
   prerelease: auto
   name_template: "v{{.Version}}"
+
+brews:
+  - repository:
+      owner: danieljustus
+      name: homebrew-symaira-seek
+    folder: Formula
+    homepage: https://github.com/danieljustus/symaira-seek
+    description: Local-first, CGO-free document retrieval for AI agents
+    license: MIT
+    service: |
+      run "#{opt_bin}/seek"
+    test: |
+      system "#{bin}/seek", "version"
