@@ -36,7 +36,7 @@ jobs:
 
       - name: Build
         run: |
-          VERSION_PKG="github.com/danieljustus/symaira-seek/cmd/seek"
+          VERSION_PKG="github.com/danieljustus/symaira-seek/cmd/symseek"
           if [ -n "$GITHUB_REF_NAME" ] && git describe --tags --exact-match >/dev/null 2>&1; then
             VERSION="$(git describe --tags --exact-match)"
           elif [ -n "$GITHUB_SHA" ]; then

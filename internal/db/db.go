@@ -108,7 +108,7 @@ func Open() (*DB, error) {
 		return nil, fmt.Errorf("failed to create database directory: %w", err)
 	}
 
-	dbPath := filepath.Join(dir, "seek.db")
+	dbPath := filepath.Join(dir, "symseek.db")
 	conn, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open sqlite database: %w", err)

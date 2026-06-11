@@ -92,7 +92,7 @@ func handleRequest(req *JSONRPCRequest, dbClient db.Store, embedder engine.Embed
 				"tools": map[string]interface{}{},
 			},
 		"serverInfo": map[string]string{
-			"name":    "symaira-seek",
+			"name":    "symseek",
 			"version": ServerVersion,
 		},
 		})

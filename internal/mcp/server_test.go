@@ -226,8 +226,8 @@ func TestHandleRequestInitialize(t *testing.T) {
 		t.Errorf("protocolVersion = %q, want %q", result["protocolVersion"], "2024-11-05")
 	}
 	si := result["serverInfo"].(map[string]interface{})
-	if si["name"] != "symaira-seek" {
-		t.Errorf("serverInfo.name = %q, want %q", si["name"], "symaira-seek")
+	if si["name"] != "symseek" {
+		t.Errorf("serverInfo.name = %q, want %q", si["name"], "symseek")
 	}
 }
 

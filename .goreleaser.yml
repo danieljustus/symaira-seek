@@ -11,9 +11,9 @@ before:
     - go generate ./...
 
 builds:
-  - id: seek
-    main: ./cmd/seek
-    binary: seek
+  - id: symseek
+    main: ./cmd/symseek
+    binary: symseek
     env:
       - CGO_ENABLED=0
     goos:
@@ -65,7 +65,7 @@ release:
   name_template: "v{{.Version}}"
 
 brews:
-  - name: seek
+  - name: symseek
     repository:
       owner: danieljustus
       name: homebrew-tap
@@ -75,6 +75,6 @@ brews:
     description: Local-first, CGO-free document retrieval for AI agents
     license: MIT
     service: |
-      run "#{opt_bin}/seek"
+      run "#{opt_bin}/symseek"
     test: |
-      system "#{bin}/seek", "version"
+      system "#{bin}/symseek", "version"

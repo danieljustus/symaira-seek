@@ -50,7 +50,7 @@ func main() {
 	cobra.OnInitialize(initConfig)
 
 	rootCmd := &cobra.Command{
-		Use:   "seek",
+		Use:   "symseek",
 		Short: "Symaira-Seek: A local hybrid document retrieval CLI and MCP tool",
 	}
 
@@ -211,7 +211,7 @@ func main() {
 		Use:   "version",
 		Short: "Print the version number of Symaira-Seek",
 		Run: func(cmd *cobra.Command, args []string) {
-			fmt.Printf("seek version %s\n", version)
+			fmt.Printf("symseek version %s\n", version)
 		},
 	}
 	rootCmd.AddCommand(versionCmd)
@@ -248,7 +248,7 @@ func initConfig() {
 		}
 		cfgDir := filepath.Join(home, ".config", "symaira-seek")
 		if err := os.MkdirAll(cfgDir, 0755); err != nil {
-			fmt.Fprintf(os.Stderr, "seek: could not create config directory %s: %v\n", cfgDir, err)
+			fmt.Fprintf(os.Stderr, "symseek: could not create config directory %s: %v\n", cfgDir, err)
 		}
 		cfgFile = filepath.Join(cfgDir, "config.json")
 	}
@@ -282,7 +282,7 @@ func loadOrInitConfig(path string) Config {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if !os.IsNotExist(err) {
-			fmt.Fprintf(os.Stderr, "seek: could not read config %s: %v; using built-in defaults\n", path, err)
+			fmt.Fprintf(os.Stderr, "symseek: could not read config %s: %v; using built-in defaults\n", path, err)
 			return cfg
 		}
 		writeDefaultConfig(path, cfg)
@@ -290,7 +290,7 @@ func loadOrInitConfig(path string) Config {
 	}
 
 	if uErr := json.Unmarshal(data, &cfg); uErr != nil {
-		fmt.Fprintf(os.Stderr, "seek: config %s is malformed (%v); using built-in defaults\n", path, uErr)
+		fmt.Fprintf(os.Stderr, "symseek: config %s is malformed (%v); using built-in defaults\n", path, uErr)
 		return defaultConfig()
 	}
 	return cfg
@@ -299,11 +299,11 @@ func loadOrInitConfig(path string) Config {
 func writeDefaultConfig(path string, cfg Config) {
 	out, mErr := json.MarshalIndent(cfg, "", "  ")
 	if mErr != nil {
-		fmt.Fprintf(os.Stderr, "seek: could not marshal default config: %v\n", mErr)
+		fmt.Fprintf(os.Stderr, "symseek: could not marshal default config: %v\n", mErr)
 		return
 	}
 	if wErr := os.WriteFile(path, out, 0600); wErr != nil {
-		fmt.Fprintf(os.Stderr, "seek: could not write default config to %s: %v\n", path, wErr)
+		fmt.Fprintf(os.Stderr, "symseek: could not write default config to %s: %v\n", path, wErr)
 	}
 }
 
