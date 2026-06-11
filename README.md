@@ -1,6 +1,20 @@
 # Symaira-Seek
 
+> Local-first, CGO-free document retrieval for AI agents with hybrid BM25+vector search.
+
+[![CI](https://github.com/danieljustus/symaira-seek/actions/workflows/ci.yml/badge.svg)](https://github.com/danieljustus/symaira-seek/actions/workflows/ci.yml)
+[![Go Version](https://img.shields.io/badge/go-1.26+-00ADD8?logo=go&logoColor=white)](https://go.dev/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 Symaira-Seek is a local-first, CGO-free document retrieval tool designed for AI agents and developers. It provides hybrid search (BM25 keyword search combined with vector semantic search) and fuses results using Reciprocal Rank Fusion (RRF).
+
+## Why Symaira-Seek?
+
+- **100% CGO-free**: Pure Go SQLite driver (`modernc.org/sqlite`) — cross-compile anywhere without C dependencies
+- **Hybrid search**: Combines BM25 keyword matching with vector semantic search for better relevance
+- **Dual embedding modes**: Local Ollama integration for quality, deterministic fallback for offline usage
+- **Multiple interfaces**: CLI, MCP server for AI agents, and HTTP REST daemon
+- **Local-first**: Your data stays on your machine — no cloud dependencies required
 
 It exposes multiple interfaces:
 1. **Command Line Interface (CLI)**: A Unix-friendly command utility.
