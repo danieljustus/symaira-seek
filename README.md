@@ -41,7 +41,8 @@ It exposes multiple interfaces:
 Install via Homebrew tap:
 
 ```bash
-brew install danieljustus/symaira-seek/symaira-seek
+brew tap danieljustus/tap
+brew install seek
 ```
 
 ### Pre-built Binaries (Recommended)
