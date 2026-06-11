@@ -154,6 +154,8 @@ func StartHTTPServer(port int, ollamaCfg engine.OllamaConfig) error {
 	}
 	defer dbClient.Close()
 
+	embedder := engine.NewEmbeddingsGeneratorWithOllamaConfig(ollamaCfg)
+
 	mux := http.NewServeMux()
 
 	// 1. Health check endpoint
@@ -189,8 +191,6 @@ func StartHTTPServer(port int, ollamaCfg engine.OllamaConfig) error {
 			}
 		}
 
-		embedder := engine.NewEmbeddingsGeneratorWithOllamaConfig(ollamaCfg)
-
 		results, err := engine.SearchHybrid(dbClient, embedder, query, limit)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -224,8 +224,6 @@ func StartHTTPServer(port int, ollamaCfg engine.OllamaConfig) error {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("Connection", "keep-alive")
-
-		embedder := engine.NewEmbeddingsGeneratorWithOllamaConfig(ollamaCfg)
 
 		results, err := engine.SearchHybrid(dbClient, embedder, query, limit)
 		if err != nil {
@@ -290,8 +288,6 @@ func StartHTTPServer(port int, ollamaCfg engine.OllamaConfig) error {
 			http.Error(w, err.Error(), http.StatusForbidden)
 			return
 		}
-
-		embedder := engine.NewEmbeddingsGeneratorWithOllamaConfig(ollamaCfg)
 
 		if err := engine.IndexDirectory(dbClient, embedder, absPath); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
