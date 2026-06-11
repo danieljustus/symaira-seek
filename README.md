@@ -36,9 +36,34 @@ It exposes multiple interfaces:
 
 ## Installation & Setup
 
+### Pre-built Binaries (Recommended)
+
+Download the latest release for your platform from [GitHub Releases](https://github.com/danieljustus/symaira-seek/releases):
+
+- **Linux**: `symaira-seek_Linux_x86_64.tar.gz` or `symaira-seek_Linux_arm64.tar.gz`
+- **macOS**: `symaira-seek_Darwin_x86_64.tar.gz` or `symaira-seek_Darwin_arm64.tar.gz`
+- **Windows**: `symaira-seek_Windows_x86_64.zip` or `symaira-seek_Windows_arm64.zip`
+
+Extract and install:
+```bash
+# Linux/macOS
+tar -xzf symaira-seek_*.tar.gz
+chmod +x seek
+sudo mv seek /usr/local/bin/
+
+# Windows
+# Extract the .zip and add to PATH
+```
+
+Verify the installation:
+```bash
+seek version
+```
+
+### Build from Source
+
 Ensure you have [Go](https://go.dev/) installed.
 
-### Build Binary
 ```bash
 go build -o seek cmd/seek/main.go
 ```
