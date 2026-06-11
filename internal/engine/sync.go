@@ -30,6 +30,17 @@ func isWithinDir(path, dir string) bool {
 	return strings.HasPrefix(path, dir+string(os.PathSeparator))
 }
 
+func shouldSkipDir(name string) bool {
+	if strings.HasPrefix(name, ".") && name != "." && name != ".." {
+		return true
+	}
+	switch name {
+	case "node_modules", "dist", "vendor", "build", "target":
+		return true
+	}
+	return false
+}
+
 var supportedExtensions = map[string]bool{
 	".md":   true,
 	".txt":  true,
@@ -70,12 +81,7 @@ func IndexDirectory(dbClient db.Store, embedder Embedder, dirPath string) error 
 		}
 
 		if d.IsDir() {
-			name := d.Name()
-			// Skip hidden and build/dependency folders
-			if strings.HasPrefix(name, ".") && name != "." && name != ".." {
-				return filepath.SkipDir
-			}
-			if name == "node_modules" || name == "dist" || name == "vendor" || name == "build" || name == "target" {
+			if shouldSkipDir(d.Name()) {
 				return filepath.SkipDir
 			}
 			return nil
@@ -115,65 +121,20 @@ func IndexDirectory(dbClient db.Store, embedder Embedder, dirPath string) error 
 	return nil
 }
 
-// IndexFile indexes a single file: parses, chunks, embeds, and saves to the database.
-// It handles hash-based change detection and skips unchanged files.
+// IndexFile indexes a single file by delegating to the shared prepareIndex/commitIndex pipeline.
 func IndexFile(dbClient db.Store, embedder Embedder, path string) (string, error) {
-	currentHash, err := parser.GetFileHash(path)
+	chunks, doc, skipped, err := prepareIndex(dbClient, embedder, path)
 	if err != nil {
-		return "", fmt.Errorf("failed to compute hash for %s: %w", path, err)
+		return "", err
 	}
-
-	existing, err := dbClient.GetDocument(path)
-	if err != nil {
-		return "", fmt.Errorf("failed to query document from DB: %w", err)
+	if skipped {
+		currentHash, _ := parser.GetFileHash(path)
+		return currentHash, nil
 	}
-
-	if existing != nil {
-		if existing.Hash == currentHash {
-			return currentHash, nil
-		}
-		if err := dbClient.DeleteDocument(path); err != nil {
-			return "", fmt.Errorf("failed to delete old document version: %w", err)
-		}
+	if err := commitIndex(dbClient, path, chunks, doc); err != nil {
+		return "", err
 	}
-
-	content, err := parser.ParseFile(path)
-	if err != nil {
-		return "", fmt.Errorf("failed to parse %s: %w", path, err)
-	}
-
-	textChunks := parser.SplitText(content, 1000, 200)
-	embeddings := embedder.GenerateVectors(textChunks)
-
-	var chunks []*db.Chunk
-	for idx, tc := range textChunks {
-		hashSum := sha256.Sum256([]byte(tc))
-		chunkHash := hex.EncodeToString(hashSum[:])
-
-		chunks = append(chunks, &db.Chunk{
-			UUID:         uuid.New().String(),
-			DocumentPath: path,
-			ChunkIndex:   idx,
-			Content:      tc,
-			Embedding:    embeddings[idx],
-			Hash:         chunkHash,
-		})
-	}
-
-	if err := dbClient.SaveDocument(&db.Document{
-		Path:      path,
-		Hash:      currentHash,
-		UpdatedAt: time.Now(),
-	}); err != nil {
-		return "", fmt.Errorf("failed to save document metadata: %w", err)
-	}
-
-	if err := dbClient.SaveChunks(chunks); err != nil {
-		return "", fmt.Errorf("failed to save chunks: %w", err)
-	}
-
-	fmt.Fprintf(os.Stderr, "Indexed: %s (%d chunks)\n", path, len(chunks))
-	return currentHash, nil
+	return doc.Hash, nil
 }
 
 // WatchDirectory watches a directory for changes and re-indexes when files change.
@@ -196,11 +157,7 @@ func WatchDirectory(ctx context.Context, dbClient db.Store, embedder Embedder, d
 			return err
 		}
 		if d.IsDir() {
-			name := d.Name()
-			if strings.HasPrefix(name, ".") && name != "." && name != ".." {
-				return filepath.SkipDir
-			}
-			if name == "node_modules" || name == "dist" || name == "vendor" || name == "build" || name == "target" {
+			if shouldSkipDir(d.Name()) {
 				return filepath.SkipDir
 			}
 			return watcher.Add(path)
@@ -241,7 +198,7 @@ func WatchDirectory(ctx context.Context, dbClient db.Store, embedder Embedder, d
 
 				if event.Op&fsnotify.Create == fsnotify.Create {
 					info, err := os.Stat(event.Name)
-					if err == nil && info.IsDir() {
+					if err == nil && info.IsDir() && !shouldSkipDir(info.Name()) {
 						watcher.Add(event.Name)
 					}
 				}

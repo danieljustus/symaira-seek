@@ -82,7 +82,7 @@ func main() {
 				return enc.Encode(results)
 			}
 
-			writeSearchHuman(os.Stderr, results)
+			writeSearchHuman(os.Stdout, results)
 			return nil
 		},
 	}
@@ -310,8 +310,14 @@ func writeDefaultConfig(path string, cfg Config) {
 func setConfigValue(key, value string) error {
 	switch key {
 	case "ollama_url":
+		if value == "" {
+			return fmt.Errorf("--set-value is required for key %q", key)
+		}
 		cfg.OllamaURL = value
 	case "model":
+		if value == "" {
+			return fmt.Errorf("--set-value is required for key %q", key)
+		}
 		cfg.Model = value
 	case "timeout_seconds":
 		n, err := strconv.Atoi(value)
