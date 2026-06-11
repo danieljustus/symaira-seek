@@ -82,7 +82,7 @@ func main() {
 				return enc.Encode(results)
 			}
 
-			writeSearchHuman(os.Stderr, results)
+			writeSearchHuman(os.Stdout, results)
 			return nil
 		},
 	}
