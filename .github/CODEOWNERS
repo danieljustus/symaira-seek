@@ -1,0 +1,9 @@
+# Symaira-Seek Code Owners
+# These owners will be automatically requested for review
+# when a pull request modifies matching files.
+
+# Default: all files
+* @danieljustus
+
+# CI/CD workflows
+.github/ @danieljustus
