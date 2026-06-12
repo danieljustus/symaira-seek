@@ -1,5 +1,5 @@
 # Compiled binary
-/seek
+/symseek
 
 # macOS Finder metadata
 .DS_Store
@@ -11,6 +11,7 @@
 
 # Build output
 /bin/
+/dist/
 
 # Editor scratch
 *.swp

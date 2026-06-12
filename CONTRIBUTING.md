@@ -25,7 +25,7 @@ Thank you for your interest in contributing to Symaira-Seek! This document provi
 ### Building
 
 ```bash
-go build -o seek ./cmd/seek
+go build -o symseek ./cmd/symseek/main.go
 ```
 
 ### Running Tests

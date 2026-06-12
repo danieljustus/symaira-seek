@@ -24,7 +24,7 @@ In dieser Phase legen wir das Projekt-Fundament und richten die SQLite-Datenbank
 ### Aufgaben
 1. **Projektinitialisierung**:
    - Initialisierung des Go-Moduls `github.com/danieljustus/symaira-seek`.
-   - Setup der Ordnerstruktur (`cmd/seek/`, `internal/db/`, `internal/parser/`, `internal/engine/`, `internal/mcp/`, `internal/server/`).
+   - Setup der Ordnerstruktur (`cmd/symseek/`, `internal/db/`, `internal/parser/`, `internal/engine/`, `internal/mcp/`, `internal/server/`).
    - Erstellung der Entwickler-Richtlinien (`CLAUDE.md`, `AGENTS.md`).
 2. **Datenbank-Schema-Design**:
    - Tabelle `documents` zur Speicherung von Metadaten und Hashes indizierter Dokumente:
@@ -100,12 +100,12 @@ In dieser Phase stellen wir die Benutzeroberfläche für Entwickler und den Date
 
 ### Aufgaben
 1. **Cobra CLI Setup**:
-   - Erstellung des globalen CLI-Alias `seek`.
+   - Erstellung des globalen CLI-Alias `symseek`.
    - Implementierung von:
-     - `seek search "Suchbegriff"`: Gibt hybride Suchergebnisse standardisiert oder als JSON aus.
-     - `seek index /pfad/zu/ordner`: Scannt und indiziert ein lokales Verzeichnis.
-     - `seek status`: Zeigt Statistiken über indexierte Dokumente, Chunks und Datenbankgröße an.
-     - `seek config`: Konfiguriert Pfade und API-URLs.
+     - `symseek search "Suchbegriff"`: Gibt hybride Suchergebnisse standardisiert oder als JSON aus.
+     - `symseek index /pfad/zu/ordner`: Scannt und indiziert ein lokales Verzeichnis.
+     - `symseek status`: Zeigt Statistiken über indexierte Dokumente, Chunks und Datenbankgröße an.
+     - `symseek config`: Konfiguriert Pfade und API-URLs.
 2. **Sync-Daemon / Verzeichnisscanner**:
    - Implementierung eines Crawlers, der Verzeichnisse scannt, geänderte Dateien (SHA-256-Abgleich) neu indiziert und gelöschte Dateien aus der DB bereinigt.
    - Vermeidung von Race Conditions durch eine queue-basierte Verarbeitung mit Backpressure.

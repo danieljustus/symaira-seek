@@ -4,19 +4,19 @@ Guidelines and commands for developers and AI agents working on this codebase.
 
 ## Build and Test Commands
 
-- **Build binary**: `go build -o seek cmd/seek/main.go`
+- **Build binary**: `go build -o symseek cmd/symseek/main.go`
 - **Run all tests**: `go test ./...`
 - **Run verbose tests**: `go test -v ./...`
 
 ## CLI Verification Cheatsheet
 
-- **Check version**: `./seek version`
-- **Search documents**: `./seek search "search query"`
-- **Index a folder**: `./seek index /path/to/folder`
-- **Watch folder**: `./seek index /path/to/folder --watch`
-- **Check status**: `./seek status`
-- **Start MCP Server**: `./seek serve`
-- **Start HTTP Daemon**: `./seek serve -p 8788`
+- **Check version**: `./symseek version`
+- **Search documents**: `./symseek search "search query"`
+- **Index a folder**: `./symseek index /path/to/folder`
+- **Watch folder**: `./symseek index /path/to/folder --watch`
+- **Check status**: `./symseek status`
+- **Start MCP Server**: `./symseek serve`
+- **Start HTTP Daemon**: `./symseek serve -p 8788`
 
 ## Code Style & Formatting
 

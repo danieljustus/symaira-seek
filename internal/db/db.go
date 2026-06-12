@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/danieljustus/symaira-corekit/sqlitekit"
 	_ "modernc.org/sqlite"
 )
 
@@ -97,6 +98,8 @@ func BytesToFloat32Slice(buf []byte) []float32 {
 }
 
 // Open initializes the SQLite database at a standard XDG path.
+// It uses corekit's sqlitekit for WAL mode and pragmas, then applies
+// any pending SQL migrations from the embedded migrations filesystem.
 func Open() (*DB, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -108,105 +111,23 @@ func Open() (*DB, error) {
 		return nil, fmt.Errorf("failed to create database directory: %w", err)
 	}
 
-	dbPath := filepath.Join(dir, "seek.db")
-	conn, err := sql.Open("sqlite", dbPath)
+	dbPath := filepath.Join(dir, "symseek.db")
+	conn, err := sqlitekit.Open(dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open sqlite database: %w", err)
 	}
 
-	if _, err := conn.Exec("PRAGMA journal_mode=WAL;"); err != nil {
+	if err := RunMigrations(conn); err != nil {
 		conn.Close()
-		return nil, fmt.Errorf("failed to set WAL mode: %w", err)
-	}
-	if _, err := conn.Exec("PRAGMA foreign_keys=ON;"); err != nil {
-		conn.Close()
-		return nil, fmt.Errorf("failed to enable foreign keys: %w", err)
-	}
-	// Allow concurrent writers (issue #50) to wait for the WAL
-	// write lock instead of failing immediately with SQLITE_BUSY.
-	if _, err := conn.Exec("PRAGMA busy_timeout=5000;"); err != nil {
-		conn.Close()
-		return nil, fmt.Errorf("failed to set busy timeout: %w", err)
+		return nil, fmt.Errorf("failed to run migrations: %w", err)
 	}
 
-	db := &DB{conn: conn}
-	if err := db.initSchema(); err != nil {
-		conn.Close()
-		return nil, fmt.Errorf("failed to initialize schema: %w", err)
-	}
-
-	return db, nil
+	return &DB{conn: conn}, nil
 }
 
 // Close closes the database connection.
 func (db *DB) Close() error {
 	return db.conn.Close()
-}
-
-// initSchema creates the database tables, virtual tables for FTS5, and sync triggers.
-func (db *DB) initSchema() error {
-	queries := []string{
-		// 1. Documents Table
-		`CREATE TABLE IF NOT EXISTS documents (
-			path TEXT PRIMARY KEY,
-			hash TEXT NOT NULL,
-			updated_at DATETIME NOT NULL
-		);`,
-
-		// 2. Chunks Table (embedding is stored as BLOB for performance)
-		`CREATE TABLE IF NOT EXISTS chunks (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			uuid TEXT UNIQUE NOT NULL,
-			document_path TEXT NOT NULL,
-			chunk_index INTEGER NOT NULL,
-			content TEXT NOT NULL,
-			embedding BLOB NOT NULL,
-			hash TEXT NOT NULL,
-			norm REAL DEFAULT 0,
-			FOREIGN KEY(document_path) REFERENCES documents(path) ON DELETE CASCADE
-		);`,
-
-		// 3. FTS5 Virtual Table for Chunks
-		`CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
-			content,
-			content='chunks',
-			content_rowid='id'
-		);`,
-
-		// 4. Index on Foreign Key and UUID
-		`CREATE INDEX IF NOT EXISTS idx_chunks_doc_path ON chunks(document_path);`,
-		`CREATE INDEX IF NOT EXISTS idx_chunks_uuid ON chunks(uuid);`,
-
-		// 5. Triggers to keep chunks_fts synchronized with chunks
-		`CREATE TRIGGER IF NOT EXISTS chunks_ai AFTER INSERT ON chunks BEGIN
-			INSERT INTO chunks_fts(rowid, content) VALUES (new.id, new.content);
-		END;`,
-
-		`CREATE TRIGGER IF NOT EXISTS chunks_ad AFTER DELETE ON chunks BEGIN
-			INSERT INTO chunks_fts(chunks_fts, rowid, content) VALUES('delete', old.id, old.content);
-		END;`,
-
-		`CREATE TRIGGER IF NOT EXISTS chunks_au AFTER UPDATE ON chunks BEGIN
-			INSERT INTO chunks_fts(chunks_fts, rowid, content) VALUES('delete', old.id, old.content);
-			INSERT INTO chunks_fts(rowid, content) VALUES (new.id, new.content);
-		END;`,
-	}
-
-	for _, q := range queries {
-		if _, err := db.conn.Exec(q); err != nil {
-			return fmt.Errorf("failed executing schema migration: %w (query: %s)", err, q)
-		}
-	}
-
-	// Migration: add norm column for databases created before this field was introduced.
-	// An error is expected if the column already exists; other errors are logged.
-	if _, err := db.conn.Exec(`ALTER TABLE chunks ADD COLUMN norm REAL DEFAULT 0;`); err != nil {
-		if !strings.Contains(err.Error(), "duplicate column") {
-			fmt.Fprintf(os.Stderr, "initSchema: ALTER TABLE chunks ADD COLUMN norm failed: %v\n", err)
-		}
-	}
-
-	return nil
 }
 
 // SaveDocument saves or updates document metadata in a transaction.
