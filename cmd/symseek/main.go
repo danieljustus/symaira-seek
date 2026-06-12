@@ -33,6 +33,9 @@ var (
 	jsonFlag  bool
 	watchFlag bool
 	portFlag  int
+	urlFlag   string
+	stdinFlag bool
+	sourceFlag string
 )
 
 func main() {
@@ -84,10 +87,9 @@ func main() {
 	// 2. Index Command
 	indexCmd := &cobra.Command{
 		Use:   "index [folder_path]",
-		Short: "Crawl and index a local directory",
-		Args:  cobra.ExactArgs(1),
+		Short: "Crawl and index a local directory, URL, or stdin",
+		Args:  cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			dirPath := args[0]
 			dbClient, err := db.Open()
 			if err != nil {
 				return err
@@ -95,6 +97,25 @@ func main() {
 			defer dbClient.Close()
 
 			embedder := engine.NewEmbeddingsGeneratorWithOllamaConfig(cfg.OllamaConfig().ToEngine())
+
+			if urlFlag != "" {
+				fmt.Fprintf(os.Stderr, "Indexing URL: %s...\n", urlFlag)
+				return engine.IndexURL(dbClient, embedder, urlFlag)
+			}
+
+			if stdinFlag {
+				source := sourceFlag
+				if source == "" {
+					source = "stdin"
+				}
+				fmt.Fprintf(os.Stderr, "Indexing from stdin (source: %s)...\n", source)
+				return engine.IndexStdin(dbClient, embedder, os.Stdin, source)
+			}
+
+			if len(args) == 0 {
+				return fmt.Errorf("folder path, --url, or --stdin required")
+			}
+			dirPath := args[0]
 
 			if watchFlag {
 				ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -108,6 +129,9 @@ func main() {
 		},
 	}
 	indexCmd.Flags().BoolVarP(&watchFlag, "watch", "w", false, "Run in background and monitor folder for changes")
+	indexCmd.Flags().StringVar(&urlFlag, "url", "", "Index content from a URL")
+	indexCmd.Flags().BoolVar(&stdinFlag, "stdin", false, "Index content from stdin")
+	indexCmd.Flags().StringVar(&sourceFlag, "source", "", "Source label for stdin content (used with --stdin)")
 	rootCmd.AddCommand(indexCmd)
 
 	// 3. Delete Command

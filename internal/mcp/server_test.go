@@ -82,6 +82,7 @@ func newTestServer(store db.Store, embedder engine.Embedder) *mcpserver.Server {
 	registerListDocuments(s, store, embedder)
 	registerGetContext(s, store, embedder)
 	registerIndexDocument(s, store, embedder)
+	registerIndexURL(s, store, embedder)
 	return s
 }
 
@@ -200,7 +201,7 @@ func TestServerToolsList(t *testing.T) {
 		toolMap := tool.(map[string]interface{})
 		names[toolMap["name"].(string)] = true
 	}
-	expected := []string{"search_documents", "read_document", "list_documents", "get_context", "index_document"}
+	expected := []string{"search_documents", "read_document", "list_documents", "get_context", "index_document", "index_url"}
 	for _, n := range expected {
 		if !names[n] {
 			t.Errorf("missing tool: %s", n)

@@ -35,6 +35,7 @@ func StartServer(cfg engine.OllamaConfig) error {
 	registerListDocuments(server, dbClient, embedder)
 	registerGetContext(server, dbClient, embedder)
 	registerIndexDocument(server, dbClient, embedder)
+	registerIndexURL(server, dbClient, embedder)
 
 	return server.ServeStdio(context.Background())
 }
@@ -265,4 +266,28 @@ func registerIndexDocument(server *mcpserver.Server, dbClient db.Store, embedder
 
 func IndexSingleFile(dbClient db.Store, embedder engine.Embedder, path string) (string, error) {
 	return engine.IndexFile(dbClient, embedder, path)
+}
+
+func registerIndexURL(server *mcpserver.Server, dbClient db.Store, embedder engine.Embedder) {
+	server.RegisterTool(&mcpserver.Tool{
+		Name:        "index_url",
+		Description: "Index content from a URL. Fetches content using symfetch (if available) or HTTP GET, then indexes it for search.",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"url":{"type":"string","description":"URL to fetch and index"}},"required":["url"]}`),
+		Handler: func(ctx context.Context, input json.RawMessage) (any, error) {
+			var params struct {
+				URL string `json:"url"`
+			}
+			if err := json.Unmarshal(input, &params); err != nil {
+				return nil, fmt.Errorf("invalid params: %w", err)
+			}
+			if params.URL == "" {
+				return nil, fmt.Errorf("missing or invalid url argument")
+			}
+
+			if err := engine.IndexURL(dbClient, embedder, params.URL); err != nil {
+				return nil, fmt.Errorf("failed to index URL: %w", err)
+			}
+			return fmt.Sprintf("Successfully indexed URL: %s", params.URL), nil
+		},
+	})
 }
