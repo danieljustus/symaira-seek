@@ -22,8 +22,8 @@ body:
       label: Steps to reproduce
       description: Steps to reproduce the behavior.
       placeholder: |
-        1. Run `./seek index /path/to/docs`
-        2. Run `./seek search "query"`
+        1. Run `./symseek index /path/to/docs`
+        2. Run `./symseek search "query"`
         3. See error
     validations:
       required: true

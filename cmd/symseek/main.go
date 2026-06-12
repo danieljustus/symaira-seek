@@ -5,56 +5,50 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/signal"
-	"path/filepath"
-	"strconv"
 	"strings"
 	"syscall"
-	"time"
 
 	"github.com/dustin/go-humanize"
 	"github.com/spf13/cobra"
 
+	"github.com/danieljustus/symaira-corekit/exitcodes"
+	"github.com/danieljustus/symaira-corekit/logkit"
+	"github.com/danieljustus/symaira-corekit/updatecheck"
+	"github.com/danieljustus/symaira-seek/internal/config"
 	"github.com/danieljustus/symaira-seek/internal/db"
 	"github.com/danieljustus/symaira-seek/internal/engine"
 	"github.com/danieljustus/symaira-seek/internal/mcp"
 	"github.com/danieljustus/symaira-seek/internal/server"
 )
 
-// version is the build-time version string, intended to be
-// overridden via -ldflags at build time (issue #48). The default
-// reports a development build marker so an un-overridden binary
-// still prints a meaningful value.
 var version = "0.1.0-dev"
-
-// Config holds user configuration.
-type Config struct {
-	OllamaURL      string `json:"ollama_url"`
-	Model          string `json:"model"`
-	TimeoutSeconds int    `json:"timeout_seconds"`
-	RetryCount     int    `json:"retry_count"`
-	RetryBackoffMS int    `json:"retry_backoff_ms"`
-}
 
 var (
 	cfgFile   string
-	cfg       Config
+	cfg       config.Config
 	limitFlag int
 	jsonFlag  bool
 	watchFlag bool
 	portFlag  int
+	urlFlag   string
+	stdinFlag bool
+	sourceFlag string
 )
 
 func main() {
+	slog.SetDefault(logkit.NewFromEnv("symseek"))
+
 	cobra.OnInitialize(initConfig)
 
 	rootCmd := &cobra.Command{
-		Use:   "seek",
+		Use:   "symseek",
 		Short: "Symaira-Seek: A local hybrid document retrieval CLI and MCP tool",
 	}
 
-	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.config/symaira-seek/config.json)")
+	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.config/symaira-seek/config.toml)")
 
 	// 1. Search Command
 	searchCmd := &cobra.Command{
@@ -69,7 +63,7 @@ func main() {
 			}
 			defer dbClient.Close()
 
-			embedder := engine.NewEmbeddingsGeneratorWithOllamaConfig(cfg.ollamaConfig())
+			embedder := engine.NewEmbeddingsGeneratorWithOllamaConfig(cfg.OllamaConfig().ToEngine())
 
 			results, err := engine.SearchHybrid(dbClient, embedder, query, limitFlag)
 			if err != nil {
@@ -93,17 +87,35 @@ func main() {
 	// 2. Index Command
 	indexCmd := &cobra.Command{
 		Use:   "index [folder_path]",
-		Short: "Crawl and index a local directory",
-		Args:  cobra.ExactArgs(1),
+		Short: "Crawl and index a local directory, URL, or stdin",
+		Args:  cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			dirPath := args[0]
 			dbClient, err := db.Open()
 			if err != nil {
 				return err
 			}
 			defer dbClient.Close()
 
-			embedder := engine.NewEmbeddingsGeneratorWithOllamaConfig(cfg.ollamaConfig())
+			embedder := engine.NewEmbeddingsGeneratorWithOllamaConfig(cfg.OllamaConfig().ToEngine())
+
+			if urlFlag != "" {
+				fmt.Fprintf(os.Stderr, "Indexing URL: %s...\n", urlFlag)
+				return engine.IndexURL(dbClient, embedder, urlFlag)
+			}
+
+			if stdinFlag {
+				source := sourceFlag
+				if source == "" {
+					source = "stdin"
+				}
+				fmt.Fprintf(os.Stderr, "Indexing from stdin (source: %s)...\n", source)
+				return engine.IndexStdin(dbClient, embedder, os.Stdin, source)
+			}
+
+			if len(args) == 0 {
+				return fmt.Errorf("folder path, --url, or --stdin required")
+			}
+			dirPath := args[0]
 
 			if watchFlag {
 				ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -117,6 +129,9 @@ func main() {
 		},
 	}
 	indexCmd.Flags().BoolVarP(&watchFlag, "watch", "w", false, "Run in background and monitor folder for changes")
+	indexCmd.Flags().StringVar(&urlFlag, "url", "", "Index content from a URL")
+	indexCmd.Flags().BoolVar(&stdinFlag, "stdin", false, "Index content from stdin")
+	indexCmd.Flags().StringVar(&sourceFlag, "source", "", "Source label for stdin content (used with --stdin)")
 	rootCmd.AddCommand(indexCmd)
 
 	// 3. Delete Command
@@ -182,7 +197,7 @@ func main() {
 	statusCmd.Flags().BoolVar(&jsonFlag, "json", false, "Output stats in JSON format")
 	rootCmd.AddCommand(statusCmd)
 
-	// 4. Config Command
+	// 5. Config Command
 	var configSetKey string
 	var configSetValue string
 	configCmd := &cobra.Command{
@@ -190,7 +205,7 @@ func main() {
 		Short: "View and edit settings",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if configSetKey != "" {
-				if err := setConfigValue(configSetKey, configSetValue); err != nil {
+				if err := config.SetValue(cfgFile, configSetKey, configSetValue, &cfg); err != nil {
 					return err
 				}
 				fmt.Fprintf(os.Stderr, "Set %s = %s in %s\n", configSetKey, configSetValue, cfgFile)
@@ -206,27 +221,42 @@ func main() {
 	configCmd.Flags().StringVar(&configSetValue, "set-value", "", "Value for the config key set via --set-key")
 	rootCmd.AddCommand(configCmd)
 
-	// 5. Version Command
+	// 6. Version Command
+	var checkUpdate bool
 	versionCmd := &cobra.Command{
 		Use:   "version",
 		Short: "Print the version number of Symaira-Seek",
-		Run: func(cmd *cobra.Command, args []string) {
-			fmt.Printf("seek version %s\n", version)
+		RunE: func(cmd *cobra.Command, args []string) error {
+			fmt.Printf("symseek version %s\n", version)
+			if checkUpdate {
+				ctx := context.Background()
+				checker := updatecheck.NewChecker("danieljustus", "symaira-seek")
+				release, err := checker.Check(ctx, version)
+				if err != nil {
+					return fmt.Errorf("update check failed: %w", err)
+				}
+				if release != nil {
+					fmt.Printf("New version available: %s\n", release.TagName)
+					fmt.Printf("Download: %s\n", release.HTMLURL)
+				} else {
+					fmt.Println("You are running the latest version.")
+				}
+			}
+			return nil
 		},
 	}
+	versionCmd.Flags().BoolVar(&checkUpdate, "check", false, "Check for updates on GitHub")
 	rootCmd.AddCommand(versionCmd)
 
-	// 6. Serve Command (Implemented in Phase 5)
+	// 7. Serve Command
 	serveCmd := &cobra.Command{
 		Use:   "serve",
 		Short: "Launch the MCP server or HTTP REST daemon",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if portFlag > 0 {
-				// Run HTTP server
 				fmt.Fprintf(os.Stderr, "HTTP REST Server implementation starting on port %d...\n", portFlag)
 				return startHTTPServer(portFlag)
 			}
-			// Run MCP server over stdio
 			fmt.Fprintln(os.Stderr, "MCP server starting over stdio...")
 			return startMCPServer()
 		},
@@ -235,125 +265,32 @@ func main() {
 	rootCmd.AddCommand(serveCmd)
 
 	if err := rootCmd.Execute(); err != nil {
-		os.Exit(1)
+		fmt.Fprintln(os.Stderr, exitcodes.FormatCLIError(err))
+		os.Exit(int(exitcodes.ExitCodeFromError(err)))
 	}
 }
 
 func initConfig() {
 	if cfgFile == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			home = os.TempDir()
-			fmt.Fprintf(os.Stderr, "Warning: $HOME not set, using %s for config directory\n", home)
-		}
-		cfgDir := filepath.Join(home, ".config", "symaira-seek")
-		if err := os.MkdirAll(cfgDir, 0755); err != nil {
-			fmt.Fprintf(os.Stderr, "seek: could not create config directory %s: %v\n", cfgDir, err)
-		}
-		cfgFile = filepath.Join(cfgDir, "config.json")
+		cfgFile = config.GlobalPath()
 	}
 
-	cfg = loadOrInitConfig(cfgFile)
-}
-
-func defaultConfig() Config {
-	return Config{
-		OllamaURL:      "http://localhost:11434/api/embeddings",
-		Model:          "nomic-embed-text",
-		TimeoutSeconds: 120,
-		RetryCount:     2,
-		RetryBackoffMS: 500,
-	}
-}
-
-func (c Config) ollamaConfig() engine.OllamaConfig {
-	return engine.OllamaConfig{
-		URL:          c.OllamaURL,
-		Model:        c.Model,
-		Timeout:      time.Duration(c.TimeoutSeconds) * time.Second,
-		RetryCount:   c.RetryCount,
-		RetryBackoff: time.Duration(c.RetryBackoffMS) * time.Millisecond,
-	}
-}
-
-func loadOrInitConfig(path string) Config {
-	cfg := defaultConfig()
-
-	data, err := os.ReadFile(path)
+	loaded, err := config.Load()
 	if err != nil {
-		if !os.IsNotExist(err) {
-			fmt.Fprintf(os.Stderr, "seek: could not read config %s: %v; using built-in defaults\n", path, err)
-			return cfg
-		}
-		writeDefaultConfig(path, cfg)
-		return cfg
-	}
-
-	if uErr := json.Unmarshal(data, &cfg); uErr != nil {
-		fmt.Fprintf(os.Stderr, "seek: config %s is malformed (%v); using built-in defaults\n", path, uErr)
-		return defaultConfig()
-	}
-	return cfg
-}
-
-func writeDefaultConfig(path string, cfg Config) {
-	out, mErr := json.MarshalIndent(cfg, "", "  ")
-	if mErr != nil {
-		fmt.Fprintf(os.Stderr, "seek: could not marshal default config: %v\n", mErr)
+		fmt.Fprintf(os.Stderr, "symseek: could not load config: %v; using built-in defaults\n", err)
+		cfg = *config.DefaultConfig()
 		return
 	}
-	if wErr := os.WriteFile(path, out, 0600); wErr != nil {
-		fmt.Fprintf(os.Stderr, "seek: could not write default config to %s: %v\n", path, wErr)
-	}
-}
-
-func setConfigValue(key, value string) error {
-	switch key {
-	case "ollama_url":
-		if value == "" {
-			return fmt.Errorf("--set-value is required for key %q", key)
-		}
-		cfg.OllamaURL = value
-	case "model":
-		if value == "" {
-			return fmt.Errorf("--set-value is required for key %q", key)
-		}
-		cfg.Model = value
-	case "timeout_seconds":
-		n, err := strconv.Atoi(value)
-		if err != nil || n <= 0 {
-			return fmt.Errorf("invalid %s value %q (must be a positive integer)", key, value)
-		}
-		cfg.TimeoutSeconds = n
-	case "retry_count":
-		n, err := strconv.Atoi(value)
-		if err != nil || n < 0 {
-			return fmt.Errorf("invalid %s value %q (must be a non-negative integer)", key, value)
-		}
-		cfg.RetryCount = n
-	case "retry_backoff_ms":
-		n, err := strconv.Atoi(value)
-		if err != nil || n <= 0 {
-			return fmt.Errorf("invalid %s value %q (must be a positive integer)", key, value)
-		}
-		cfg.RetryBackoffMS = n
-	default:
-		return fmt.Errorf("unknown config key %q (supported: ollama_url, model, timeout_seconds, retry_count, retry_backoff_ms)", key)
-	}
-	data, err := json.MarshalIndent(cfg, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(cfgFile, data, 0600)
+	cfg = *loaded
 }
 
 func startHTTPServer(port int) error {
-	return server.StartHTTPServer(port, cfg.ollamaConfig())
+	return server.StartHTTPServer(port, cfg.OllamaConfig().ToEngine())
 }
 
 func startMCPServer() error {
 	mcp.ServerVersion = version
-	return mcp.StartServer(cfg.ollamaConfig())
+	return mcp.StartServer(cfg.OllamaConfig().ToEngine())
 }
 
 func writeSearchHuman(w io.Writer, results []*db.SearchResult) {

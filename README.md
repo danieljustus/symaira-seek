@@ -41,7 +41,8 @@ It exposes multiple interfaces:
 Install via Homebrew tap:
 
 ```bash
-brew install danieljustus/symaira-seek/symaira-seek
+brew tap danieljustus/tap
+brew install symseek
 ```
 
 ### Pre-built Binaries (Recommended)
@@ -56,8 +57,8 @@ Extract and install:
 ```bash
 # Linux/macOS
 tar -xzf symaira-seek_*.tar.gz
-chmod +x seek
-sudo mv seek /usr/local/bin/
+chmod +x symseek
+sudo mv symseek /usr/local/bin/
 
 # Windows
 # Extract the .zip and add to PATH
@@ -65,7 +66,7 @@ sudo mv seek /usr/local/bin/
 
 Verify the installation:
 ```bash
-seek version
+symseek version
 ```
 
 ### Build from Source
@@ -73,14 +74,14 @@ seek version
 Ensure you have [Go](https://go.dev/) installed.
 
 ```bash
-go build -o seek cmd/seek/main.go
+go build -o symseek cmd/symseek/main.go
 ```
 
 To inject a version string at build time, set `main.version` via `-ldflags`. The CI workflow derives the value from the current git tag (or a `0.0.0-dev+<short-sha>` fallback) and passes it automatically:
 ```bash
 VERSION="0.2.0"
-go build -ldflags "-s -w -X main.version=${VERSION}" -o seek cmd/seek/main.go
-./seek version
+go build -ldflags "-s -w -X main.version=${VERSION}" -o symseek cmd/symseek/main.go
+./symseek version
 ```
 
 ### Run Tests
@@ -95,49 +96,49 @@ go test -v ./...
 ### Index a Directory
 Crawl and index all markdown, text, code, JSON, and yaml files inside a folder:
 ```bash
-./seek index /path/to/my-documents
+./symseek index /path/to/my-documents
 ```
 
 #### Watch Daemon
 Keep the tool running in the background to automatically synchronize changes (creation, modification, and deletion of files) every 5 seconds:
 ```bash
-./seek index /path/to/my-documents --watch
+./symseek index /path/to/my-documents --watch
 ```
 
 ### Search Documents
 Perform a hybrid semantic and keyword search:
 ```bash
-./seek search "renewable energy optimization" --limit 5
+./symseek search "renewable energy optimization" --limit 5
 ```
 
 Export structured search results directly to JSON:
 ```bash
-./seek search "renewable energy optimization" --json
+./symseek search "renewable energy optimization" --json
 ```
 
 ### Get Database Stats
 ```bash
-./seek status
+./symseek status
 ```
 
 Export the same stats as JSON for monitoring pipelines:
 ```bash
-./seek status --json
+./symseek status --json
 ```
 
 ### Configuration
 
-`seek` stores its configuration in `~/.config/symaira-seek/config.json` (overridable with `--config`). The file contains the Ollama endpoint URL and the embedding model name.
+`symseek` stores its configuration in `~/.config/symaira-seek/config.json` (overridable with `--config`). The file contains the Ollama endpoint URL and the embedding model name.
 
 View the active configuration (the path is printed to stderr):
 ```bash
-./seek config
+./symseek config
 ```
 
 Set a value without editing the file by hand:
 ```bash
-./seek config --set-key ollama_url --set-value http://localhost:11434/api/embeddings
-./seek config --set-key model --set-value mxbai-embed-large
+./symseek config --set-key ollama_url --set-value http://localhost:11434/api/embeddings
+./symseek config --set-key model --set-value mxbai-embed-large
 ```
 
 The file is rewritten with mode `0600` on every write. Supported keys are `ollama_url` and `model`.
@@ -152,7 +153,7 @@ To use Symaira-Seek as an MCP tool for AI clients (like Claude Desktop or Cursor
 {
   "mcpServers": {
     "symaira-seek": {
-      "command": "/absolute/path/to/symaira-seek/seek",
+      "command": "/absolute/path/to/symaira-seek/symseek",
       "args": ["serve"]
     }
   }
@@ -172,7 +173,7 @@ To use Symaira-Seek as an MCP tool for AI clients (like Claude Desktop or Cursor
 
 Start the REST API on port `8788`:
 ```bash
-./seek serve --port 8788
+./symseek serve --port 8788
 ```
 
 ### Endpoints

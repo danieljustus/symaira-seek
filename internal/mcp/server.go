@@ -1,7 +1,7 @@
 package mcp
 
 import (
-	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,34 +11,15 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/danieljustus/symaira-corekit/mcpserver"
+
 	"github.com/danieljustus/symaira-seek/internal/db"
 	"github.com/danieljustus/symaira-seek/internal/engine"
 	"github.com/danieljustus/symaira-seek/internal/pathutil"
 )
 
-const jsonRPCMarshalFailureFrame = `{"jsonrpc":"2.0","id":null,"error":{"code":-32603,"message":"internal error: failed to marshal response"}}`
-
-// ServerVersion is the version reported in the MCP initialize handshake.
-// Set this from main.go before starting the MCP server.
 var ServerVersion = "dev"
 
-// JSONRPCRequest represents an incoming JSON-RPC 2.0 request.
-type JSONRPCRequest struct {
-	JSONRPC string          `json:"jsonrpc"`
-	ID      interface{}     `json:"id,omitempty"`
-	Method  string          `json:"method"`
-	Params  json.RawMessage `json:"params,omitempty"`
-}
-
-// JSONRPCResponse represents an outgoing JSON-RPC 2.0 response.
-type JSONRPCResponse struct {
-	JSONRPC string      `json:"jsonrpc"`
-	ID      interface{} `json:"id"`
-	Result  interface{} `json:"result,omitempty"`
-	Error   interface{} `json:"error,omitempty"`
-}
-
-// StartServer starts the MCP server over stdio.
 func StartServer(cfg engine.OllamaConfig) error {
 	dbClient, err := db.Open()
 	if err != nil {
@@ -47,394 +28,266 @@ func StartServer(cfg engine.OllamaConfig) error {
 	defer dbClient.Close()
 
 	embedder := engine.NewEmbeddingsGeneratorWithOllamaConfig(cfg)
+	server := mcpserver.New("symseek", ServerVersion)
 
-	reader := bufio.NewReader(os.Stdin)
+	registerSearchDocuments(server, dbClient, embedder)
+	registerReadDocument(server, dbClient, embedder)
+	registerListDocuments(server, dbClient, embedder)
+	registerGetContext(server, dbClient, embedder)
+	registerIndexDocument(server, dbClient, embedder)
+	registerIndexURL(server, dbClient, embedder)
 
-	// Suppress any printing to Stdout in packages.
-	// Only print structured JSON-RPC messages to Stdout.
-	for {
-		line, err := reader.ReadString('\n')
-		if err != nil {
-			if err == io.EOF {
-				return nil
-			}
-			return fmt.Errorf("error reading stdin: %w", err)
-		}
-
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-
-		var req JSONRPCRequest
-		if err := json.Unmarshal([]byte(line), &req); err != nil {
-			sendError(nil, -32700, "Parse error: "+err.Error())
-			continue
-		}
-
-		handleRequest(&req, dbClient, embedder)
-	}
+	return server.ServeStdio(context.Background())
 }
 
-func handleRequest(req *JSONRPCRequest, dbClient db.Store, embedder engine.Embedder) {
-	defer func() {
-		if r := recover(); r != nil {
-			fmt.Fprintf(os.Stderr, "MCP handler panicked: %v\n", r)
-			sendError(req.ID, -32603, "Internal error: handler panicked")
-		}
-	}()
-
-	switch req.Method {
-	case "initialize":
-		sendResponse(req.ID, map[string]interface{}{
-			"protocolVersion": "2024-11-05",
-			"capabilities": map[string]interface{}{
-				"tools": map[string]interface{}{},
-			},
-		"serverInfo": map[string]string{
-			"name":    "symaira-seek",
-			"version": ServerVersion,
-		},
-		})
-
-	case "notifications/initialized":
-		// No-op client notification
-
-	case "tools/list":
-		tools := []map[string]interface{}{
-			{
-				"name":        "search_documents",
-				"description": "Search the local document index for relevant content using hybrid keyword (BM25) and vector search. Use when the user asks about specific topics, files, or information that might be indexed.",
-				"inputSchema": map[string]interface{}{
-					"type": "object",
-					"properties": map[string]interface{}{
-						"query": map[string]interface{}{
-							"type":        "string",
-							"description": "Natural language search query",
-						},
-						"limit": map[string]interface{}{
-							"type":        "integer",
-							"description": "Maximum number of search results to return (default 5)",
-						},
-					},
-					"required": []string{"query"},
-				},
-			},
-			{
-				"name":        "read_document",
-				"description": "Retrieve the full text content of an indexed document. Use when the user needs to inspect the detailed content of a specific file.",
-				"inputSchema": map[string]interface{}{
-					"type": "object",
-					"properties": map[string]interface{}{
-						"path": map[string]interface{}{
-							"type":        "string",
-							"description": "Absolute path to the document file",
-						},
-					},
-					"required": []string{"path"},
-				},
-			},
-			{
-				"name":        "list_documents",
-				"description": "Browse the list of indexed documents. Use to explore what folders/files are currently in the index.",
-				"inputSchema": map[string]interface{}{
-					"type": "object",
-					"properties": map[string]interface{}{
-						"folder": map[string]interface{}{
-							"type":        "string",
-							"description": "Optional folder path prefix to filter the document list",
-						},
-					},
-				},
-			},
-			{
-				"name":        "get_context",
-				"description": "Compile a consolidated context block from multiple matching documents on a given topic. This combines search and read tools.",
-				"inputSchema": map[string]interface{}{
-					"type": "object",
-					"properties": map[string]interface{}{
-						"topic": map[string]interface{}{
-							"type":        "string",
-							"description": "The topic or concept to extract context for",
-						},
-				"max_chars": map[string]interface{}{
-					"type":        "integer",
-					"description": "Maximum character count (Unicode code points) of the combined context (default 4000). Deprecated: max_tokens accepted for backward compatibility.",
-				},
-					},
-					"required": []string{"topic"},
-				},
-			},
-			{
-				"name":        "index_document",
-				"description": "Index a specific local file or folder immediately. Use when the user wants to add a new directory or file to the search database.",
-				"inputSchema": map[string]interface{}{
-					"type": "object",
-					"properties": map[string]interface{}{
-						"path": map[string]interface{}{
-							"type":        "string",
-							"description": "Absolute path to the file or directory to index",
-						},
-					},
-					"required": []string{"path"},
-				},
-			},
-		}
-
-		sendResponse(req.ID, map[string]interface{}{
-			"tools": tools,
-		})
-
-	case "tools/call":
-		var params struct {
-			Name      string                 `json:"name"`
-			Arguments map[string]interface{} `json:"arguments"`
-		}
-
-		if err := json.Unmarshal(req.Params, &params); err != nil {
-			sendError(req.ID, -32602, "Invalid params: "+err.Error())
-			return
-		}
-
-		handleToolCall(req.ID, params.Name, params.Arguments, dbClient, embedder)
-
-	default:
-		sendError(req.ID, -32601, "Method not found: "+req.Method)
-	}
-}
-
-func handleToolCall(reqID interface{}, name string, args map[string]interface{}, dbClient db.Store, embedder engine.Embedder) {
-	switch name {
-	case "search_documents":
-		query, ok := args["query"].(string)
-		if !ok || query == "" {
-			sendError(reqID, -32602, "Missing or invalid query argument")
-			return
-		}
-
-		limit := 5
-		if lVal, ok := args["limit"].(float64); ok {
-			limit = int(lVal)
-		}
-
-		results, err := engine.SearchHybrid(dbClient, embedder, query, limit)
-		if err != nil {
-			sendError(reqID, -32603, "Search failed: "+err.Error())
-			return
-		}
-
-		var textBuilder strings.Builder
-		for idx, r := range results {
-			textBuilder.WriteString(fmt.Sprintf("[%d] File: %s (Chunk %d, RRF Score: %.4f)\n", idx+1, r.Chunk.DocumentPath, r.Chunk.ChunkIndex, r.RRFScore))
-			textBuilder.WriteString(r.Chunk.Content)
-			textBuilder.WriteString("\n\n")
-		}
-
-		sendToolResponse(reqID, textBuilder.String())
-
-	case "read_document":
-		path, ok := args["path"].(string)
-		if !ok || path == "" {
-			sendError(reqID, -32602, "Missing or invalid path argument")
-			return
-		}
-
-		cleanPath := filepath.Clean(path)
-		absPath, err := filepath.Abs(cleanPath)
-		if err != nil {
-			sendError(reqID, -32603, "Invalid path: "+err.Error())
-			return
-		}
-
-		// Resolve symlinks before the index lookup. If a file was replaced
-		// by a symlink after indexing, the resolved path will differ from
-		// the indexed path and the request is rejected.
-		resolvedPath, err := filepath.EvalSymlinks(absPath)
-		if err != nil {
-			sendError(reqID, -32603, "Path does not exist: "+err.Error())
-			return
-		}
-
-		doc, err := dbClient.GetDocument(resolvedPath)
-		if err != nil {
-			sendError(reqID, -32603, "Database error: "+err.Error())
-			return
-		}
-		if doc == nil {
-			sendError(reqID, -32603, "Document is not indexed and cannot be read")
-			return
-		}
-
-		// Read with a size cap to prevent unbounded memory usage.
-		const maxReadBytes = 10 << 20 // 10 MB
-		f, err := os.Open(resolvedPath)
-		if err != nil {
-			sendError(reqID, -32603, "Failed to read file: "+err.Error())
-			return
-		}
-		defer f.Close()
-
-		limitedReader := io.LimitReader(f, maxReadBytes+1)
-		data, err := io.ReadAll(limitedReader)
-		if err != nil {
-			sendError(reqID, -32603, "Failed to read file: "+err.Error())
-			return
-		}
-
-		content := string(data)
-		if int64(len(data)) > maxReadBytes {
-			content = content[:maxReadBytes]
-			content += "\n\n[Truncated: file exceeds 10 MB read limit]"
-		}
-
-		sendToolResponse(reqID, content)
-
-	case "list_documents":
-		folderPrefix, _ := args["folder"].(string)
-		docs, err := dbClient.ListDocuments()
-		if err != nil {
-			sendError(reqID, -32603, "Failed to list documents: "+err.Error())
-			return
-		}
-
-		var textBuilder strings.Builder
-		count := 0
-		for _, d := range docs {
-			if folderPrefix == "" || strings.HasPrefix(d.Path, folderPrefix) {
-				textBuilder.WriteString(fmt.Sprintf("- %s (Last Indexed: %s)\n", d.Path, d.UpdatedAt.Format(time.RFC3339)))
-				count++
+func registerSearchDocuments(server *mcpserver.Server, dbClient db.Store, embedder engine.Embedder) {
+	server.RegisterTool(&mcpserver.Tool{
+		Name:        "search_documents",
+		Description: "Search the local document index for relevant content using hybrid keyword (BM25) and vector search. Use when the user asks about specific topics, files, or information that might be indexed.",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"query":{"type":"string","description":"Natural language search query"},"limit":{"type":"integer","description":"Maximum number of search results to return (default 5)"}},"required":["query"]}`),
+		Handler: func(ctx context.Context, input json.RawMessage) (any, error) {
+			var params struct {
+				Query string `json:"query"`
+				Limit int    `json:"limit"`
 			}
-		}
-
-		if count == 0 {
-			textBuilder.WriteString("No documents matching filter found in index.")
-		}
-
-		sendToolResponse(reqID, textBuilder.String())
-
-	case "get_context":
-		topic, ok := args["topic"].(string)
-		if !ok || topic == "" {
-			sendError(reqID, -32602, "Missing or invalid topic argument")
-			return
-		}
-
-		maxChars := 4000
-		if maxVal, ok := args["max_chars"].(float64); ok {
-			maxChars = int(maxVal)
-		} else if maxVal, ok := args["max_tokens"].(float64); ok {
-			maxChars = int(maxVal)
-		}
-
-		results, err := engine.SearchHybrid(dbClient, embedder, topic, 10)
-		if err != nil {
-			sendError(reqID, -32603, "Search failed: "+err.Error())
-			return
-		}
-
-		var textBuilder strings.Builder
-		runeCount := 0
-		header := fmt.Sprintf("=== CONTEXT FOR TOPIC: %s ===\n", topic)
-		textBuilder.WriteString(header)
-		runeCount += utf8.RuneCountInString(header)
-		for _, r := range results {
-			chunkRunes := utf8.RuneCountInString(r.Chunk.Content)
-			if runeCount+chunkRunes > maxChars {
-				break
+			if err := json.Unmarshal(input, &params); err != nil {
+				return nil, fmt.Errorf("invalid params: %w", err)
 			}
-			src := fmt.Sprintf("Source: %s (Chunk %d)\n", r.Chunk.DocumentPath, r.Chunk.ChunkIndex)
-			sep := "\n---\n"
-			textBuilder.WriteString(src)
-			textBuilder.WriteString(r.Chunk.Content)
-			textBuilder.WriteString(sep)
-			runeCount += utf8.RuneCountInString(src) + chunkRunes + utf8.RuneCountInString(sep)
-		}
+			if params.Query == "" {
+				return nil, fmt.Errorf("missing or invalid query argument")
+			}
+			if params.Limit <= 0 {
+				params.Limit = 5
+			}
 
-		sendToolResponse(reqID, textBuilder.String())
-
-	case "index_document":
-		path, ok := args["path"].(string)
-		if !ok || path == "" {
-			sendError(reqID, -32602, "Missing or invalid path argument")
-			return
-		}
-
-		absPath, err := pathutil.RestrictToHome(path)
-		if err != nil {
-			sendError(reqID, -32603, "Path error: "+err.Error())
-			return
-		}
-
-		info, err := os.Stat(absPath)
-		if err != nil {
-			sendError(reqID, -32603, "Path error: "+err.Error())
-			return
-		}
-
-		if info.IsDir() {
-			err = engine.IndexDirectory(dbClient, embedder, absPath)
+			results, err := engine.SearchHybrid(dbClient, embedder, params.Query, params.Limit)
 			if err != nil {
-				sendError(reqID, -32603, "Indexing failed: "+err.Error())
-				return
+				return nil, fmt.Errorf("search failed: %w", err)
 			}
-			sendToolResponse(reqID, fmt.Sprintf("Successfully indexed directory: %s", absPath))
-		} else {
+
+			var textBuilder strings.Builder
+			for idx, r := range results {
+				textBuilder.WriteString(fmt.Sprintf("[%d] File: %s (Chunk %d, RRF Score: %.4f)\n", idx+1, r.Chunk.DocumentPath, r.Chunk.ChunkIndex, r.RRFScore))
+				textBuilder.WriteString(r.Chunk.Content)
+				textBuilder.WriteString("\n\n")
+			}
+			return textBuilder.String(), nil
+		},
+	})
+}
+
+func registerReadDocument(server *mcpserver.Server, dbClient db.Store, _ engine.Embedder) {
+	server.RegisterTool(&mcpserver.Tool{
+		Name:        "read_document",
+		Description: "Retrieve the full text content of an indexed document. Use when the user needs to inspect the detailed content of a specific file.",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"path":{"type":"string","description":"Absolute path to the document file"}},"required":["path"]}`),
+		Handler: func(ctx context.Context, input json.RawMessage) (any, error) {
+			var params struct {
+				Path string `json:"path"`
+			}
+			if err := json.Unmarshal(input, &params); err != nil {
+				return nil, fmt.Errorf("invalid params: %w", err)
+			}
+			if params.Path == "" {
+				return nil, fmt.Errorf("missing or invalid path argument")
+			}
+
+			cleanPath := filepath.Clean(params.Path)
+			absPath, err := filepath.Abs(cleanPath)
+			if err != nil {
+				return nil, fmt.Errorf("invalid path: %w", err)
+			}
+
+			resolvedPath, err := filepath.EvalSymlinks(absPath)
+			if err != nil {
+				return nil, fmt.Errorf("path does not exist: %w", err)
+			}
+
+			doc, err := dbClient.GetDocument(resolvedPath)
+			if err != nil {
+				return nil, fmt.Errorf("database error: %w", err)
+			}
+			if doc == nil {
+				return nil, fmt.Errorf("document is not indexed and cannot be read")
+			}
+
+			const maxReadBytes = 10 << 20
+			f, err := os.Open(resolvedPath)
+			if err != nil {
+				return nil, fmt.Errorf("failed to read file: %w", err)
+			}
+			defer f.Close()
+
+			limitedReader := io.LimitReader(f, maxReadBytes+1)
+			data, err := io.ReadAll(limitedReader)
+			if err != nil {
+				return nil, fmt.Errorf("failed to read file: %w", err)
+			}
+
+			content := string(data)
+			if int64(len(data)) > maxReadBytes {
+				content = content[:maxReadBytes]
+				content += "\n\n[Truncated: file exceeds 10 MB read limit]"
+			}
+			return content, nil
+		},
+	})
+}
+
+func registerListDocuments(server *mcpserver.Server, dbClient db.Store, _ engine.Embedder) {
+	server.RegisterTool(&mcpserver.Tool{
+		Name:        "list_documents",
+		Description: "Browse the list of indexed documents. Use to explore what folders/files are currently in the index.",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"folder":{"type":"string","description":"Optional folder path prefix to filter the document list"}}}`),
+		Handler: func(ctx context.Context, input json.RawMessage) (any, error) {
+			var params struct {
+				Folder string `json:"folder"`
+			}
+			if err := json.Unmarshal(input, &params); err != nil {
+				return nil, fmt.Errorf("invalid params: %w", err)
+			}
+
+			docs, err := dbClient.ListDocuments()
+			if err != nil {
+				return nil, fmt.Errorf("failed to list documents: %w", err)
+			}
+
+			var textBuilder strings.Builder
+			count := 0
+			for _, d := range docs {
+				if params.Folder == "" || strings.HasPrefix(d.Path, params.Folder) {
+					textBuilder.WriteString(fmt.Sprintf("- %s (Last Indexed: %s)\n", d.Path, d.UpdatedAt.Format(time.RFC3339)))
+					count++
+				}
+			}
+
+			if count == 0 {
+				textBuilder.WriteString("No documents matching filter found in index.")
+			}
+			return textBuilder.String(), nil
+		},
+	})
+}
+
+func registerGetContext(server *mcpserver.Server, dbClient db.Store, embedder engine.Embedder) {
+	server.RegisterTool(&mcpserver.Tool{
+		Name:        "get_context",
+		Description: "Compile a consolidated context block from multiple matching documents on a given topic. This combines search and read tools.",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"topic":{"type":"string","description":"The topic or concept to extract context for"},"max_chars":{"type":"integer","description":"Maximum character count (Unicode code points) of the combined context (default 4000). Deprecated: max_tokens accepted for backward compatibility."}},"required":["topic"]}`),
+		Handler: func(ctx context.Context, input json.RawMessage) (any, error) {
+			var params struct {
+				Topic     string `json:"topic"`
+				MaxChars  int    `json:"max_chars"`
+				MaxTokens int    `json:"max_tokens"`
+			}
+			if err := json.Unmarshal(input, &params); err != nil {
+				return nil, fmt.Errorf("invalid params: %w", err)
+			}
+			if params.Topic == "" {
+				return nil, fmt.Errorf("missing or invalid topic argument")
+			}
+
+			maxChars := params.MaxChars
+			if maxChars == 0 {
+				maxChars = params.MaxTokens
+			}
+			if maxChars == 0 {
+				maxChars = 4000
+			}
+
+			results, err := engine.SearchHybrid(dbClient, embedder, params.Topic, 10)
+			if err != nil {
+				return nil, fmt.Errorf("search failed: %w", err)
+			}
+
+			var textBuilder strings.Builder
+			runeCount := 0
+			header := fmt.Sprintf("=== CONTEXT FOR TOPIC: %s ===\n", params.Topic)
+			textBuilder.WriteString(header)
+			runeCount += utf8.RuneCountInString(header)
+			for _, r := range results {
+				chunkRunes := utf8.RuneCountInString(r.Chunk.Content)
+				if runeCount+chunkRunes > maxChars {
+					break
+				}
+				src := fmt.Sprintf("Source: %s (Chunk %d)\n", r.Chunk.DocumentPath, r.Chunk.ChunkIndex)
+				sep := "\n---\n"
+				textBuilder.WriteString(src)
+				textBuilder.WriteString(r.Chunk.Content)
+				textBuilder.WriteString(sep)
+				runeCount += utf8.RuneCountInString(src) + chunkRunes + utf8.RuneCountInString(sep)
+			}
+			return textBuilder.String(), nil
+		},
+	})
+}
+
+func registerIndexDocument(server *mcpserver.Server, dbClient db.Store, embedder engine.Embedder) {
+	server.RegisterTool(&mcpserver.Tool{
+		Name:        "index_document",
+		Description: "Index a specific local file or folder immediately. Use when the user wants to add a new directory or file to the search database.",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"path":{"type":"string","description":"Absolute path to the file or directory to index"}},"required":["path"]}`),
+		Handler: func(ctx context.Context, input json.RawMessage) (any, error) {
+			var params struct {
+				Path string `json:"path"`
+			}
+			if err := json.Unmarshal(input, &params); err != nil {
+				return nil, fmt.Errorf("invalid params: %w", err)
+			}
+			if params.Path == "" {
+				return nil, fmt.Errorf("missing or invalid path argument")
+			}
+
+			absPath, err := pathutil.RestrictToHome(params.Path)
+			if err != nil {
+				return nil, fmt.Errorf("path error: %w", err)
+			}
+
+			info, err := os.Stat(absPath)
+			if err != nil {
+				return nil, fmt.Errorf("path error: %w", err)
+			}
+
+			if info.IsDir() {
+				if err := engine.IndexDirectory(dbClient, embedder, absPath); err != nil {
+					return nil, fmt.Errorf("indexing failed: %w", err)
+				}
+				return fmt.Sprintf("Successfully indexed directory: %s", absPath), nil
+			}
+
 			hash, err := IndexSingleFile(dbClient, embedder, absPath)
 			if err != nil {
-				sendError(reqID, -32603, "Failed to index file: "+err.Error())
-				return
+				return nil, fmt.Errorf("failed to index file: %w", err)
 			}
-			sendToolResponse(reqID, fmt.Sprintf("Successfully indexed file: %s (Hash: %s)", absPath, hash))
-		}
-
-	default:
-		sendError(reqID, -32601, "Unknown tool: "+name)
-	}
+			return fmt.Sprintf("Successfully indexed file: %s (Hash: %s)", absPath, hash), nil
+		},
+	})
 }
 
-// IndexSingleFile indexes a single file instead of a directory.
 func IndexSingleFile(dbClient db.Store, embedder engine.Embedder, path string) (string, error) {
 	return engine.IndexFile(dbClient, embedder, path)
 }
 
-func sendResponse(id interface{}, result interface{}) {
-	writeJSONRPCFrame(os.Stdout, os.Stderr, JSONRPCResponse{
-		JSONRPC: "2.0",
-		ID:      id,
-		Result:  result,
-	})
-}
+func registerIndexURL(server *mcpserver.Server, dbClient db.Store, embedder engine.Embedder) {
+	server.RegisterTool(&mcpserver.Tool{
+		Name:        "index_url",
+		Description: "Index content from a URL. Fetches content using symfetch (if available) or HTTP GET, then indexes it for search.",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"url":{"type":"string","description":"URL to fetch and index"}},"required":["url"]}`),
+		Handler: func(ctx context.Context, input json.RawMessage) (any, error) {
+			var params struct {
+				URL string `json:"url"`
+			}
+			if err := json.Unmarshal(input, &params); err != nil {
+				return nil, fmt.Errorf("invalid params: %w", err)
+			}
+			if params.URL == "" {
+				return nil, fmt.Errorf("missing or invalid url argument")
+			}
 
-func sendToolResponse(id interface{}, text string) {
-	result := map[string]interface{}{
-		"content": []map[string]interface{}{
-			{
-				"type": "text",
-				"text": text,
-			},
-		},
-		"isError": false,
-	}
-	sendResponse(id, result)
-}
-
-func sendError(id interface{}, code int, message string) {
-	writeJSONRPCFrame(os.Stdout, os.Stderr, JSONRPCResponse{
-		JSONRPC: "2.0",
-		ID:      id,
-		Error: map[string]interface{}{
-			"code":    code,
-			"message": message,
+			if err := engine.IndexURL(dbClient, embedder, params.URL); err != nil {
+				return nil, fmt.Errorf("failed to index URL: %w", err)
+			}
+			return fmt.Sprintf("Successfully indexed URL: %s", params.URL), nil
 		},
 	})
-}
-
-func writeJSONRPCFrame(stdout, stderr io.Writer, resp JSONRPCResponse) {
-	data, err := json.Marshal(resp)
-	if err != nil {
-		fmt.Fprintf(stderr, "mcp: failed to marshal JSON-RPC response: %v\n", err)
-		stdout.Write([]byte(jsonRPCMarshalFailureFrame + "\n"))
-		return
-	}
-	stdout.Write(append(data, '\n'))
 }
