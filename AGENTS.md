@@ -2,6 +2,13 @@
 
 This repository is the public MIT-licensed Symaira Seek self-hosted foundation.
 
+## Ecosystem Guidance
+
+- Before changing cross-tool integrations, shared conventions, or product
+  boundaries, read `../docs/00-MASTERPLAN.md` and `../ECOSYSTEM.md`.
+- Keep the standalone-first contract: this repo must build, test, and run
+  without any other Symaira tool installed.
+
 ## Repository Role
 
 - Keep this repository buildable, testable, and runnable without any private commercial code.
