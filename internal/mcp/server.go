@@ -92,10 +92,9 @@ func registerReadDocument(server *mcpserver.Server, dbClient db.Store, _ engine.
 				return nil, fmt.Errorf("missing or invalid path argument")
 			}
 
-			cleanPath := filepath.Clean(params.Path)
-			absPath, err := filepath.Abs(cleanPath)
+			absPath, err := pathutil.RestrictToHome(params.Path)
 			if err != nil {
-				return nil, fmt.Errorf("invalid path: %w", err)
+				return nil, fmt.Errorf("path error: %w", err)
 			}
 
 			resolvedPath, err := filepath.EvalSymlinks(absPath)
