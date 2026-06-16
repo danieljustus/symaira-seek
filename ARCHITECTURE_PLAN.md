@@ -1,33 +1,33 @@
-# Symaira-Seek: Architektur- und Implementierungsplan
+# Symaira-Seek: Architecture and Implementation Plan
 
-Symaira-Seek ist ein lokales, CGO-freies Dokumenten-Retrieval-Tool für AI-Agents, das als CLI-Werkzeug, MCP-Server und lokaler HTTP-Daemon bereitgestellt wird. Es basiert auf dem SQLite + FTS5 + Vektorsuche + RRF (Reciprocal Rank Fusion) Hybrid-Search-Muster.
+Symaira-Seek is a local, CGO-free document retrieval tool for AI agents, delivered as a CLI tool, MCP server, and local HTTP daemon. It is based on the SQLite + FTS5 + Vector Search + RRF (Reciprocal Rank Fusion) hybrid search pattern.
 
-Dieses Dokument beschreibt den 5-Phasen-Implementierungsplan für das Fundament und die Architektur des Tools.
+This document describes the 5-phase implementation plan for the foundation and architecture of the tool.
 
 ---
 
-## Phasenübersicht
+## Phase Overview
 
 ```mermaid
 graph TD
-    P1[Phase 1: Fundament & DB-Schema] --> P2[Phase 2: Parsing & Chunking]
+    P1[Phase 1: Foundation & DB Schema] --> P2[Phase 2: Parsing & Chunking]
     P2 --> P3[Phase 3: Embedding & Retrieval]
-    P3 --> P4[Phase 4: CLI & Sync-Logik]
-    P4 --> P5[Phase 5: MCP-Server & REST API]
+    P3 --> P4[Phase 4: CLI & Sync Logic]
+    P4 --> P5[Phase 5: MCP Server & REST API]
 ```
 
 ---
 
-## Phase 1: Fundament & DB-Schema (CGO-freies SQLite)
-In dieser Phase legen wir das Projekt-Fundament und richten die SQLite-Datenbank ein. Um die Symaira-Designrichtlinien einzuhalten, verwenden wir eine **100% CGO-freie SQLite-Bibliothek** (`modernc.org/sqlite`) und aktivieren den **WAL-Mode** für sichere, parallele Lese- und Schreibzugriffe.
+## Phase 1: Foundation & DB Schema (CGO-free SQLite)
+In this phase, we establish the project foundation and set up the SQLite database. To comply with Symaira design guidelines, we use a **100% CGO-free SQLite library** (`modernc.org/sqlite`) and enable **WAL mode** for secure, parallel read and write access.
 
-### Aufgaben
-1. **Projektinitialisierung**:
-   - Initialisierung des Go-Moduls `github.com/danieljustus/symaira-seek`.
-   - Setup der Ordnerstruktur (`cmd/symseek/`, `internal/db/`, `internal/parser/`, `internal/engine/`, `internal/mcp/`, `internal/server/`).
-   - Erstellung der Entwickler-Richtlinien (`CLAUDE.md`, `AGENTS.md`).
-2. **Datenbank-Schema-Design**:
-   - Tabelle `documents` zur Speicherung von Metadaten und Hashes indizierter Dokumente:
+### Tasks
+1. **Project Initialization**:
+   - Initialize the Go module `github.com/danieljustus/symaira-seek`.
+   - Set up the folder structure (`cmd/symseek/`, `internal/db/`, `internal/parser/`, `internal/engine/`, `internal/mcp/`, `internal/server/`).
+   - Create developer guidelines (`CLAUDE.md`, `AGENTS.md`).
+2. **Database Schema Design**:
+   - `documents` table for storing metadata and hashes of indexed documents:
      ```sql
      CREATE TABLE IF NOT EXISTS documents (
          path TEXT PRIMARY KEY,
@@ -35,19 +35,19 @@ In dieser Phase legen wir das Projekt-Fundament und richten die SQLite-Datenbank
          updated_at DATETIME NOT NULL
      );
      ```
-   - Tabelle `chunks` zur Speicherung von Textfragmenten und deren Embeddings:
+   - `chunks` table for storing text fragments and their embeddings:
      ```sql
      CREATE TABLE IF NOT EXISTS chunks (
          id TEXT PRIMARY KEY,
          document_path TEXT NOT NULL,
          chunk_index INTEGER NOT NULL,
          content TEXT NOT NULL,
-         embedding TEXT NOT NULL, -- JSON-kodierte Vektordaten
+         embedding TEXT NOT NULL, -- JSON-encoded vector data
          hash TEXT NOT NULL,
          FOREIGN KEY(document_path) REFERENCES documents(path) ON DELETE CASCADE
      );
      ```
-   - FTS5-Virtual-Table `chunks_fts` für performantes Keyword-Matching:
+   - FTS5 virtual table `chunks_fts` for efficient keyword matching:
      ```sql
      CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
          content,
@@ -55,83 +55,83 @@ In dieser Phase legen wir das Projekt-Fundament und richten die SQLite-Datenbank
          content_rowid='id'
      );
      ```
-   - Trigger zur automatischen Synchronisation von FTS5 bei Insert/Delete auf `chunks`.
-3. **Core DB-Helper & Cosine-Similarity**:
-   - Implementierung von CRUD-Funktionen für Dokumente und Chunks.
-   - Implementierung der mathematisch optimierten Cosine-Similarity-Berechnung in Go für das Vektor-Rescoring.
+   - Triggers for automatic FTS5 synchronization on insert/delete in `chunks`.
+3. **Core DB Helpers & Cosine Similarity**:
+   - Implement CRUD operations for documents and chunks.
+   - Implement mathematically optimized cosine similarity calculation in Go for vector rescoring.
 
 ---
 
 ## Phase 2: Parsing & Chunking Engine
-Diese Phase implementiert das Einlesen und Zerschneiden von Dokumenten. Ziel ist es, Dokumente in überschaubare, semantisch sinnvolle Chunks zu unterteilen und inkrementell zu verarbeiten.
+This phase implements document reading and splitting. The goal is to divide documents into manageable, semantically meaningful chunks and process them incrementally.
 
-### Aufgaben
-1. **Dateisystem-Parser**:
-   - Implementierung eines universellen Parsers für Markdown-Dateien (`.md`), reine Textdateien (`.txt`) und Standard-Quellcode-Dateien (`.go`, `.py`, `.js`, etc.).
-   - Extrahieren von Header-Strukturen und Datei-Metadaten.
+### Tasks
+1. **Filesystem Parser**:
+   - Implement a universal parser for Markdown files (`.md`), plain text files (`.txt`), and standard source code files (`.go`, `.py`, `.js`, etc.).
+   - Extract header structures and file metadata.
 2. **Recursive Character Text Splitter**:
-   - Implementierung eines Algorithmus, der Texte anhand einer Hierarchie von Separatoren (`\n\n`, `\n`, ` `, ``) splittet.
-   - Zielgröße: 400–512 Tokens (oder Zeichen als Näherung) mit 10–20% Overlap.
+   - Implement an algorithm that splits text based on a hierarchy of separators (`\n\n`, `\n`, ` `, ``).
+   - Target size: 400–512 tokens (or characters as approximation) with 10–20% overlap.
 3. **Change Detection (SHA-256)**:
-   - Implementierung von SHA-256-Hashing auf Chunk- und Dateiebene.
-   - Algorithmus zur Feststellung, ob ein Dokument modifiziert wurde, um unnötige Embedding-Generierungen zu vermeiden.
+   - Implement SHA-256 hashing at chunk and file level.
+   - Algorithm to determine whether a document has been modified to avoid unnecessary embedding generations.
 
 ---
 
 ## Phase 3: Embedding & Retrieval Pipeline
-Hier implementieren wir die Kernfunktionalität für Vektorberechnung und die hybride Suche.
+Here we implement the core functionality for vector calculation and hybrid search.
 
-### Aufgaben
-1. **Duale Embedding-Pipeline**:
-   - Primäre Anbindung an eine lokale **Ollama-Instanz** (`nomic-embed-text` mit 768 Dimensionen).
-   - Robuster, deterministischer **Local Hash-Vector Fallback** (pure Go), falls kein Ollama erreichbar ist. Dadurch bleibt das Tool auch offline/stand-alone lauffähig.
-2. **Hybrid-Search Engine**:
-   - **BM25 Search**: Abfrage der SQLite FTS5 Tabelle zur Ermittlung exakter Worttreffer.
-   - **Vector Search**: Kosinus-Ähnlichkeitssuche über die in SQLite gespeicherten Chunks.
+### Tasks
+1. **Dual Embedding Pipeline**:
+   - Primary integration with a local **Ollama instance** (`nomic-embed-text` with 768 dimensions).
+   - Robust, deterministic **Local Hash-Vector Fallback** (pure Go) when Ollama is not reachable. This keeps the tool functional offline/standalone.
+2. **Hybrid Search Engine**:
+   - **BM25 Search**: Query the SQLite FTS5 table to find exact word matches.
+   - **Vector Search**: Cosine similarity search over the chunks stored in SQLite.
 3. **RRF (Reciprocal Rank Fusion)**:
-   - Zusammenführung und Neugewichtung der Suchergebnisse basierend auf Ranks statt Scores.
-   - Formel: $RRF(d) = \sum_{m \in M} \frac{1}{60 + r_m(d)}$
-   - Rückgabe der Top-$K$ relevantesten Dokument-Ausschnitte.
+   - Merge and reweight search results based on ranks rather than scores.
+   - Formula: $RRF(d) = \sum_{m \in M} \frac{1}{60 + r_m(d)}$
+   - Return the top-$K$ most relevant document excerpts.
 
 ---
 
-## Phase 4: CLI & Sync-Logik
-In dieser Phase stellen wir die Benutzeroberfläche für Entwickler und den Dateisystem-Synchronisationsmechanismus fertig.
+## Phase 4: CLI & Sync Logic
+In this phase, we complete the developer interface and the filesystem synchronization mechanism.
 
-### Aufgaben
+### Tasks
 1. **Cobra CLI Setup**:
-   - Erstellung des globalen CLI-Alias `symseek`.
-   - Implementierung von:
-     - `symseek search "Suchbegriff"`: Gibt hybride Suchergebnisse standardisiert oder als JSON aus.
-     - `symseek index /pfad/zu/ordner`: Scannt und indiziert ein lokales Verzeichnis.
-     - `symseek status`: Zeigt Statistiken über indexierte Dokumente, Chunks und Datenbankgröße an.
-     - `symseek config`: Konfiguriert Pfade und API-URLs.
-2. **Sync-Daemon / Verzeichnisscanner**:
-   - Implementierung eines Crawlers, der Verzeichnisse scannt, geänderte Dateien (SHA-256-Abgleich) neu indiziert und gelöschte Dateien aus der DB bereinigt.
-   - Vermeidung von Race Conditions durch eine queue-basierte Verarbeitung mit Backpressure.
+   - Create the global CLI alias `symseek`.
+   - Implement:
+     - `symseek search "search term"`: Outputs hybrid search results in standard format or as JSON.
+     - `symseek index /path/to/folder`: Scans and indexes a local directory.
+     - `symseek status`: Shows statistics about indexed documents, chunks, and database size.
+     - `symseek config`: Configures paths and API URLs.
+2. **Sync Daemon / Directory Scanner**:
+   - Implement a crawler that scans directories, reindexes changed files (SHA-256 comparison), and cleans up deleted files from the database.
+   - Avoid race conditions through queue-based processing with backpressure.
 
 ---
 
-## Phase 5: MCP-Server & REST API Integration
-Die letzte Phase öffnet die Retrieval-Engine für AI-Agents und andere Systemprozesse über das Model Context Protocol (MCP) und eine lokale REST API.
+## Phase 5: MCP Server & REST API Integration
+The final phase opens the retrieval engine to AI agents and other system processes via the Model Context Protocol (MCP) and a local REST API.
 
-### Aufgaben
-1. **MCP-Server (stdio/JSON-RPC 2.0)**:
-   - Implementierung des MCP-Protokolls über Standard I/O.
-   - **Zero Stdio Pollution**: Alle Diagnosemeldungen, Logs und Fehler müssen strikt nach `os.Stderr` umgeleitet werden, da `os.Stdout` exklusiv für JSON-RPC reserviert ist.
-   - Registrierung und Implementierung der 5 Kernwerkzeuge:
-     - `search_documents(query, limit)`: Führt die hybride Suche durch.
-     - `read_document(path)`: Gibt den vollständigen Dateiinhalt zurück.
-     - `list_documents(folder)`: Erlaubt das Browsen von Dokumentenstrukturen.
-     - `get_context(topic)`: Liefert formatierten RAG-Kontext.
-     - `index_document(path)`: Indiziert eine neue Datei manuell.
-2. **Lokaler HTTP Daemon (REST API)**:
-   - Starten eines HTTP-Servers auf localhost (Port `8788`).
-   - Bereitstellung von JSON-Endpunkten für Suche und Indexierungs-Status.
-   - Optionale Server-Sent Events (SSE) für Streaming-Ergebnisse.
-3. **Abschluss & Testabdeckung**:
-   - Validierung der End-to-End-Pipeline.
-   - Unit-Tests für DB, Parser, Cosine Similarity und RRF-Fusion.
+### Tasks
+1. **MCP Server (stdio/JSON-RPC 2.0)**:
+   - Implement the MCP protocol over standard I/O.
+   - **Zero Stdio Pollution**: All diagnostic messages, logs, and errors must be strictly routed to `os.Stderr`, as `os.Stdout` is exclusively reserved for JSON-RPC.
+   - Register and implement the 5 core tools:
+     - `search_documents(query, limit)`: Performs hybrid search.
+     - `read_document(path)`: Returns the complete file content.
+     - `list_documents(folder)`: Allows browsing document structures.
+     - `get_context(topic)`: Provides formatted RAG context.
+     - `index_document(path)`: Manually indexes a new file.
+2. **Local HTTP Daemon (REST API)**:
+   - Start an HTTP server on localhost (port `8788`).
+   - Provide JSON endpoints for search and indexing status.
+   - Optional Server-Sent Events (SSE) for streaming results.
+3. **Completion & Test Coverage**:
+   - Validate the end-to-end pipeline.
+   - Unit tests for DB, Parser, Cosine Similarity, and RRF Fusion.
 
 ---
 
