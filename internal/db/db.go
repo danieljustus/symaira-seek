@@ -378,6 +378,8 @@ func (db *DB) searchVectorSinglePass(queryVec []float32, candidateIDs []int64, l
 		return nil, nil
 	}
 
+	queryNorm := l2Norm(queryVec)
+
 	var (
 		rows *sql.Rows
 		err  error
@@ -404,7 +406,9 @@ func (db *DB) searchVectorSinglePass(queryVec []float32, candidateIDs []int64, l
 		c.Norm = norm
 
 		var score float32
-		if norm > 0 {
+		if queryNorm > 0 && norm > 0 {
+			score = CosineSimilarityWithBothNorms(queryVec, c.Embedding, queryNorm, norm)
+		} else if norm > 0 {
 			score = CosineSimilarityWithNorm(queryVec, c.Embedding, norm)
 		} else {
 			score = CosineSimilarity(queryVec, c.Embedding)
@@ -505,6 +509,19 @@ func CosineSimilarityWithNorm(a, b []float32, normB float32) float32 {
 		return 0
 	}
 	return float32(dotProduct / (math.Sqrt(normA) * float64(normB)))
+}
+
+// CosineSimilarityWithBothNorms computes cosine similarity when both L2 norms
+// are precomputed, avoiding all redundant norm calculations during search.
+func CosineSimilarityWithBothNorms(a, b []float32, normA, normB float32) float32 {
+	if len(a) != len(b) || len(a) == 0 || normA == 0 || normB == 0 {
+		return 0
+	}
+	var dotProduct float64
+	for i := 0; i < len(a); i++ {
+		dotProduct += float64(a[i] * b[i])
+	}
+	return float32(dotProduct / (float64(normA) * float64(normB)))
 }
 
 // l2Norm computes the Euclidean (L2) norm of a float32 vector.
