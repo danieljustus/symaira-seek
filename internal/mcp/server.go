@@ -21,12 +21,6 @@ import (
 
 var ServerVersion = "dev"
 
-// MCP timeout constants for tool handlers.
-const (
-	searchTimeout = 60 * time.Second  // search operations (Ollama + DB)
-	indexTimeout  = 300 * time.Second // indexing operations (file walk + embeddings)
-)
-
 func StartServer(cfg engine.OllamaConfig) error {
 	dbClient, err := db.Open()
 	if err != nil {
@@ -66,9 +60,6 @@ func registerSearchDocuments(server *mcpserver.Server, dbClient db.Store, embedd
 			if params.Limit <= 0 {
 				params.Limit = 5
 			}
-
-			ctx, cancel := context.WithTimeout(ctx, searchTimeout)
-			defer cancel()
 
 			results, err := engine.SearchHybrid(dbClient, embedder, params.Query, params.Limit)
 			if err != nil {
@@ -203,9 +194,6 @@ func registerGetContext(server *mcpserver.Server, dbClient db.Store, embedder en
 				maxChars = 4000
 			}
 
-			ctx, cancel := context.WithTimeout(ctx, searchTimeout)
-			defer cancel()
-
 			results, err := engine.SearchHybrid(dbClient, embedder, params.Topic, 10)
 			if err != nil {
 				return nil, &symerrors.SearchError{Query: params.Topic, Err: err}
@@ -257,9 +245,6 @@ func registerIndexDocument(server *mcpserver.Server, dbClient db.Store, embedder
 				return nil, fmt.Errorf("path error: %w", err)
 			}
 
-			ctx, cancel := context.WithTimeout(ctx, indexTimeout)
-			defer cancel()
-
 			info, err := os.Stat(absPath)
 			if err != nil {
 				return nil, &symerrors.FileNotFoundError{Path: params.Path}
@@ -300,9 +285,6 @@ func registerIndexURL(server *mcpserver.Server, dbClient db.Store, embedder engi
 			if params.URL == "" {
 				return nil, &symerrors.ValidationError{Field: "url", Message: "missing or invalid url argument"}
 			}
-
-			ctx, cancel := context.WithTimeout(ctx, indexTimeout)
-			defer cancel()
 
 			if err := engine.IndexURL(dbClient, embedder, params.URL); err != nil {
 				return nil, &symerrors.IndexError{Path: params.URL, Err: err}
