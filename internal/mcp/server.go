@@ -92,10 +92,12 @@ func registerReadDocument(server *mcpserver.Server, dbClient db.Store, _ engine.
 				return nil, fmt.Errorf("missing or invalid path argument")
 			}
 
-			cleanPath := filepath.Clean(params.Path)
-			absPath, err := filepath.Abs(cleanPath)
+			absPath, err := pathutil.RestrictToHome(params.Path)
 			if err != nil {
-				return nil, fmt.Errorf("invalid path: %w", err)
+				if _, ok := err.(*pathutil.PathRestrictionError); ok {
+					return nil, fmt.Errorf("path restriction: %w", err)
+				}
+				return nil, fmt.Errorf("path error: %w", err)
 			}
 
 			resolvedPath, err := filepath.EvalSymlinks(absPath)
@@ -188,7 +190,8 @@ func registerGetContext(server *mcpserver.Server, dbClient db.Store, embedder en
 			}
 
 			maxChars := params.MaxChars
-			if maxChars == 0 {
+			if maxChars == 0 && params.MaxTokens > 0 {
+				fmt.Fprintf(os.Stderr, "WARNING: max_tokens is deprecated, use max_chars instead\n")
 				maxChars = params.MaxTokens
 			}
 			if maxChars == 0 {
@@ -240,6 +243,9 @@ func registerIndexDocument(server *mcpserver.Server, dbClient db.Store, embedder
 
 			absPath, err := pathutil.RestrictToHome(params.Path)
 			if err != nil {
+				if _, ok := err.(*pathutil.PathRestrictionError); ok {
+					return nil, fmt.Errorf("path restriction: %w", err)
+				}
 				return nil, fmt.Errorf("path error: %w", err)
 			}
 
