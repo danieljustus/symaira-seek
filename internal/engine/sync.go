@@ -174,6 +174,24 @@ func WatchDirectory(ctx context.Context, dbClient db.Store, embedder Embedder, d
 		return fmt.Errorf("initial sync failed: %w", err)
 	}
 
+	// Count files being watched from database
+	existingDocs, err := dbClient.ListDocuments()
+	if err != nil {
+		return fmt.Errorf("failed to list documents: %w", err)
+	}
+	fileCount := 0
+	for _, doc := range existingDocs {
+		if isWithinDir(doc.Path, absPath) {
+			fileCount++
+		}
+	}
+	fmt.Fprintf(os.Stderr, "Watching %d files in %s\n", fileCount, absPath)
+
+	// Periodic status ticker
+	statusTicker := time.NewTicker(30 * time.Second)
+	defer statusTicker.Stop()
+	lastChangeTime := time.Now()
+
 	// Debounce timer to batch rapid events. The debounce window collects
 	// all changed paths so a single file edit only re-indexes that file
 	// (issue #46) instead of forcing a full directory crawl.
@@ -186,6 +204,10 @@ func WatchDirectory(ctx context.Context, dbClient db.Store, embedder Embedder, d
 		select {
 		case <-ctx.Done():
 			return nil
+
+		case <-statusTicker.C:
+			fmt.Fprintf(os.Stderr, "Watching %d files, last change at %s\n",
+				fileCount, lastChangeTime.Format("15:04:05"))
 
 		case event, ok := <-watcher.Events:
 			if !ok {
@@ -206,6 +228,8 @@ func WatchDirectory(ctx context.Context, dbClient db.Store, embedder Embedder, d
 				pendingMu.Lock()
 				pendingChanges[event.Name] = struct{}{}
 				pendingMu.Unlock()
+
+				lastChangeTime = time.Now()
 
 				if debounceTimer != nil {
 					debounceTimer.Stop()
