@@ -164,8 +164,67 @@ To use Symaira-Seek as an MCP tool for AI clients (like Claude Desktop or Cursor
 1. `search_documents(query, limit)`: Hybrid search over all indexed files.
 2. `read_document(path)`: Retrieves the complete content of an indexed file.
 3. `list_documents(folder)`: Explorative folder and index structure scanning.
-4. `get_context(topic, max_tokens)`: Aggregates relevant context blocks from multiple documents.
+4. `get_context(topic, max_chars)`: Aggregates relevant context blocks from multiple documents.
 5. `index_document(path)`: Manually indexes a local file or directory.
+6. `index_url(url)`: Indexes content from a URL.
+
+### Tool Examples
+
+#### search_documents
+```json
+{
+  "query": "renewable energy optimization",
+  "limit": 5
+}
+```
+
+Returns formatted search results with file paths, chunk indices, and RRF scores.
+
+#### read_document
+```json
+{
+  "path": "/home/user/documents/report.md"
+}
+```
+
+Returns the full text content of an indexed file.
+
+#### list_documents
+```json
+{
+  "folder": "/home/user/documents"
+}
+```
+
+Lists all indexed documents, optionally filtered by folder prefix.
+
+#### get_context
+```json
+{
+  "topic": "machine learning",
+  "max_chars": 4000
+}
+```
+
+Aggregates relevant context blocks from multiple documents for a given topic.
+
+#### index_document
+```json
+{
+  "path": "/home/user/documents"
+}
+```
+
+Indexes a local file or directory immediately.
+
+#### index_url
+```json
+{
+  "url": "https://example.com/article"
+}
+```
+
+Fetches and indexes content from a URL.
 
 ---
 
@@ -181,6 +240,34 @@ Start the REST API on port `8788`:
 - **GET** `/status`: Returns document counts, chunk counts, and database file size.
 - **GET** `/search?q=query&limit=5`: Query the hybrid search engine.
 - **POST** `/index` with body `{"path": "/absolute/path"}`: Synchronously crawl and index a folder.
+
+### Endpoint Examples
+
+#### Health Check
+```bash
+curl http://localhost:8788/health
+# Response: {"status": "ok"}
+```
+
+#### Get Status
+```bash
+curl http://localhost:8788/status
+# Response: {"documents": 10, "chunks": 50, "db_size": "1.2 MB"}
+```
+
+#### Search Documents
+```bash
+curl "http://localhost:8788/search?q=machine+learning&limit=5"
+# Response: Array of search results with file paths and scores
+```
+
+#### Index Documents
+```bash
+curl -X POST http://localhost:8788/index \
+  -H "Content-Type: application/json" \
+  -d '{"path": "/home/user/documents"}'
+# Response: {"status": "indexed", "path": "/home/user/documents"}
+```
 
 ---
 

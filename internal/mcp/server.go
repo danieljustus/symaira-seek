@@ -15,6 +15,7 @@ import (
 
 	"github.com/danieljustus/symaira-seek/internal/db"
 	"github.com/danieljustus/symaira-seek/internal/engine"
+	symerrors "github.com/danieljustus/symaira-seek/internal/errors"
 	"github.com/danieljustus/symaira-seek/internal/pathutil"
 )
 
@@ -51,10 +52,10 @@ func registerSearchDocuments(server *mcpserver.Server, dbClient db.Store, embedd
 				Limit int    `json:"limit"`
 			}
 			if err := json.Unmarshal(input, &params); err != nil {
-				return nil, fmt.Errorf("invalid params: %w", err)
+				return nil, &symerrors.ValidationError{Field: "params", Message: err.Error()}
 			}
 			if params.Query == "" {
-				return nil, fmt.Errorf("missing or invalid query argument")
+				return nil, &symerrors.ValidationError{Field: "query", Message: "missing or invalid query argument"}
 			}
 			if params.Limit <= 0 {
 				params.Limit = 5
@@ -62,7 +63,7 @@ func registerSearchDocuments(server *mcpserver.Server, dbClient db.Store, embedd
 
 			results, err := engine.SearchHybrid(dbClient, embedder, params.Query, params.Limit)
 			if err != nil {
-				return nil, fmt.Errorf("search failed: %w", err)
+				return nil, &symerrors.SearchError{Query: params.Query, Err: err}
 			}
 
 			var textBuilder strings.Builder
@@ -86,10 +87,10 @@ func registerReadDocument(server *mcpserver.Server, dbClient db.Store, _ engine.
 				Path string `json:"path"`
 			}
 			if err := json.Unmarshal(input, &params); err != nil {
-				return nil, fmt.Errorf("invalid params: %w", err)
+				return nil, &symerrors.ValidationError{Field: "params", Message: err.Error()}
 			}
 			if params.Path == "" {
-				return nil, fmt.Errorf("missing or invalid path argument")
+				return nil, &symerrors.ValidationError{Field: "path", Message: "missing or invalid path argument"}
 			}
 
 			absPath, err := pathutil.RestrictToHome(params.Path)
@@ -102,15 +103,15 @@ func registerReadDocument(server *mcpserver.Server, dbClient db.Store, _ engine.
 
 			resolvedPath, err := filepath.EvalSymlinks(absPath)
 			if err != nil {
-				return nil, fmt.Errorf("path does not exist: %w", err)
+				return nil, &symerrors.FileNotFoundError{Path: params.Path}
 			}
 
 			doc, err := dbClient.GetDocument(resolvedPath)
 			if err != nil {
-				return nil, fmt.Errorf("database error: %w", err)
+				return nil, &symerrors.DatabaseError{Op: "get document", Err: err}
 			}
 			if doc == nil {
-				return nil, fmt.Errorf("document is not indexed and cannot be read")
+				return nil, &symerrors.FileNotFoundError{Path: resolvedPath}
 			}
 
 			const maxReadBytes = 10 << 20
@@ -146,12 +147,12 @@ func registerListDocuments(server *mcpserver.Server, dbClient db.Store, _ engine
 				Folder string `json:"folder"`
 			}
 			if err := json.Unmarshal(input, &params); err != nil {
-				return nil, fmt.Errorf("invalid params: %w", err)
+				return nil, &symerrors.ValidationError{Field: "params", Message: err.Error()}
 			}
 
 			docs, err := dbClient.ListDocuments()
 			if err != nil {
-				return nil, fmt.Errorf("failed to list documents: %w", err)
+				return nil, &symerrors.DatabaseError{Op: "list documents", Err: err}
 			}
 
 			var textBuilder strings.Builder
@@ -182,10 +183,10 @@ func registerGetContext(server *mcpserver.Server, dbClient db.Store, embedder en
 				MaxChars int    `json:"max_chars"`
 			}
 			if err := json.Unmarshal(input, &params); err != nil {
-				return nil, fmt.Errorf("invalid params: %w", err)
+				return nil, &symerrors.ValidationError{Field: "params", Message: err.Error()}
 			}
 			if params.Topic == "" {
-				return nil, fmt.Errorf("missing or invalid topic argument")
+				return nil, &symerrors.ValidationError{Field: "topic", Message: "missing or invalid topic argument"}
 			}
 
 			maxChars := params.MaxChars
@@ -195,7 +196,7 @@ func registerGetContext(server *mcpserver.Server, dbClient db.Store, embedder en
 
 			results, err := engine.SearchHybrid(dbClient, embedder, params.Topic, 10)
 			if err != nil {
-				return nil, fmt.Errorf("search failed: %w", err)
+				return nil, &symerrors.SearchError{Query: params.Topic, Err: err}
 			}
 
 			var textBuilder strings.Builder
@@ -230,10 +231,10 @@ func registerIndexDocument(server *mcpserver.Server, dbClient db.Store, embedder
 				Path string `json:"path"`
 			}
 			if err := json.Unmarshal(input, &params); err != nil {
-				return nil, fmt.Errorf("invalid params: %w", err)
+				return nil, &symerrors.ValidationError{Field: "params", Message: err.Error()}
 			}
 			if params.Path == "" {
-				return nil, fmt.Errorf("missing or invalid path argument")
+				return nil, &symerrors.ValidationError{Field: "path", Message: "missing or invalid path argument"}
 			}
 
 			absPath, err := pathutil.RestrictToHome(params.Path)
@@ -246,19 +247,19 @@ func registerIndexDocument(server *mcpserver.Server, dbClient db.Store, embedder
 
 			info, err := os.Stat(absPath)
 			if err != nil {
-				return nil, fmt.Errorf("path error: %w", err)
+				return nil, &symerrors.FileNotFoundError{Path: params.Path}
 			}
 
 			if info.IsDir() {
 				if err := engine.IndexDirectory(dbClient, embedder, absPath); err != nil {
-					return nil, fmt.Errorf("indexing failed: %w", err)
+					return nil, &symerrors.IndexError{Path: absPath, Err: err}
 				}
 				return fmt.Sprintf("Successfully indexed directory: %s", absPath), nil
 			}
 
 			hash, err := IndexSingleFile(dbClient, embedder, absPath)
 			if err != nil {
-				return nil, fmt.Errorf("failed to index file: %w", err)
+				return nil, &symerrors.IndexError{Path: absPath, Err: err}
 			}
 			return fmt.Sprintf("Successfully indexed file: %s (Hash: %s)", absPath, hash), nil
 		},
@@ -279,14 +280,14 @@ func registerIndexURL(server *mcpserver.Server, dbClient db.Store, embedder engi
 				URL string `json:"url"`
 			}
 			if err := json.Unmarshal(input, &params); err != nil {
-				return nil, fmt.Errorf("invalid params: %w", err)
+				return nil, &symerrors.ValidationError{Field: "params", Message: err.Error()}
 			}
 			if params.URL == "" {
-				return nil, fmt.Errorf("missing or invalid url argument")
+				return nil, &symerrors.ValidationError{Field: "url", Message: "missing or invalid url argument"}
 			}
 
 			if err := engine.IndexURL(dbClient, embedder, params.URL); err != nil {
-				return nil, fmt.Errorf("failed to index URL: %w", err)
+				return nil, &symerrors.IndexError{Path: params.URL, Err: err}
 			}
 			return fmt.Sprintf("Successfully indexed URL: %s", params.URL), nil
 		},

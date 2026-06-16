@@ -614,3 +614,102 @@ func TestIndexSingleFile(t *testing.T) {
 		t.Error("expected error for nonexistent file")
 	}
 }
+
+func TestServerSearchDocumentsWithResults(t *testing.T) {
+	store := &fakeStore{
+		searchFunc: func(query string, limit int) ([]*db.SearchResult, error) {
+			return []*db.SearchResult{
+				{
+					Chunk: &db.Chunk{
+						DocumentPath: "/test/doc.md",
+						ChunkIndex:   0,
+						Content:      "Test content",
+					},
+					RRFScore: 0.5,
+				},
+			}, nil
+		},
+	}
+	embed := &fakeEmbedder{}
+	server := newTestServer(store, embed)
+
+	params, _ := json.Marshal(map[string]interface{}{
+		"name": "search_documents",
+		"arguments": map[string]interface{}{
+			"query": "test",
+			"limit": float64(5),
+		},
+	})
+	resp := pipeRequest(t, server, jsonRPCRequest{
+		JSONRPC: "2.0",
+		ID:      float64(1),
+		Method:  "tools/call",
+		Params:  params,
+	})
+
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %v", resp.Error)
+	}
+}
+
+func TestServerListDocumentsEmpty(t *testing.T) {
+	store := &fakeStore{
+		listDocsFunc: func() ([]*db.Document, error) {
+			return []*db.Document{}, nil
+		},
+	}
+	embed := &fakeEmbedder{}
+	server := newTestServer(store, embed)
+
+	params, _ := json.Marshal(map[string]interface{}{
+		"name":      "list_documents",
+		"arguments": map[string]interface{}{},
+	})
+	resp := pipeRequest(t, server, jsonRPCRequest{
+		JSONRPC: "2.0",
+		ID:      float64(1),
+		Method:  "tools/call",
+		Params:  params,
+	})
+
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %v", resp.Error)
+	}
+}
+
+func TestServerGetContextWithResults(t *testing.T) {
+	store := &fakeStore{
+		searchFunc: func(query string, limit int) ([]*db.SearchResult, error) {
+			return []*db.SearchResult{
+				{
+					Chunk: &db.Chunk{
+						DocumentPath: "/test/doc.md",
+						ChunkIndex:   0,
+						Content:      "Test content",
+					},
+					RRFScore: 0.5,
+				},
+			}, nil
+		},
+	}
+	embed := &fakeEmbedder{}
+	server := newTestServer(store, embed)
+
+	params, _ := json.Marshal(map[string]interface{}{
+		"name": "get_context",
+		"arguments": map[string]interface{}{
+			"topic":     "test topic",
+			"max_chars": float64(100),
+		},
+	})
+	resp := pipeRequest(t, server, jsonRPCRequest{
+		JSONRPC: "2.0",
+		ID:      float64(1),
+		Method:  "tools/call",
+		Params:  params,
+	})
+
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %v", resp.Error)
+	}
+}
