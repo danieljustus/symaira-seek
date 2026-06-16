@@ -147,7 +147,7 @@ func bearerTokenAuth(next http.Handler) http.Handler {
 }
 
 // StartHTTPServer runs the local HTTP REST daemon.
-func StartHTTPServer(port int, ollamaCfg engine.OllamaConfig) error {
+func StartHTTPServer(port int, ollamaCfg engine.OllamaConfig, indexCooldown time.Duration) error {
 	dbClient, err := db.Open()
 	if err != nil {
 		return fmt.Errorf("failed to open database: %w", err)
