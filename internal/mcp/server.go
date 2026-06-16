@@ -187,7 +187,8 @@ func registerGetContext(server *mcpserver.Server, dbClient db.Store, embedder en
 			}
 
 			maxChars := params.MaxChars
-			if maxChars == 0 {
+			if maxChars == 0 && params.MaxTokens > 0 {
+				fmt.Fprintf(os.Stderr, "WARNING: max_tokens is deprecated, use max_chars instead\n")
 				maxChars = params.MaxTokens
 			}
 			if maxChars == 0 {
