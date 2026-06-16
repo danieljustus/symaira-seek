@@ -27,28 +27,39 @@ import (
 var version = "0.1.0-dev"
 
 var (
-	cfgFile   string
-	cfg       config.Config
-	limitFlag int
-	jsonFlag  bool
-	watchFlag bool
-	portFlag  int
-	urlFlag   string
-	stdinFlag bool
+	cfgFile    string
+	cfg        config.Config
+	limitFlag  int
+	jsonFlag   bool
+	watchFlag  bool
+	portFlag   int
+	urlFlag    string
+	stdinFlag  bool
 	sourceFlag string
+	verboseFlag bool
+	quietFlag   bool
 )
 
 func main() {
-	slog.SetDefault(logkit.NewFromEnv("symseek"))
-
 	cobra.OnInitialize(initConfig)
 
 	rootCmd := &cobra.Command{
 		Use:   "symseek",
 		Short: "Symaira-Seek: A local hybrid document retrieval CLI and MCP tool",
+		PersistentPreRun: func(cmd *cobra.Command, args []string) {
+			level := slog.LevelInfo
+			if verboseFlag {
+				level = slog.LevelDebug
+			} else if quietFlag {
+				level = slog.LevelError
+			}
+			slog.SetDefault(logkit.New(os.Stderr, level, "text"))
+		},
 	}
 
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.config/symaira-seek/config.toml)")
+	rootCmd.PersistentFlags().BoolVar(&verboseFlag, "verbose", false, "enable debug-level logging")
+	rootCmd.PersistentFlags().BoolVar(&quietFlag, "quiet", false, "suppress all output except errors")
 
 	// 1. Search Command
 	searchCmd := &cobra.Command{
