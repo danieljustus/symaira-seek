@@ -94,6 +94,9 @@ func registerReadDocument(server *mcpserver.Server, dbClient db.Store, _ engine.
 
 			absPath, err := pathutil.RestrictToHome(params.Path)
 			if err != nil {
+				if _, ok := err.(*pathutil.PathRestrictionError); ok {
+					return nil, fmt.Errorf("path restriction: %w", err)
+				}
 				return nil, fmt.Errorf("path error: %w", err)
 			}
 
@@ -240,6 +243,9 @@ func registerIndexDocument(server *mcpserver.Server, dbClient db.Store, embedder
 
 			absPath, err := pathutil.RestrictToHome(params.Path)
 			if err != nil {
+				if _, ok := err.(*pathutil.PathRestrictionError); ok {
+					return nil, fmt.Errorf("path restriction: %w", err)
+				}
 				return nil, fmt.Errorf("path error: %w", err)
 			}
 
