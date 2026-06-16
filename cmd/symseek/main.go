@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/dustin/go-humanize"
 	"github.com/spf13/cobra"
@@ -27,28 +28,39 @@ import (
 var version = "0.1.0-dev"
 
 var (
-	cfgFile   string
-	cfg       config.Config
-	limitFlag int
-	jsonFlag  bool
-	watchFlag bool
-	portFlag  int
-	urlFlag   string
-	stdinFlag bool
+	cfgFile    string
+	cfg        config.Config
+	limitFlag  int
+	jsonFlag   bool
+	watchFlag  bool
+	portFlag   int
+	urlFlag    string
+	stdinFlag  bool
 	sourceFlag string
+	verboseFlag bool
+	quietFlag   bool
 )
 
 func main() {
-	slog.SetDefault(logkit.NewFromEnv("symseek"))
-
 	cobra.OnInitialize(initConfig)
 
 	rootCmd := &cobra.Command{
 		Use:   "symseek",
 		Short: "Symaira-Seek: A local hybrid document retrieval CLI and MCP tool",
+		PersistentPreRun: func(cmd *cobra.Command, args []string) {
+			level := slog.LevelInfo
+			if verboseFlag {
+				level = slog.LevelDebug
+			} else if quietFlag {
+				level = slog.LevelError
+			}
+			slog.SetDefault(logkit.New(os.Stderr, level, "text"))
+		},
 	}
 
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.config/symaira-seek/config.toml)")
+	rootCmd.PersistentFlags().BoolVar(&verboseFlag, "verbose", false, "enable debug-level logging")
+	rootCmd.PersistentFlags().BoolVar(&quietFlag, "quiet", false, "suppress all output except errors")
 
 	// 1. Search Command
 	searchCmd := &cobra.Command{
@@ -63,7 +75,7 @@ func main() {
 			}
 			defer dbClient.Close()
 
-			embedder := engine.NewEmbeddingsGeneratorWithOllamaConfig(cfg.OllamaConfig().ToEngine())
+			embedder := engine.NewEmbeddingsGeneratorWithOllamaConfig(cfg.OllamaConfig())
 
 			results, err := engine.SearchHybrid(dbClient, embedder, query, limitFlag)
 			if err != nil {
@@ -96,7 +108,7 @@ func main() {
 			}
 			defer dbClient.Close()
 
-			embedder := engine.NewEmbeddingsGeneratorWithOllamaConfig(cfg.OllamaConfig().ToEngine())
+			embedder := engine.NewEmbeddingsGeneratorWithOllamaConfig(cfg.OllamaConfig())
 
 			if urlFlag != "" {
 				fmt.Fprintf(os.Stderr, "Indexing URL: %s...\n", urlFlag)
@@ -301,12 +313,16 @@ func initConfig() {
 }
 
 func startHTTPServer(port int) error {
-	return server.StartHTTPServer(port, cfg.OllamaConfig().ToEngine())
+	cooldown := time.Duration(cfg.IndexCooldownSeconds) * time.Second
+	if cooldown <= 0 {
+		cooldown = 5 * time.Second
+	}
+	return server.StartHTTPServer(port, cfg.OllamaConfig(), cooldown)
 }
 
 func startMCPServer() error {
 	mcp.ServerVersion = version
-	return mcp.StartServer(cfg.OllamaConfig().ToEngine())
+	return mcp.StartServer(cfg.OllamaConfig())
 }
 
 func writeSearchHuman(w io.Writer, results []*db.SearchResult) {

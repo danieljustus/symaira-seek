@@ -16,21 +16,23 @@ import (
 
 // Config holds user configuration for symseek.
 type Config struct {
-	OllamaURL      string `json:"ollama_url" toml:"ollama_url"`
-	Model          string `json:"model" toml:"model"`
-	TimeoutSeconds int    `json:"timeout_seconds" toml:"timeout_seconds"`
-	RetryCount     int    `json:"retry_count" toml:"retry_count"`
-	RetryBackoffMS int    `json:"retry_backoff_ms" toml:"retry_backoff_ms"`
+	OllamaURL           string `json:"ollama_url" toml:"ollama_url"`
+	Model               string `json:"model" toml:"model"`
+	TimeoutSeconds      int    `json:"timeout_seconds" toml:"timeout_seconds"`
+	RetryCount          int    `json:"retry_count" toml:"retry_count"`
+	RetryBackoffMS      int    `json:"retry_backoff_ms" toml:"retry_backoff_ms"`
+	IndexCooldownSeconds int   `json:"index_cooldown_seconds" toml:"index_cooldown_seconds"`
 }
 
 // DefaultConfig returns the default configuration values.
 func DefaultConfig() *Config {
 	return &Config{
-		OllamaURL:      "http://localhost:11434/api/embeddings",
-		Model:          "nomic-embed-text",
-		TimeoutSeconds: 120,
-		RetryCount:     2,
-		RetryBackoffMS: 500,
+		OllamaURL:           "http://localhost:11434/api/embeddings",
+		Model:               "nomic-embed-text",
+		TimeoutSeconds:      120,
+		RetryCount:          2,
+		RetryBackoffMS:      500,
+		IndexCooldownSeconds: 5,
 	}
 }
 
@@ -57,35 +59,13 @@ func GlobalPath() string {
 }
 
 // OllamaConfig converts a Config to the engine.OllamaConfig format.
-// This is kept in the config package to avoid import cycles; callers that
-// need engine.OllamaConfig can call this directly.
-func (c *Config) OllamaConfig() OllamaConfig {
-	return OllamaConfig{
+func (c *Config) OllamaConfig() engine.OllamaConfig {
+	return engine.OllamaConfig{
 		URL:          c.OllamaURL,
 		Model:        c.Model,
 		Timeout:      time.Duration(c.TimeoutSeconds) * time.Second,
 		RetryCount:   c.RetryCount,
 		RetryBackoff: time.Duration(c.RetryBackoffMS) * time.Millisecond,
-	}
-}
-
-// OllamaConfig mirrors engine.OllamaConfig without importing the engine package.
-type OllamaConfig struct {
-	URL          string
-	Model        string
-	Timeout      time.Duration
-	RetryCount   int
-	RetryBackoff time.Duration
-}
-
-// ToEngine converts to the engine package's OllamaConfig type.
-func (c OllamaConfig) ToEngine() engine.OllamaConfig {
-	return engine.OllamaConfig{
-		URL:          c.URL,
-		Model:        c.Model,
-		Timeout:      c.Timeout,
-		RetryCount:   c.RetryCount,
-		RetryBackoff: c.RetryBackoff,
 	}
 }
 
@@ -172,8 +152,14 @@ func SetValue(cfgFile string, key, value string, cfg *Config) error {
 			return fmt.Errorf("invalid %s value %q (must be a positive integer)", key, value)
 		}
 		cfg.RetryBackoffMS = n
+	case "index_cooldown_seconds":
+		n, err := strconv.Atoi(value)
+		if err != nil || n <= 0 {
+			return fmt.Errorf("invalid %s value %q (must be a positive integer)", key, value)
+		}
+		cfg.IndexCooldownSeconds = n
 	default:
-		return fmt.Errorf("unknown config key %q (supported: ollama_url, model, timeout_seconds, retry_count, retry_backoff_ms)", key)
+		return fmt.Errorf("unknown config key %q (supported: ollama_url, model, timeout_seconds, retry_count, retry_backoff_ms, index_cooldown_seconds)", key)
 	}
 	return Save(cfgFile, cfg)
 }
