@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/dustin/go-humanize"
 	"github.com/spf13/cobra"
@@ -312,7 +313,11 @@ func initConfig() {
 }
 
 func startHTTPServer(port int) error {
-	return server.StartHTTPServer(port, cfg.OllamaConfig())
+	cooldown := time.Duration(cfg.IndexCooldownSeconds) * time.Second
+	if cooldown <= 0 {
+		cooldown = 5 * time.Second
+	}
+	return server.StartHTTPServer(port, cfg.OllamaConfig(), cooldown)
 }
 
 func startMCPServer() error {
