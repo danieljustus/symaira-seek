@@ -175,12 +175,11 @@ func registerGetContext(server *mcpserver.Server, dbClient db.Store, embedder en
 	server.RegisterTool(&mcpserver.Tool{
 		Name:        "get_context",
 		Description: "Compile a consolidated context block from multiple matching documents on a given topic. This combines search and read tools.",
-		InputSchema: json.RawMessage(`{"type":"object","properties":{"topic":{"type":"string","description":"The topic or concept to extract context for"},"max_chars":{"type":"integer","description":"Maximum character count (Unicode code points) of the combined context (default 4000). Deprecated: max_tokens accepted for backward compatibility."}},"required":["topic"]}`),
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"topic":{"type":"string","description":"The topic or concept to extract context for"},"max_chars":{"type":"integer","description":"Maximum character count (Unicode code points) of the combined context (default 4000)."}},"required":["topic"]}`),
 		Handler: func(ctx context.Context, input json.RawMessage) (any, error) {
 			var params struct {
-				Topic     string `json:"topic"`
-				MaxChars  int    `json:"max_chars"`
-				MaxTokens int    `json:"max_tokens"`
+				Topic    string `json:"topic"`
+				MaxChars int    `json:"max_chars"`
 			}
 			if err := json.Unmarshal(input, &params); err != nil {
 				return nil, fmt.Errorf("invalid params: %w", err)
@@ -190,10 +189,6 @@ func registerGetContext(server *mcpserver.Server, dbClient db.Store, embedder en
 			}
 
 			maxChars := params.MaxChars
-			if maxChars == 0 && params.MaxTokens > 0 {
-				fmt.Fprintf(os.Stderr, "WARNING: max_tokens is deprecated, use max_chars instead\n")
-				maxChars = params.MaxTokens
-			}
 			if maxChars == 0 {
 				maxChars = 4000
 			}

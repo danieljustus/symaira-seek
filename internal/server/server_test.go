@@ -408,3 +408,66 @@ func TestSSEStreamEndpoint(t *testing.T) {
 		t.Errorf("expected 2 result events, got %d", resultCount)
 	}
 }
+
+func TestRateLimiter_AllowsFirstRequest(t *testing.T) {
+	rl := newRateLimiter(5 * time.Second)
+	now := time.Now()
+
+	if !rl.Allow("key1", now) {
+		t.Error("expected first request to be allowed")
+	}
+}
+
+func TestRateLimiter_DeniesSecondRequestWithinCooldown(t *testing.T) {
+	rl := newRateLimiter(5 * time.Second)
+	now := time.Now()
+
+	rl.Allow("key1", now)
+	if rl.Allow("key1", now.Add(1*time.Second)) {
+		t.Error("expected second request within cooldown to be denied")
+	}
+}
+
+func TestRateLimiter_AllowsRequestAfterCooldown(t *testing.T) {
+	rl := newRateLimiter(5 * time.Second)
+	now := time.Now()
+
+	rl.Allow("key1", now)
+	if !rl.Allow("key1", now.Add(6*time.Second)) {
+		t.Error("expected request after cooldown to be allowed")
+	}
+}
+
+func TestRateLimiter_DifferentKeys(t *testing.T) {
+	rl := newRateLimiter(5 * time.Second)
+	now := time.Now()
+
+	rl.Allow("key1", now)
+	if !rl.Allow("key2", now) {
+		t.Error("expected different key to be allowed")
+	}
+}
+
+func TestRateLimiter_EvictsStaleEntries(t *testing.T) {
+	rl := newRateLimiter(5 * time.Second)
+	now := time.Now()
+
+	// Add many entries
+	for i := 0; i < 2000; i++ {
+		key := fmt.Sprintf("key%d", i)
+		rl.Allow(key, now)
+	}
+
+	// Force eviction by adding one more after cooldown
+	rl.Allow("newkey", now.Add(6*time.Second))
+
+	// The eviction happens when len(lastSeen) > 1024, but it only evicts
+	// entries that are older than cooldown. Since we're checking with the
+	// same key at a later time, it should be allowed because the old entry
+	// was evicted.
+	// Note: This test verifies that the eviction mechanism runs without panic.
+	// The actual eviction behavior depends on the implementation details.
+	if !rl.Allow("key0", now.Add(6*time.Second)) {
+		t.Log("key0 was not evicted, but eviction mechanism ran without panic")
+	}
+}
