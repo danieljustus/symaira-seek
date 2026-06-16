@@ -61,13 +61,15 @@ var supportedExtensions = map[string]bool{
 func IndexDirectory(dbClient db.Store, embedder Embedder, dirPath string) error {
 	absPath, err := filepath.Abs(dirPath)
 	if err != nil {
-		return fmt.Errorf("failed to get absolute path: %w", err)
+		return userFriendlyError(err, "failed to get absolute path",
+			"Check that the path is valid and try again")
 	}
 
 	// Verify target path exists and is a directory
 	info, err := os.Stat(absPath)
 	if err != nil {
-		return fmt.Errorf("target path error: %w", err)
+		return userFriendlyError(err, "cannot access directory",
+			"Check file permissions and ensure the directory exists")
 	}
 	if !info.IsDir() {
 		return fmt.Errorf("target path is not a directory: %s", absPath)
@@ -142,12 +144,14 @@ func IndexFile(dbClient db.Store, embedder Embedder, path string) (string, error
 func WatchDirectory(ctx context.Context, dbClient db.Store, embedder Embedder, dirPath string) error {
 	absPath, err := filepath.Abs(dirPath)
 	if err != nil {
-		return fmt.Errorf("failed to get absolute path: %w", err)
+		return userFriendlyError(err, "failed to get absolute path",
+			"Check that the path is valid and try again")
 	}
 
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
-		return fmt.Errorf("failed to create watcher: %w", err)
+		return userFriendlyError(err, "failed to create file watcher",
+			"Ensure you have the necessary permissions to watch the directory")
 	}
 	defer watcher.Close()
 

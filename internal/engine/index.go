@@ -66,6 +66,11 @@ func IndexStdin(dbClient db.Store, embedder Embedder, reader io.Reader, source s
 	return indexContent(dbClient, embedder, source, content)
 }
 
+// userFriendlyError wraps an error with a user-friendly message and suggestion.
+func userFriendlyError(err error, context, suggestion string) error {
+	return fmt.Errorf("%s: %w\nHint: %s", context, err, suggestion)
+}
+
 // fetchURLContent attempts to use symfetch, falling back to HTTP GET.
 func fetchURLContent(url string) (string, error) {
 	// Try symfetch first
@@ -107,7 +112,8 @@ func fetchWithHTTP(url string) (string, error) {
 
 	resp, err := client.Get(url)
 	if err != nil {
-		return "", fmt.Errorf("HTTP GET failed: %w", err)
+		return "", userFriendlyError(err, "HTTP request failed",
+			"Check your internet connection and verify the URL is correct")
 	}
 	defer resp.Body.Close()
 
