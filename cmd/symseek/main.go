@@ -74,7 +74,7 @@ func main() {
 			}
 			defer dbClient.Close()
 
-			embedder := engine.NewEmbeddingsGeneratorWithOllamaConfig(cfg.OllamaConfig().ToEngine())
+			embedder := engine.NewEmbeddingsGeneratorWithOllamaConfig(cfg.OllamaConfig())
 
 			results, err := engine.SearchHybrid(dbClient, embedder, query, limitFlag)
 			if err != nil {
@@ -107,7 +107,7 @@ func main() {
 			}
 			defer dbClient.Close()
 
-			embedder := engine.NewEmbeddingsGeneratorWithOllamaConfig(cfg.OllamaConfig().ToEngine())
+			embedder := engine.NewEmbeddingsGeneratorWithOllamaConfig(cfg.OllamaConfig())
 
 			if urlFlag != "" {
 				fmt.Fprintf(os.Stderr, "Indexing URL: %s...\n", urlFlag)
@@ -312,12 +312,12 @@ func initConfig() {
 }
 
 func startHTTPServer(port int) error {
-	return server.StartHTTPServer(port, cfg.OllamaConfig().ToEngine())
+	return server.StartHTTPServer(port, cfg.OllamaConfig())
 }
 
 func startMCPServer() error {
 	mcp.ServerVersion = version
-	return mcp.StartServer(cfg.OllamaConfig().ToEngine())
+	return mcp.StartServer(cfg.OllamaConfig())
 }
 
 func writeSearchHuman(w io.Writer, results []*db.SearchResult) {

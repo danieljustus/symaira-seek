@@ -57,35 +57,13 @@ func GlobalPath() string {
 }
 
 // OllamaConfig converts a Config to the engine.OllamaConfig format.
-// This is kept in the config package to avoid import cycles; callers that
-// need engine.OllamaConfig can call this directly.
-func (c *Config) OllamaConfig() OllamaConfig {
-	return OllamaConfig{
+func (c *Config) OllamaConfig() engine.OllamaConfig {
+	return engine.OllamaConfig{
 		URL:          c.OllamaURL,
 		Model:        c.Model,
 		Timeout:      time.Duration(c.TimeoutSeconds) * time.Second,
 		RetryCount:   c.RetryCount,
 		RetryBackoff: time.Duration(c.RetryBackoffMS) * time.Millisecond,
-	}
-}
-
-// OllamaConfig mirrors engine.OllamaConfig without importing the engine package.
-type OllamaConfig struct {
-	URL          string
-	Model        string
-	Timeout      time.Duration
-	RetryCount   int
-	RetryBackoff time.Duration
-}
-
-// ToEngine converts to the engine package's OllamaConfig type.
-func (c OllamaConfig) ToEngine() engine.OllamaConfig {
-	return engine.OllamaConfig{
-		URL:          c.URL,
-		Model:        c.Model,
-		Timeout:      c.Timeout,
-		RetryCount:   c.RetryCount,
-		RetryBackoff: c.RetryBackoff,
 	}
 }
 
