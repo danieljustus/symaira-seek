@@ -225,6 +225,18 @@ func main() {
 	configCmd.Flags().BoolVar(&configJSONFlag, "json", false, "Output config in JSON format only (no file path)")
 	rootCmd.AddCommand(configCmd)
 
+	// 5b. Migrate Command
+	migrateCmd := &cobra.Command{
+		Use:   "migrate",
+		Short: "Migrate configuration from JSON to TOML format",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			config.MigrateJSONToTOML()
+			fmt.Fprintf(os.Stderr, "Migration complete. Config file: %s\n", config.GlobalPath())
+			return nil
+		},
+	}
+	rootCmd.AddCommand(migrateCmd)
+
 	// 6. Version Command
 	var checkUpdate bool
 	versionCmd := &cobra.Command{
