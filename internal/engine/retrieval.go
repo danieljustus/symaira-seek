@@ -26,6 +26,9 @@ func SearchHybrid(dbClient db.Store, embedder Embedder, query string, limit int)
 	if fetchLimit < 50 {
 		fetchLimit = 50
 	}
+	if fetchLimit > 200 {
+		fetchLimit = 200
+	}
 
 	// 2. Run BM25 and full vector scan concurrently.
 	// The vector leg always runs a full scan so that semantically related

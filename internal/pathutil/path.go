@@ -8,6 +8,16 @@ import (
 	"strings"
 )
 
+// PathRestrictionError is returned when a path violates the home directory restriction.
+type PathRestrictionError struct {
+	Path string
+	Root string
+}
+
+func (e *PathRestrictionError) Error() string {
+	return fmt.Sprintf("access denied: path %q is outside the allowed root (%s)", e.Path, e.Root)
+}
+
 // RestrictToHome normalises a path and checks that it resolves to an existing
 // entry under the user's home directory. This is the security boundary used by
 // both the HTTP /index endpoint and the MCP index_document tool.
@@ -39,7 +49,7 @@ func RestrictToHome(reqPath string) (string, error) {
 
 	rel, err := filepath.Rel(homeResolved, resolved)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
-		return "", fmt.Errorf("access denied: path %q is outside the allowed root (%s)", resolved, homeResolved)
+		return "", &PathRestrictionError{Path: resolved, Root: homeResolved}
 	}
 	return resolved, nil
 }

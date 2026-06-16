@@ -200,6 +200,7 @@ func main() {
 	// 5. Config Command
 	var configSetKey string
 	var configSetValue string
+	var configJSONFlag bool
 	configCmd := &cobra.Command{
 		Use:   "config",
 		Short: "View and edit settings",
@@ -211,7 +212,9 @@ func main() {
 				fmt.Fprintf(os.Stderr, "Set %s = %s in %s\n", configSetKey, configSetValue, cfgFile)
 				return nil
 			}
-			fmt.Fprintf(os.Stderr, "Config file: %s\n", cfgFile)
+			if !configJSONFlag {
+				fmt.Fprintf(os.Stderr, "Config file: %s\n", cfgFile)
+			}
 			enc := json.NewEncoder(os.Stdout)
 			enc.SetIndent("", "  ")
 			return enc.Encode(cfg)
@@ -219,7 +222,20 @@ func main() {
 	}
 	configCmd.Flags().StringVar(&configSetKey, "set-key", "", "Set a config key (e.g. ollama_url, model)")
 	configCmd.Flags().StringVar(&configSetValue, "set-value", "", "Value for the config key set via --set-key")
+	configCmd.Flags().BoolVar(&configJSONFlag, "json", false, "Output config in JSON format only (no file path)")
 	rootCmd.AddCommand(configCmd)
+
+	// 5b. Migrate Command
+	migrateCmd := &cobra.Command{
+		Use:   "migrate",
+		Short: "Migrate configuration from JSON to TOML format",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			config.MigrateJSONToTOML()
+			fmt.Fprintf(os.Stderr, "Migration complete. Config file: %s\n", config.GlobalPath())
+			return nil
+		},
+	}
+	rootCmd.AddCommand(migrateCmd)
 
 	// 6. Version Command
 	var checkUpdate bool

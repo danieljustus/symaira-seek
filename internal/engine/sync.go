@@ -61,13 +61,15 @@ var supportedExtensions = map[string]bool{
 func IndexDirectory(dbClient db.Store, embedder Embedder, dirPath string) error {
 	absPath, err := filepath.Abs(dirPath)
 	if err != nil {
-		return fmt.Errorf("failed to get absolute path: %w", err)
+		return userFriendlyError(err, "failed to get absolute path",
+			"Check that the path is valid and try again")
 	}
 
 	// Verify target path exists and is a directory
 	info, err := os.Stat(absPath)
 	if err != nil {
-		return fmt.Errorf("target path error: %w", err)
+		return userFriendlyError(err, "cannot access directory",
+			"Check file permissions and ensure the directory exists")
 	}
 	if !info.IsDir() {
 		return fmt.Errorf("target path is not a directory: %s", absPath)
@@ -142,12 +144,14 @@ func IndexFile(dbClient db.Store, embedder Embedder, path string) (string, error
 func WatchDirectory(ctx context.Context, dbClient db.Store, embedder Embedder, dirPath string) error {
 	absPath, err := filepath.Abs(dirPath)
 	if err != nil {
-		return fmt.Errorf("failed to get absolute path: %w", err)
+		return userFriendlyError(err, "failed to get absolute path",
+			"Check that the path is valid and try again")
 	}
 
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
-		return fmt.Errorf("failed to create watcher: %w", err)
+		return userFriendlyError(err, "failed to create file watcher",
+			"Ensure you have the necessary permissions to watch the directory")
 	}
 	defer watcher.Close()
 
@@ -174,6 +178,24 @@ func WatchDirectory(ctx context.Context, dbClient db.Store, embedder Embedder, d
 		return fmt.Errorf("initial sync failed: %w", err)
 	}
 
+	// Count files being watched from database
+	existingDocs, err := dbClient.ListDocuments()
+	if err != nil {
+		return fmt.Errorf("failed to list documents: %w", err)
+	}
+	fileCount := 0
+	for _, doc := range existingDocs {
+		if isWithinDir(doc.Path, absPath) {
+			fileCount++
+		}
+	}
+	fmt.Fprintf(os.Stderr, "Watching %d files in %s\n", fileCount, absPath)
+
+	// Periodic status ticker
+	statusTicker := time.NewTicker(30 * time.Second)
+	defer statusTicker.Stop()
+	lastChangeTime := time.Now()
+
 	// Debounce timer to batch rapid events. The debounce window collects
 	// all changed paths so a single file edit only re-indexes that file
 	// (issue #46) instead of forcing a full directory crawl.
@@ -186,6 +208,10 @@ func WatchDirectory(ctx context.Context, dbClient db.Store, embedder Embedder, d
 		select {
 		case <-ctx.Done():
 			return nil
+
+		case <-statusTicker.C:
+			fmt.Fprintf(os.Stderr, "Watching %d files, last change at %s\n",
+				fileCount, lastChangeTime.Format("15:04:05"))
 
 		case event, ok := <-watcher.Events:
 			if !ok {
@@ -206,6 +232,8 @@ func WatchDirectory(ctx context.Context, dbClient db.Store, embedder Embedder, d
 				pendingMu.Lock()
 				pendingChanges[event.Name] = struct{}{}
 				pendingMu.Unlock()
+
+				lastChangeTime = time.Now()
 
 				if debounceTimer != nil {
 					debounceTimer.Stop()

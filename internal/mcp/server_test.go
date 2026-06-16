@@ -542,7 +542,16 @@ func TestServerReadDocument_SymlinkSwapRejected(t *testing.T) {
 }
 
 func TestServerReadDocument_LargeFileTruncated(t *testing.T) {
-	tmpDir := t.TempDir()
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpDir := filepath.Join(home, ".symseek-test-"+strings.ToLower(t.Name()))
+	if err := os.MkdirAll(tmpDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
 	bigFile := filepath.Join(tmpDir, "big.txt")
 
 	bigContent := strings.Repeat("A", 11<<20)

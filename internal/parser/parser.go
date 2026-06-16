@@ -7,10 +7,38 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync"
+)
+
+var (
+	fileCache   = make(map[string]fileCacheEntry)
+	fileCacheMu sync.RWMutex
 )
 
 // GetFileHash computes the SHA-256 hash of a file.
+// Uses file metadata (mod time + size) to skip hash computation for unchanged files.
 func GetFileHash(path string) (string, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", err
+	}
+
+	modTime := info.ModTime().UnixNano()
+	size := info.Size()
+
+	fileCacheMu.RLock()
+	cached, exists := fileCache[path]
+	fileCacheMu.RUnlock()
+
+	if exists && cached.ModTime == modTime && cached.Size == size {
+		fileCacheMu.Lock()
+		cached = fileCache[path]
+		fileCacheMu.Unlock()
+		if cached.ModTime == modTime && cached.Size == size {
+			return cached.Hash, nil
+		}
+	}
+
 	file, err := os.Open(path)
 	if err != nil {
 		return "", err
@@ -22,7 +50,20 @@ func GetFileHash(path string) (string, error) {
 		return "", err
 	}
 
-	return hex.EncodeToString(h.Sum(nil)), nil
+	hash := hex.EncodeToString(h.Sum(nil))
+
+	fileCacheMu.Lock()
+	fileCache[path] = fileCacheEntry{ModTime: modTime, Size: size, Hash: hash}
+	fileCacheMu.Unlock()
+
+	return hash, nil
+}
+
+// fileCacheEntry stores file metadata for quick change detection.
+type fileCacheEntry struct {
+	ModTime int64
+	Size    int64
+	Hash    string
 }
 
 // ParseFile reads a file and returns its text content.

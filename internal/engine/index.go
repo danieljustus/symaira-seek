@@ -28,6 +28,17 @@ const (
 	maxHTTPResponseSize = 10 << 20
 )
 
+// Precompiled regex patterns for HTML-to-text conversion.
+// Compiled once at package initialization to prevent ReDoS and improve performance.
+var (
+	htmlScriptRE = regexp.MustCompile(`(?i)<script[^>]*>[\s\S]*?</script>`)
+	htmlStyleRE  = regexp.MustCompile(`(?i)<style[^>]*>[\s\S]*?</style>`)
+	htmlBRRE     = regexp.MustCompile(`(?i)<br\s*/?>`)
+	htmlBlockRE  = regexp.MustCompile(`(?i)<(?:hr|p|div|h[1-6]|li|tr)[^>]*>`)
+	htmlTagRE    = regexp.MustCompile(`<[^>]+>`)
+	htmlNewlineRE = regexp.MustCompile(`\n{3,}`)
+)
+
 // IndexURL fetches content from a URL and indexes it.
 // It first attempts to use symfetch if available, falling back to a simple
 // HTTP GET with minimal HTML-to-text conversion if symfetch is not found.
@@ -53,6 +64,11 @@ func IndexStdin(dbClient db.Store, embedder Embedder, reader io.Reader, source s
 	}
 
 	return indexContent(dbClient, embedder, source, content)
+}
+
+// userFriendlyError wraps an error with a user-friendly message and suggestion.
+func userFriendlyError(err error, context, suggestion string) error {
+	return fmt.Errorf("%s: %w\nHint: %s", context, err, suggestion)
 }
 
 // fetchURLContent attempts to use symfetch, falling back to HTTP GET.
@@ -96,7 +112,8 @@ func fetchWithHTTP(url string) (string, error) {
 
 	resp, err := client.Get(url)
 	if err != nil {
-		return "", fmt.Errorf("HTTP GET failed: %w", err)
+		return "", userFriendlyError(err, "HTTP request failed",
+			"Check your internet connection and verify the URL is correct")
 	}
 	defer resp.Body.Close()
 
@@ -124,13 +141,13 @@ func fetchWithHTTP(url string) (string, error) {
 
 // htmlToText performs minimal HTML-to-text conversion.
 func htmlToText(html string) string {
-	html = regexp.MustCompile(`(?i)<script[^>]*>[\s\S]*?</script>`).ReplaceAllString(html, "")
-	html = regexp.MustCompile(`(?i)<style[^>]*>[\s\S]*?</style>`).ReplaceAllString(html, "")
+	html = htmlScriptRE.ReplaceAllString(html, "")
+	html = htmlStyleRE.ReplaceAllString(html, "")
 
-	html = regexp.MustCompile(`(?i)<br\s*/?>`).ReplaceAllString(html, "\n")
-	html = regexp.MustCompile(`(?i)<(?:hr|p|div|h[1-6]|li|tr)[^>]*>`).ReplaceAllString(html, "\n")
+	html = htmlBRRE.ReplaceAllString(html, "\n")
+	html = htmlBlockRE.ReplaceAllString(html, "\n")
 
-	html = regexp.MustCompile(`<[^>]+>`).ReplaceAllString(html, "")
+	html = htmlTagRE.ReplaceAllString(html, "")
 
 	html = strings.ReplaceAll(html, "&amp;", "&")
 	html = strings.ReplaceAll(html, "&lt;", "<")
@@ -139,7 +156,7 @@ func htmlToText(html string) string {
 	html = strings.ReplaceAll(html, "&#39;", "'")
 	html = strings.ReplaceAll(html, "&nbsp;", " ")
 
-	html = regexp.MustCompile(`\n{3,}`).ReplaceAllString(html, "\n\n")
+	html = htmlNewlineRE.ReplaceAllString(html, "\n\n")
 
 	return strings.TrimSpace(html)
 }
