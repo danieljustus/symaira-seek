@@ -1,36 +1,43 @@
 ## What's changed
 
-### Security
-- #89 Config file permissions should be restrictive (0600) — closes #89
-- #90 MCP read_document should enforce path restriction — closes #90
-- #91 Precompile HTML stripping regexes to prevent ReDoS — closes #91
+### Breaking Changes
+- #104 Remove deprecated `max_tokens` parameter from `get_context` MCP tool — closes #102
 
 ### Features
-- #92 Add --json flag to config command for scriptability — closes #92
-- #93 Improve watch daemon feedback — closes #93
-- #94 Provide user-friendly error messages for indexing failures — closes #94
-- #95 Remove deprecated max_tokens parameter after deprecation period — closes #95
-- #96 Extract common path validation for all external interfaces — closes #96
-- #97 Consider moving config migration to a dedicated migration tool — closes #97
+- #117 Add request timeouts to MCP tool handlers to prevent indefinite blocking — closes #113
+  - Search handlers (search_documents, get_context): 60s timeout
+  - Index handlers (index_document, index_url): 300s timeout
 
 ### Performance
-- #98 Optimize fetchLimit in SearchHybrid — closes #98
-- #99 Consider caching file hashes in indexing pipeline — closes #99
+- #117 Precompute query vector norm in SearchVector — closes #111
+- #112 Split db.go into focused files (search.go, vecmath.go) — closes #112
+
+### Improvements
+- #114 Add configurable log verbosity — closes #114
+- #115 Decouple config.OllamaConfig from engine.OllamaConfig — closes #115
+- #116 Add HTTP server indexCooldown to config — closes #116
+
+### Tests
+- #104 Add tests for cmd/symseek and internal/server — closes #101
+- #108 Add integration tests for MCP server tools — closes #105
+- #110 Add unit tests for internal/errors package — closes #109
 
 ### Docs
-- #88 Update ecosystem guidance and standalone-first contract
+- #104 Translate ARCHITECTURE_PLAN.md from German to English — closes #103
 
 ### Closed Issues
-- #89 Config file permissions should be restrictive (0600)
-- #90 MCP read_document should enforce path restriction
-- #91 Precompile HTML stripping regexes to prevent ReDoS
-- #92 Add --json flag to config command for scriptability
-- #93 Improve watch daemon feedback
-- #94 Provide user-friendly error messages for indexing failures
-- #95 Remove deprecated max_tokens parameter after deprecation period
-- #96 Extract common path validation for all external interfaces
-- #97 Consider moving config migration to a dedicated migration tool
-- #98 Optimize fetchLimit in SearchHybrid
-- #99 Consider caching file hashes in indexing pipeline
+- #101 Improve test coverage for cmd/symseek and internal/server
+- #102 Remove deprecated max_tokens parameter from get_context
+- #103 Translate ARCHITECTURE_PLAN.md from German to English
+- #105 Add integration tests for MCP server and HTTP server
+- #106 Add structured error types for all interfaces
+- #107 Add API documentation for MCP tools and HTTP endpoints
+- #109 Achieve 100% test coverage for internal/errors
+- #111 Precompute query vector norm in SearchVector
+- #112 Split db.go into focused files
+- #113 Add request timeout to MCP tool handlers
+- #114 Add configurable log verbosity
+- #115 Decouple config.OllamaConfig from engine.OllamaConfig
+- #116 Add HTTP server indexCooldown to config
 
-**Full Changelog**: https://github.com/danieljustus/symaira-seek/compare/v1.1.0...v1.2.0
+**Full Changelog**: https://github.com/danieljustus/symaira-seek/compare/v1.2.0...v2.0.0
