@@ -24,12 +24,12 @@ type fakeStore struct {
 	listDocsFunc func() ([]*db.Document, error)
 }
 
-func (f *fakeStore) Close() error                                      { return nil }
-func (f *fakeStore) SaveDocument(doc *db.Document) error               { return nil }
-func (f *fakeStore) DeleteDocument(path string) error                  { return nil }
-func (f *fakeStore) SaveChunks(chunks []*db.Chunk) error               { return nil }
+func (f *fakeStore) Close() error                                             { return nil }
+func (f *fakeStore) SaveDocument(doc *db.Document) error                      { return nil }
+func (f *fakeStore) DeleteDocument(path string) error                         { return nil }
+func (f *fakeStore) SaveChunks(chunks []*db.Chunk) error                      { return nil }
 func (f *fakeStore) GetChunksForDocument(docPath string) ([]*db.Chunk, error) { return nil, nil }
-func (f *fakeStore) GetStats() (*db.Stats, error)                      { return &db.Stats{}, nil }
+func (f *fakeStore) GetStats() (*db.Stats, error)                             { return &db.Stats{}, nil }
 
 func (f *fakeStore) GetDocument(path string) (*db.Document, error) {
 	if f.getDocFunc != nil {
@@ -53,10 +53,6 @@ func (f *fakeStore) SearchBM25(query string, limit int) ([]*db.SearchResult, err
 }
 
 func (f *fakeStore) SearchVector(queryVec []float32, limit int) ([]*db.SearchResult, error) {
-	return []*db.SearchResult{}, nil
-}
-
-func (f *fakeStore) SearchVectorFiltered(queryVec []float32, candidateIDs []int64, limit int) ([]*db.SearchResult, error) {
 	return []*db.SearchResult{}, nil
 }
 
