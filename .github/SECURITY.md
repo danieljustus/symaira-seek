@@ -18,7 +18,7 @@ Instead, please use GitHub's Private Vulnerability Reporting feature:
 2. Click "Report a vulnerability"
 3. Fill in the details
 
-Alternatively, you can email security concerns to: [your-email@example.com]
+This routes the report privately to the maintainers; please use it rather than a public issue.
 
 ### What to include
 
