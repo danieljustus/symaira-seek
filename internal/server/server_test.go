@@ -471,3 +471,27 @@ func TestRateLimiter_EvictsStaleEntries(t *testing.T) {
 		t.Log("key0 was not evicted, but eviction mechanism ran without panic")
 	}
 }
+
+func TestRateLimiterKeyedByHostAcrossConnections(t *testing.T) {
+	rl := newRateLimiter(time.Minute)
+	now := time.Now()
+
+	// Two requests from the same host but different ephemeral source ports
+	// must share one bucket: the second is rejected within the cooldown.
+	if !rl.Allow(clientKey("127.0.0.1:54001"), now) {
+		t.Fatal("first request from host should be allowed")
+	}
+	if rl.Allow(clientKey("127.0.0.1:54002"), now.Add(time.Second)) {
+		t.Fatal("second request from same host (different port) should be rate limited")
+	}
+
+	// A different host is independent.
+	if !rl.Allow(clientKey("127.0.0.2:54003"), now.Add(time.Second)) {
+		t.Fatal("request from a different host should be allowed")
+	}
+
+	// After the cooldown elapses, the same host is allowed again.
+	if !rl.Allow(clientKey("127.0.0.1:54004"), now.Add(2*time.Minute)) {
+		t.Fatal("request after cooldown should be allowed")
+	}
+}
