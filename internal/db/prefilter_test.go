@@ -54,7 +54,7 @@ func setupDB(t testing.TB) *DB {
 	return d
 }
 
-func TestSearchVectorFilteredRespectsCandidateSet(t *testing.T) {
+func TestSearchVectorRanksTopKAndHydratesContent(t *testing.T) {
 	d := setupDB(t)
 
 	docPath := filepath.Join(t.TempDir(), "doc.md")
@@ -74,9 +74,8 @@ func TestSearchVectorFilteredRespectsCandidateSet(t *testing.T) {
 		t.Fatalf("SaveChunks: %v", err)
 	}
 
-	// Use a query vector identical to chunk 3 (uuid=u3, baseIdx=30). Without a
-	// filter the closest chunk is u3 itself. With a candidate set that
-	// excludes u3, the closest match must come from the allowed candidates.
+	// Query vector identical to chunk 3 (uuid=u3, baseIdx=30): the closest
+	// chunk is u3 itself.
 	queryVec := make([]float32, 768)
 	for i := range queryVec {
 		queryVec[i] = float32(30+i) / 1000.0
@@ -92,47 +91,25 @@ func TestSearchVectorFilteredRespectsCandidateSet(t *testing.T) {
 		}
 	}
 
-	unfiltered, err := d.SearchVector(queryVec, 3)
+	results, err := d.SearchVector(queryVec, 3)
 	if err != nil {
 		t.Fatalf("SearchVector: %v", err)
 	}
-	if len(unfiltered) == 0 || unfiltered[0].Chunk.UUID != "u3" {
-		t.Fatalf("unfiltered top hit should be u3, got %+v", unfiltered)
+	if len(results) == 0 || results[0].Chunk.UUID != "u3" {
+		t.Fatalf("top hit should be u3, got %+v", results)
+	}
+	if len(results) != 3 {
+		t.Fatalf("expected top-3 results, got %d", len(results))
 	}
 
-	filtered, err := d.SearchVectorFiltered(queryVec, []int64{chunks[0].ID, chunks[1].ID, chunks[3].ID, chunks[4].ID}, 3)
-	if err != nil {
-		t.Fatalf("SearchVectorFiltered: %v", err)
+	// The scoring scan omits the content column; content must still be
+	// hydrated for the returned top-k rows.
+	if results[0].Chunk.Content != "gamma gamma gamma" {
+		t.Errorf("expected hydrated content for top hit, got %q", results[0].Chunk.Content)
 	}
-	for _, r := range filtered {
-		if r.Chunk.UUID == "u3" {
-			t.Errorf("filtered search returned excluded chunk u3")
+	for _, r := range results {
+		if r.Chunk.Content == "" {
+			t.Errorf("result %s has no hydrated content", r.Chunk.UUID)
 		}
-	}
-	if len(filtered) == 0 {
-		t.Fatalf("expected at least one filtered result, got none")
-	}
-}
-
-func TestSearchVectorFilteredEmptyCandidatesFallsBackToFullScan(t *testing.T) {
-	d := setupDB(t)
-	docPath := filepath.Join(t.TempDir(), "doc.md")
-	if err := d.SaveDocument(&Document{Path: docPath, Hash: "h", UpdatedAt: time.Now()}); err != nil {
-		t.Fatalf("SaveDocument: %v", err)
-	}
-	chunks := []*Chunk{
-		makeChunk("e1", docPath, 0, "first", 100),
-		makeChunk("e2", docPath, 1, "second", 200),
-	}
-	if err := d.SaveChunks(chunks); err != nil {
-		t.Fatalf("SaveChunks: %v", err)
-	}
-
-	results, err := d.SearchVectorFiltered(make([]float32, 768), nil, 5)
-	if err != nil {
-		t.Fatalf("SearchVectorFiltered: %v", err)
-	}
-	if len(results) != 2 {
-		t.Errorf("expected 2 results from empty-candidate fallback, got %d", len(results))
 	}
 }

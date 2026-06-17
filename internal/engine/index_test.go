@@ -12,6 +12,31 @@ import (
 	"github.com/danieljustus/symaira-seek/internal/db"
 )
 
+// TestMain opts the engine test suite into indexing loopback URLs so the
+// fetch-mechanics tests can use httptest servers. The SSRF guard's default
+// behavior (rejecting private/loopback/bad-scheme URLs) is covered explicitly
+// by TestValidatePublicURL_RejectsPrivateAndBadScheme.
+func TestMain(m *testing.M) {
+	os.Setenv("SEEK_ALLOW_PRIVATE_URLS", "1")
+	os.Exit(m.Run())
+}
+
+func TestValidatePublicURL_RejectsPrivateAndBadScheme(t *testing.T) {
+	t.Setenv("SEEK_ALLOW_PRIVATE_URLS", "0")
+	cases := []string{
+		"http://127.0.0.1/x",
+		"http://localhost/x",
+		"http://169.254.169.254/latest/meta-data/",
+		"file:///etc/passwd",
+		"ftp://example.com/x",
+	}
+	for _, u := range cases {
+		if err := validatePublicURL(u); err == nil {
+			t.Errorf("expected rejection for %q", u)
+		}
+	}
+}
+
 func TestIndexURL_WithSymfetch(t *testing.T) {
 	tempDir, err := os.MkdirTemp("", "seek-url-symfetch-test")
 	if err != nil {

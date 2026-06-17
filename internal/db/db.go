@@ -51,7 +51,6 @@ type Store interface {
 	GetStats() (*Stats, error)
 	SearchBM25(queryStr string, limit int) ([]*SearchResult, error)
 	SearchVector(queryVec []float32, limit int) ([]*SearchResult, error)
-	SearchVectorFiltered(queryVec []float32, candidateIDs []int64, limit int) ([]*SearchResult, error)
 }
 
 var _ Store = (*DB)(nil)

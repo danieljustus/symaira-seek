@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -51,6 +52,16 @@ func (r *rateLimiter) Allow(key string, now time.Time) bool {
 		r.evictStaleLocked(now)
 	}
 	return true
+}
+
+// clientKey derives the rate-limit bucket key from a request's RemoteAddr,
+// stripping the ephemeral source port so repeated connections from the same
+// host share one bucket instead of each getting a fresh bucket.
+func clientKey(remoteAddr string) string {
+	if h, _, err := net.SplitHostPort(remoteAddr); err == nil {
+		return h
+	}
+	return remoteAddr
 }
 
 func (r *rateLimiter) evictStaleLocked(now time.Time) {
@@ -138,7 +149,8 @@ func bearerTokenAuth(next http.Handler) http.Handler {
 			return
 		}
 		auth := r.Header.Get("Authorization")
-		if !strings.HasPrefix(auth, "Bearer ") || strings.TrimPrefix(auth, "Bearer ") != expected {
+		token := strings.TrimPrefix(auth, "Bearer ")
+		if !strings.HasPrefix(auth, "Bearer ") || subtle.ConstantTimeCompare([]byte(token), []byte(expected)) != 1 {
 			http.Error(w, "unauthorized: invalid or missing Bearer token", http.StatusUnauthorized)
 			return
 		}
@@ -259,7 +271,7 @@ func StartHTTPServer(port int, ollamaCfg engine.OllamaConfig, indexCooldown time
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		if !indexLimiter.Allow(r.RemoteAddr, time.Now()) {
+		if !indexLimiter.Allow(clientKey(r.RemoteAddr), time.Now()) {
 			http.Error(w, "rate limit exceeded for /index", http.StatusTooManyRequests)
 			return
 		}
@@ -340,5 +352,3 @@ func StartHTTPServer(port int, ollamaCfg engine.OllamaConfig, indexCooldown time
 	fmt.Fprintf(os.Stderr, "HTTP server stopped.\n")
 	return nil
 }
-
-

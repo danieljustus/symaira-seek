@@ -1,7 +1,6 @@
 package db
 
 import (
-	"database/sql"
 	"strings"
 )
 
@@ -59,30 +58,20 @@ func (db *DB) SearchBM25(queryStr string, limit int) ([]*SearchResult, error) {
 	return results, nil
 }
 
+// searchVectorScanSelect omits the content column on purpose: vector scoring
+// needs only the embedding and its precomputed norm. Streaming every chunk's
+// text on every query is the dominant cost on large indexes, so content is
+// fetched afterwards for just the surviving top-k rows (see hydrateContent).
+const searchVectorScanSelect = "SELECT id, uuid, document_path, chunk_index, embedding, hash, norm FROM chunks"
+
 func (db *DB) SearchVector(queryVec []float32, limit int) ([]*SearchResult, error) {
-	return db.searchVectorSinglePass(queryVec, nil, limit)
-}
-
-func (db *DB) SearchVectorFiltered(queryVec []float32, candidateIDs []int64, limit int) ([]*SearchResult, error) {
-	return db.searchVectorSinglePass(queryVec, candidateIDs, limit)
-}
-
-func (db *DB) searchVectorSinglePass(queryVec []float32, candidateIDs []int64, limit int) ([]*SearchResult, error) {
 	if limit <= 0 {
 		return nil, nil
 	}
 
 	queryNorm := l2Norm(queryVec)
 
-	var (
-		rows *sql.Rows
-		err  error
-	)
-	if len(candidateIDs) == 0 {
-		rows, err = db.conn.Query(searchVectorSinglePassSelect)
-	} else {
-		rows, err = db.conn.Query(buildFilteredSelect(len(candidateIDs)), int64SliceArgs(candidateIDs)...)
-	}
+	rows, err := db.conn.Query(searchVectorScanSelect)
 	if err != nil {
 		return nil, err
 	}
@@ -93,7 +82,7 @@ func (db *DB) searchVectorSinglePass(queryVec []float32, candidateIDs []int64, l
 		var c Chunk
 		var embBytes []byte
 		var norm float32
-		if err := rows.Scan(&c.ID, &c.UUID, &c.DocumentPath, &c.ChunkIndex, &c.Content, &embBytes, &c.Hash, &norm); err != nil {
+		if err := rows.Scan(&c.ID, &c.UUID, &c.DocumentPath, &c.ChunkIndex, &embBytes, &c.Hash, &norm); err != nil {
 			return nil, err
 		}
 		c.Embedding = BytesToFloat32Slice(embBytes)
@@ -127,22 +116,44 @@ func (db *DB) searchVectorSinglePass(queryVec []float32, candidateIDs []int64, l
 	for i, r := range results {
 		r.VectorRank = i + 1
 	}
+
+	// Fetch content only for the top-k survivors of the scan.
+	if err := db.hydrateContent(results); err != nil {
+		return nil, err
+	}
 	return results, nil
 }
 
-const searchVectorSinglePassSelect = "SELECT id, uuid, document_path, chunk_index, content, embedding, hash, norm FROM chunks"
-
-func buildFilteredSelect(n int) string {
-	if n <= 0 {
-		return searchVectorSinglePassSelect
+// hydrateContent fills in Chunk.Content for the given results using a single
+// IN-list query keyed on the surviving chunk ids.
+func (db *DB) hydrateContent(results []*SearchResult) error {
+	if len(results) == 0 {
+		return nil
 	}
-	return "SELECT id, uuid, document_path, chunk_index, content, embedding, hash, norm FROM chunks WHERE id IN (" + strings.Repeat("?,", n-1) + "?)"
-}
 
-func int64SliceArgs(ids []int64) []interface{} {
-	out := make([]interface{}, len(ids))
-	for i, id := range ids {
-		out[i] = id
+	byID := make(map[int64]*Chunk, len(results))
+	args := make([]interface{}, len(results))
+	for i, r := range results {
+		byID[r.Chunk.ID] = r.Chunk
+		args[i] = r.Chunk.ID
 	}
-	return out
+
+	query := "SELECT id, content FROM chunks WHERE id IN (" + strings.Repeat("?,", len(results)-1) + "?)"
+	rows, err := db.conn.Query(query, args...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var id int64
+		var content string
+		if err := rows.Scan(&id, &content); err != nil {
+			return err
+		}
+		if c, ok := byID[id]; ok {
+			c.Content = content
+		}
+	}
+	return rows.Err()
 }

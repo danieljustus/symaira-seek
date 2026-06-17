@@ -128,7 +128,7 @@ Export the same stats as JSON for monitoring pipelines:
 
 ### Configuration
 
-`symseek` stores its configuration in `~/.config/symaira-seek/config.json` (overridable with `--config`). The file contains the Ollama endpoint URL and the embedding model name.
+`symseek` stores its configuration as TOML in `~/.config/symseek/config.toml` (overridable with `--config`). A legacy `config.json` from older versions is migrated to TOML automatically on first run (and via `./symseek migrate`).
 
 View the active configuration (the path is printed to stderr):
 ```bash
@@ -141,7 +141,16 @@ Set a value without editing the file by hand:
 ./symseek config --set-key model --set-value mxbai-embed-large
 ```
 
-The file is rewritten with mode `0600` on every write. Supported keys are `ollama_url` and `model`.
+The file is rewritten with mode `0600` on every write. Supported keys:
+
+| Key | Description | Default |
+| --- | --- | --- |
+| `ollama_url` | Ollama embeddings endpoint URL | `http://localhost:11434/api/embeddings` |
+| `model` | Embedding model name | `nomic-embed-text` |
+| `timeout_seconds` | Per-request Ollama timeout (seconds) | `120` |
+| `retry_count` | Number of Ollama retries on failure | `2` |
+| `retry_backoff_ms` | Initial retry backoff (milliseconds) | `500` |
+| `index_cooldown_seconds` | Cooldown between `/index` requests on the HTTP daemon | `5` |
 
 ---
 
