@@ -419,6 +419,20 @@ func prepareIndex(dbClient db.Store, embedder Embedder, path string) ([]*db.Chun
 		return nil, nil, false, fmt.Errorf("failed to parse %s: %w", path, err)
 	}
 
+	chunks := buildChunks(embedder, path, content)
+
+	return chunks, &db.Document{
+		Path:      path,
+		Hash:      currentHash,
+		UpdatedAt: time.Now(),
+	}, false, nil
+}
+
+// buildChunks splits content into overlapping chunks, generates their
+// embeddings, and assembles db.Chunk records. It is the single chunk-building
+// pipeline shared by file/directory indexing (prepareIndex) and content-based
+// indexing (indexContent for URLs and stdin).
+func buildChunks(embedder Embedder, source, content string) []*db.Chunk {
 	textChunks := parser.SplitText(content, 1000, 200)
 	embeddings := embedder.GenerateVectors(textChunks)
 
@@ -428,19 +442,14 @@ func prepareIndex(dbClient db.Store, embedder Embedder, path string) ([]*db.Chun
 		chunkHash := hex.EncodeToString(hashSum[:])
 		chunks = append(chunks, &db.Chunk{
 			UUID:         uuid.New().String(),
-			DocumentPath: path,
+			DocumentPath: source,
 			ChunkIndex:   idx,
 			Content:      tc,
 			Embedding:    embeddings[idx],
 			Hash:         chunkHash,
 		})
 	}
-
-	return chunks, &db.Document{
-		Path:      path,
-		Hash:      currentHash,
-		UpdatedAt: time.Now(),
-	}, false, nil
+	return chunks
 }
 
 func commitIndex(dbClient db.Store, path string, chunks []*db.Chunk, doc *db.Document) error {
