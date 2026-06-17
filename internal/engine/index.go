@@ -6,17 +6,16 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"regexp"
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
-
 	"github.com/danieljustus/symaira-seek/internal/db"
-	"github.com/danieljustus/symaira-seek/internal/parser"
 )
 
 const (
@@ -31,11 +30,11 @@ const (
 // Precompiled regex patterns for HTML-to-text conversion.
 // Compiled once at package initialization to prevent ReDoS and improve performance.
 var (
-	htmlScriptRE = regexp.MustCompile(`(?i)<script[^>]*>[\s\S]*?</script>`)
-	htmlStyleRE  = regexp.MustCompile(`(?i)<style[^>]*>[\s\S]*?</style>`)
-	htmlBRRE     = regexp.MustCompile(`(?i)<br\s*/?>`)
-	htmlBlockRE  = regexp.MustCompile(`(?i)<(?:hr|p|div|h[1-6]|li|tr)[^>]*>`)
-	htmlTagRE    = regexp.MustCompile(`<[^>]+>`)
+	htmlScriptRE  = regexp.MustCompile(`(?i)<script[^>]*>[\s\S]*?</script>`)
+	htmlStyleRE   = regexp.MustCompile(`(?i)<style[^>]*>[\s\S]*?</style>`)
+	htmlBRRE      = regexp.MustCompile(`(?i)<br\s*/?>`)
+	htmlBlockRE   = regexp.MustCompile(`(?i)<(?:hr|p|div|h[1-6]|li|tr)[^>]*>`)
+	htmlTagRE     = regexp.MustCompile(`<[^>]+>`)
 	htmlNewlineRE = regexp.MustCompile(`\n{3,}`)
 )
 
@@ -71,8 +70,62 @@ func userFriendlyError(err error, context, suggestion string) error {
 	return fmt.Errorf("%s: %w\nHint: %s", context, err, suggestion)
 }
 
+// validatePublicURL rejects URLs that do not use http/https or that resolve to
+// a non-public address (loopback, link-local, private, unspecified, multicast).
+// This is the SSRF boundary for both the symfetch and HTTP-GET fetch paths and
+// is re-applied to every redirect hop.
+func validatePublicURL(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("invalid URL: %w", err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("unsupported URL scheme %q (only http and https are allowed)", u.Scheme)
+	}
+	host := u.Hostname()
+	if host == "" {
+		return fmt.Errorf("URL has no host")
+	}
+	ips, err := net.LookupIP(host)
+	if err != nil {
+		return fmt.Errorf("cannot resolve host %q: %w", host, err)
+	}
+	for _, ip := range ips {
+		if isDisallowedIP(ip) {
+			return fmt.Errorf("refusing to fetch %q: host resolves to non-public address %s", raw, ip)
+		}
+	}
+	return nil
+}
+
+// isDisallowedIP reports whether ip is an address that must not be reachable via
+// user/agent-supplied URLs (SSRF protection). Blocking private/loopback ranges
+// is the default; setting SEEK_ALLOW_PRIVATE_URLS=1 (or true) opts in to
+// indexing local/internal endpoints (e.g. a localhost doc server).
+func isDisallowedIP(ip net.IP) bool {
+	if allowPrivateURLs() {
+		return false
+	}
+	return ip.IsLoopback() ||
+		ip.IsPrivate() ||
+		ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast() ||
+		ip.IsInterfaceLocalMulticast() ||
+		ip.IsUnspecified() ||
+		ip.IsMulticast()
+}
+
+func allowPrivateURLs() bool {
+	v := os.Getenv("SEEK_ALLOW_PRIVATE_URLS")
+	return v == "1" || strings.EqualFold(v, "true")
+}
+
 // fetchURLContent attempts to use symfetch, falling back to HTTP GET.
 func fetchURLContent(url string) (string, error) {
+	if err := validatePublicURL(url); err != nil {
+		return "", err
+	}
+
 	// Try symfetch first
 	if symfetchPath, err := exec.LookPath("symfetch"); err == nil {
 		content, err := fetchWithSymfetch(symfetchPath, url)
@@ -108,6 +161,12 @@ func fetchWithSymfetch(symfetchPath, url string) (string, error) {
 func fetchWithHTTP(url string) (string, error) {
 	client := &http.Client{
 		Timeout: httpFallbackTimeout,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 10 {
+				return fmt.Errorf("stopped after 10 redirects")
+			}
+			return validatePublicURL(req.URL.String())
+		},
 	}
 
 	resp, err := client.Get(url)
@@ -177,47 +236,13 @@ func indexContent(dbClient db.Store, embedder Embedder, source, content string) 
 		return nil
 	}
 
-	// Delete old version if exists
-	if existing != nil {
-		if err := dbClient.DeleteDocument(source); err != nil {
-			return fmt.Errorf("failed to delete old document: %w", err)
-		}
-	}
-
-	// Split content into chunks
-	textChunks := parser.SplitText(content, 1000, 200)
-	embeddings := embedder.GenerateVectors(textChunks)
-
-	// Create chunks
-	chunks := make([]*db.Chunk, 0, len(textChunks))
-	for idx, tc := range textChunks {
-		chunkHashSum := sha256.Sum256([]byte(tc))
-		chunkHash := hex.EncodeToString(chunkHashSum[:])
-		chunks = append(chunks, &db.Chunk{
-			UUID:         uuid.New().String(),
-			DocumentPath: source,
-			ChunkIndex:   idx,
-			Content:      tc,
-			Embedding:    embeddings[idx],
-			Hash:         chunkHash,
-		})
-	}
-
-	// Save document
+	// Build chunks and persist via the shared commit path used by file and
+	// directory indexing, so the chunk pipeline lives in exactly one place.
+	chunks := buildChunks(embedder, source, content)
 	doc := &db.Document{
 		Path:      source,
 		Hash:      currentHash,
 		UpdatedAt: time.Now(),
 	}
-
-	if err := dbClient.SaveDocument(doc); err != nil {
-		return fmt.Errorf("failed to save document: %w", err)
-	}
-
-	if err := dbClient.SaveChunks(chunks); err != nil {
-		return fmt.Errorf("failed to save chunks: %w", err)
-	}
-
-	fmt.Fprintf(os.Stderr, "Indexed: %s (%d chunks)\n", source, len(chunks))
-	return nil
+	return commitIndex(dbClient, source, chunks, doc)
 }
