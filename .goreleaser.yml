@@ -28,12 +28,14 @@ builds:
 
 archives:
   - id: default
-    format: tar.gz
+    formats:
+      - tar.gz
     name_template: >-
       {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
     format_overrides:
       - goos: windows
-        format: zip
+        formats:
+          - zip
     files:
       - LICENSE
       - README.md
@@ -64,17 +66,13 @@ release:
   prerelease: auto
   name_template: "v{{.Version}}"
 
-brews:
+homebrew_casks:
   - name: symseek
     repository:
       owner: danieljustus
       name: homebrew-tap
       token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
-    directory: Formula
+    directory: Casks
     homepage: https://github.com/danieljustus/symaira-seek
     description: Local-first, CGO-free document retrieval for AI agents
     license: MIT
-    service: |
-      run "#{opt_bin}/symseek"
-    test: |
-      system "#{bin}/symseek", "version"
