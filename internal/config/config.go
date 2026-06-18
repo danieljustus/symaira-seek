@@ -16,22 +16,22 @@ import (
 
 // Config holds user configuration for symseek.
 type Config struct {
-	OllamaURL           string `json:"ollama_url" toml:"ollama_url"`
-	Model               string `json:"model" toml:"model"`
-	TimeoutSeconds      int    `json:"timeout_seconds" toml:"timeout_seconds"`
-	RetryCount          int    `json:"retry_count" toml:"retry_count"`
-	RetryBackoffMS      int    `json:"retry_backoff_ms" toml:"retry_backoff_ms"`
-	IndexCooldownSeconds int   `json:"index_cooldown_seconds" toml:"index_cooldown_seconds"`
+	OllamaURL            string `json:"ollama_url" toml:"ollama_url"`
+	Model                string `json:"model" toml:"model"`
+	TimeoutSeconds       int    `json:"timeout_seconds" toml:"timeout_seconds"`
+	RetryCount           int    `json:"retry_count" toml:"retry_count"`
+	RetryBackoffMS       int    `json:"retry_backoff_ms" toml:"retry_backoff_ms"`
+	IndexCooldownSeconds int    `json:"index_cooldown_seconds" toml:"index_cooldown_seconds"`
 }
 
 // DefaultConfig returns the default configuration values.
 func DefaultConfig() *Config {
 	return &Config{
-		OllamaURL:           "http://localhost:11434/api/embeddings",
-		Model:               "nomic-embed-text",
-		TimeoutSeconds:      120,
-		RetryCount:          2,
-		RetryBackoffMS:      500,
+		OllamaURL:            "http://localhost:11434/api/embeddings",
+		Model:                "nomic-embed-text",
+		TimeoutSeconds:       120,
+		RetryCount:           2,
+		RetryBackoffMS:       500,
 		IndexCooldownSeconds: 5,
 	}
 }
