@@ -324,7 +324,8 @@ func TestProcessFilesInParallelMatchesSequential(t *testing.T) {
 // measures the impact of issue #50's bounded worker pool.
 //
 // Run with:
-//   go test -bench=BenchmarkIndexDirectory -benchtime=1x ./internal/engine
+//
+//	go test -bench=BenchmarkIndexDirectory -benchtime=1x ./internal/engine
 func BenchmarkIndexDirectorySequential(b *testing.B) {
 	benchmarkIndexDirectory(b, false)
 }

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/dustin/go-humanize"
+	"github.com/mattn/go-isatty"
 	"github.com/spf13/cobra"
 
 	"github.com/danieljustus/symaira-corekit/exitcodes"
@@ -23,20 +24,22 @@ import (
 	"github.com/danieljustus/symaira-seek/internal/engine"
 	"github.com/danieljustus/symaira-seek/internal/mcp"
 	"github.com/danieljustus/symaira-seek/internal/server"
+	"github.com/danieljustus/symaira-seek/internal/tui"
 )
 
 var version = "0.1.0-dev"
 
 var (
-	cfgFile    string
-	cfg        config.Config
-	limitFlag  int
-	jsonFlag   bool
-	watchFlag  bool
-	portFlag   int
-	urlFlag    string
-	stdinFlag  bool
-	sourceFlag string
+	cfgFile     string
+	cfg         config.Config
+	limitFlag   int
+	jsonFlag    bool
+	tuiFlag     bool
+	watchFlag   bool
+	portFlag    int
+	urlFlag     string
+	stdinFlag   bool
+	sourceFlag  string
 	verboseFlag bool
 	quietFlag   bool
 )
@@ -82,10 +85,18 @@ func main() {
 				return err
 			}
 
+			// JSON output — never launch TUI in JSON mode.
 			if jsonFlag {
 				enc := json.NewEncoder(os.Stdout)
 				enc.SetIndent("", "  ")
 				return enc.Encode(results)
+			}
+
+			// Launch interactive TUI when --tui is set OR when stdout is a
+			// real terminal (not a pipe/redirect) and --json is not active.
+			useTUI := tuiFlag || (!jsonFlag && isatty.IsTerminal(os.Stdout.Fd()))
+			if useTUI {
+				return tui.Run(query, results)
 			}
 
 			writeSearchHuman(os.Stdout, results)
@@ -94,6 +105,7 @@ func main() {
 	}
 	searchCmd.Flags().IntVarP(&limitFlag, "limit", "l", 5, "Number of search results to return")
 	searchCmd.Flags().BoolVar(&jsonFlag, "json", false, "Output results in JSON format")
+	searchCmd.Flags().BoolVar(&tuiFlag, "tui", false, "Launch interactive TUI browser for results")
 	rootCmd.AddCommand(searchCmd)
 
 	// 2. Index Command

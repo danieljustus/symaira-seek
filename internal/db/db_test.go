@@ -232,7 +232,8 @@ func seedBenchmarkDB(b *testing.B, d *DB, nChunks int) {
 // followed by a top-K detail query.
 //
 // Run with:
-//   go test -bench=BenchmarkSearchVector -benchtime=2s ./internal/db
+//
+//	go test -bench=BenchmarkSearchVector -benchtime=2s ./internal/db
 func BenchmarkSearchVectorSinglePass(b *testing.B) {
 	d := setupDB(b)
 	const nChunks = 1000
