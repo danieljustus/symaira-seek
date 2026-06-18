@@ -34,11 +34,11 @@ func SearchHybrid(dbClient db.Store, embedder Embedder, query string, limit int)
 	// The vector leg always runs a full scan so that semantically related
 	// chunks without keyword overlap are never excluded (issue #65).
 	var (
-		bm25Results []*db.SearchResult
-		bm25Err     error
+		bm25Results   []*db.SearchResult
+		bm25Err       error
 		vectorResults []*db.SearchResult
-		vectorErr   error
-		wg          sync.WaitGroup
+		vectorErr     error
+		wg            sync.WaitGroup
 	)
 
 	wg.Add(2)
