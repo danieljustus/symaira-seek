@@ -4,6 +4,10 @@ Symaira-Seek is a local, CGO-free document retrieval tool for AI agents, deliver
 
 This document describes the 5-phase implementation plan for the foundation and architecture of the tool.
 
+> The design rationale, target metrics, and open feature recommendations distilled
+> from the original Symaira-Seek deep-research report live in
+> [`docs/research/`](docs/research/README.md).
+
 ---
 
 ## Phase Overview
