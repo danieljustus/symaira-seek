@@ -1,13 +1,18 @@
 package parser
 
 import (
+	"archive/zip"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/xml"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
+
+	"github.com/ledongthuc/pdf"
 )
 
 var (
@@ -67,12 +72,119 @@ type fileCacheEntry struct {
 }
 
 // ParseFile reads a file and returns its text content.
+// It dispatches to format-specific extractors for PDF, DOCX, XLSX, and PPTX files;
+// all other files are read as raw text (UTF-8).
 func ParseFile(path string) (string, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return "", fmt.Errorf("failed to read file: %w", err)
+	ext := strings.ToLower(filepath.Ext(path))
+	switch ext {
+	case ".pdf":
+		return parsePDF(path)
+	case ".docx":
+		return parseDOCX(path)
+	case ".xlsx":
+		return parseXLSX(path)
+	case ".pptx":
+		return parsePPTX(path)
+	default:
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return "", fmt.Errorf("failed to read file: %w", err)
+		}
+		return string(data), nil
 	}
-	return string(data), nil
+}
+
+// parsePDF extracts text from a PDF file using a pure-Go PDF reader.
+// Returns an error for encrypted or image-only PDFs (no OCR in scope).
+func parsePDF(path string) (string, error) {
+	f, r, err := pdf.Open(path)
+	if err != nil {
+		return "", fmt.Errorf("failed to open PDF: %w", err)
+	}
+	defer f.Close()
+
+	var text strings.Builder
+	for i := 1; i <= r.NumPage(); i++ {
+		page := r.Page(i)
+		if page.V.IsNull() {
+			continue
+		}
+		content, err := page.GetPlainText(nil)
+		if err != nil {
+			continue
+		}
+		text.WriteString(content)
+		text.WriteString("\n")
+	}
+
+	result := strings.TrimSpace(text.String())
+	if result == "" {
+		return "", fmt.Errorf("PDF contains no extractable text (may be image-only)")
+	}
+	return result, nil
+}
+
+// parseDOCX extracts text from a DOCX file (ZIP archive containing word/document.xml).
+func parseDOCX(path string) (string, error) {
+	return parseOfficeXML(path, "word/document.xml")
+}
+
+// parseXLSX extracts text from an XLSX file (ZIP archive with shared strings + sheet data).
+func parseXLSX(path string) (string, error) {
+	r, err := zip.OpenReader(path)
+	if err != nil {
+		return "", fmt.Errorf("failed to open XLSX: %w", err)
+	}
+	defer r.Close()
+
+	// Try to read shared strings first
+	sharedStrings, err := readXLSXSharedStrings(r.File)
+	if err != nil {
+		sharedStrings = nil
+	}
+
+	var text strings.Builder
+	for _, f := range r.File {
+		if strings.HasPrefix(f.Name, "xl/worksheets/sheet") && strings.HasSuffix(f.Name, ".xml") {
+			content, err := extractXLSXSheetText(f, sharedStrings)
+			if err == nil && strings.TrimSpace(content) != "" {
+				text.WriteString(content)
+				text.WriteString("\n")
+			}
+		}
+	}
+
+	result := strings.TrimSpace(text.String())
+	if result == "" {
+		return "", fmt.Errorf("XLSX contains no extractable text")
+	}
+	return result, nil
+}
+
+// parsePPTX extracts text from a PPTX file (ZIP archive with slide XML files).
+func parsePPTX(path string) (string, error) {
+	r, err := zip.OpenReader(path)
+	if err != nil {
+		return "", fmt.Errorf("failed to open PPTX: %w", err)
+	}
+	defer r.Close()
+
+	var text strings.Builder
+	for _, f := range r.File {
+		if strings.HasPrefix(f.Name, "ppt/slides/slide") && strings.HasSuffix(f.Name, ".xml") {
+			content, err := extractPPTXSlideText(f)
+			if err == nil && strings.TrimSpace(content) != "" {
+				text.WriteString(content)
+				text.WriteString("\n")
+			}
+		}
+	}
+
+	result := strings.TrimSpace(text.String())
+	if result == "" {
+		return "", fmt.Errorf("PPTX contains no extractable text")
+	}
+	return result, nil
 }
 
 // SplitText recursively splits a string into chunks of max chunkSize, overlapping by chunkOverlap.
@@ -174,4 +286,202 @@ func splitRecursive(text string, separators []string, chunkSize, chunkOverlap in
 	}
 
 	return finalChunks
+}
+
+// parseOfficeXML reads an Office Open XML file (DOCX/PPTX) from a ZIP archive.
+func parseOfficeXML(path, xmlEntry string) (string, error) {
+	r, err := zip.OpenReader(path)
+	if err != nil {
+		return "", fmt.Errorf("failed to open Office XML: %w", err)
+	}
+	defer r.Close()
+
+	for _, f := range r.File {
+		if f.Name == xmlEntry {
+			rc, err := f.Open()
+			if err != nil {
+				return "", fmt.Errorf("failed to read %s: %w", xmlEntry, err)
+			}
+			defer rc.Close()
+			return extractXMLText(rc)
+		}
+	}
+	return "", fmt.Errorf("entry %s not found in archive", xmlEntry)
+}
+
+// extractXMLText parses an XML document and extracts all text content from <w:t> elements (DOCX)
+// or <a:t> elements (PPTX), returning the concatenated text.
+func extractXMLText(r io.Reader) (string, error) {
+	decoder := xml.NewDecoder(r)
+	var text strings.Builder
+	inText := false
+
+	for {
+		token, err := decoder.Token()
+		if err != nil {
+			break
+		}
+		switch t := token.(type) {
+		case xml.StartElement:
+			if t.Name.Local == "t" {
+				inText = true
+			}
+		case xml.EndElement:
+			if t.Name.Local == "t" {
+				inText = false
+			}
+		case xml.CharData:
+			if inText {
+				text.Write(t)
+			}
+		}
+	}
+	return text.String(), nil
+}
+
+// readXLSXSharedStrings reads the shared strings table from an XLSX archive.
+func readXLSXSharedStrings(files []*zip.File) ([]string, error) {
+	for _, f := range files {
+		if f.Name == "xl/sharedStrings.xml" {
+			rc, err := f.Open()
+			if err != nil {
+				return nil, err
+			}
+			defer rc.Close()
+			return parseSharedStrings(rc)
+		}
+	}
+	return nil, fmt.Errorf("shared strings not found")
+}
+
+// parseSharedStrings parses the XLSX shared strings XML file.
+func parseSharedStrings(r io.Reader) ([]string, error) {
+	decoder := xml.NewDecoder(r)
+	var strings_ []string
+	var current strings.Builder
+	inT := false
+
+	for {
+		token, err := decoder.Token()
+		if err != nil {
+			break
+		}
+		switch t := token.(type) {
+		case xml.StartElement:
+			if t.Name.Local == "t" {
+				inT = true
+			}
+		case xml.EndElement:
+			if t.Name.Local == "t" {
+				inT = false
+			}
+			if t.Name.Local == "si" {
+				strings_ = append(strings_, current.String())
+				current.Reset()
+			}
+		case xml.CharData:
+			if inT {
+				current.Write(t)
+			}
+		}
+	}
+	return strings_, nil
+}
+
+// extractXLSXSheetText extracts text from a single XLSX worksheet XML file.
+func extractXLSXSheetText(f *zip.File, sharedStrings []string) (string, error) {
+	rc, err := f.Open()
+	if err != nil {
+		return "", err
+	}
+	defer rc.Close()
+
+	decoder := xml.NewDecoder(rc)
+	var text strings.Builder
+	inV := false
+	var cellType string
+	var cellValue strings.Builder
+
+	for {
+		token, err := decoder.Token()
+		if err != nil {
+			break
+		}
+		switch t := token.(type) {
+		case xml.StartElement:
+			if t.Name.Local == "c" {
+				cellType = ""
+				for _, attr := range t.Attr {
+					if attr.Name.Local == "t" {
+						cellType = attr.Value
+					}
+				}
+			}
+			if t.Name.Local == "v" {
+				inV = true
+				cellValue.Reset()
+			}
+		case xml.EndElement:
+			if t.Name.Local == "v" {
+				inV = false
+			}
+			if t.Name.Local == "c" {
+				val := cellValue.String()
+				if cellType == "s" && sharedStrings != nil {
+					idx := 0
+					fmt.Sscanf(val, "%d", &idx)
+					if idx < len(sharedStrings) {
+						val = sharedStrings[idx]
+					}
+				}
+				if val != "" {
+					text.WriteString(val)
+					text.WriteString("\t")
+				}
+			}
+		case xml.CharData:
+			if inV {
+				cellValue.Write(t)
+			}
+		}
+	}
+	return text.String(), nil
+}
+
+// extractPPTXSlideText extracts text from a single PPTX slide XML file.
+func extractPPTXSlideText(f *zip.File) (string, error) {
+	rc, err := f.Open()
+	if err != nil {
+		return "", err
+	}
+	defer rc.Close()
+
+	decoder := xml.NewDecoder(rc)
+	var text strings.Builder
+	inT := false
+
+	for {
+		token, err := decoder.Token()
+		if err != nil {
+			break
+		}
+		switch t := token.(type) {
+		case xml.StartElement:
+			if t.Name.Local == "t" {
+				inT = true
+			}
+		case xml.EndElement:
+			if t.Name.Local == "t" {
+				inT = false
+			}
+			if t.Name.Local == "a:p" || t.Name.Local == "p" {
+				text.WriteString("\n")
+			}
+		case xml.CharData:
+			if inT {
+				text.Write(t)
+			}
+		}
+	}
+	return text.String(), nil
 }
