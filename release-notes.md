@@ -1,43 +1,25 @@
 ## What's changed
 
-### Breaking Changes
-- #104 Remove deprecated `max_tokens` parameter from `get_context` MCP tool — closes #102
-
 ### Features
-- #117 Add request timeouts to MCP tool handlers to prevent indefinite blocking — closes #113
-  - Search handlers (search_documents, get_context): 60s timeout
-  - Index handlers (index_document, index_url): 300s timeout
+- #145 Parse PDF and Office documents during indexing — closes #135, #136, #137, #138, #139, #140, #141, #142, #143
+- #134 Add Interactive TUI for semantic search — closes #133
 
-### Performance
-- #117 Precompute query vector norm in SearchVector — closes #111
-- #112 Split db.go into focused files (search.go, vecmath.go) — closes #112
+### Security
+- #131 Security hardening, indexing dedupe, and vector-scan perf fixes — closes #123, #124, #125, #126, #127, #128, #129, #130
 
-### Improvements
-- #114 Add configurable log verbosity — closes #114
-- #115 Decouple config.OllamaConfig from engine.OllamaConfig — closes #115
-- #116 Add HTTP server indexCooldown to config — closes #116
+### Fixes
+- #120 Fix: pass HOMEBREW_TAP_GITHUB_TOKEN to GoReleaser
 
-### Tests
-- #104 Add tests for cmd/symseek and internal/server — closes #101
-- #108 Add integration tests for MCP server tools — closes #105
-- #110 Add unit tests for internal/errors package — closes #109
+### Dependencies
+- #122 Upgrade symaira-corekit v0.1.0 → v0.1.1
+- #132 Bump github-actions group with 3 updates
 
 ### Docs
-- #104 Translate ARCHITECTURE_PLAN.md from German to English — closes #103
+- #144 Distilled architecture research notes
 
 ### Closed Issues
-- #101 Improve test coverage for cmd/symseek and internal/server
-- #102 Remove deprecated max_tokens parameter from get_context
-- #103 Translate ARCHITECTURE_PLAN.md from German to English
-- #105 Add integration tests for MCP server and HTTP server
-- #106 Add structured error types for all interfaces
-- #107 Add API documentation for MCP tools and HTTP endpoints
-- #109 Achieve 100% test coverage for internal/errors
-- #111 Precompute query vector norm in SearchVector
-- #112 Split db.go into focused files
-- #113 Add request timeout to MCP tool handlers
-- #114 Add configurable log verbosity
-- #115 Decouple config.OllamaConfig from engine.OllamaConfig
-- #116 Add HTTP server indexCooldown to config
+- #123–#130 Security and performance improvements
+- #133 Interactive TUI for search results
+- #135–#143 PDF, DOCX, XLSX, PPTX parsing support
 
-**Full Changelog**: https://github.com/danieljustus/symaira-seek/compare/v1.2.0...v2.0.0
+**Full Changelog**: https://github.com/danieljustus/symaira-seek/compare/v2.0.1...v2.1.0
