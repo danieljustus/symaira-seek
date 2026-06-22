@@ -115,7 +115,7 @@ func (db *DB) searchVectorFiltered(queryVec []float32, queryNorm float32, candid
 
 		var score float32
 		if queryNorm > 0 && norm > 0 {
-			score = CosineSimilarityWithStoredNorm(queryVec, embBytes, queryNorm)
+			score = CosineSimilarityWithStoredNorm(queryVec, embBytes, queryNorm, norm)
 		} else {
 			c.Embedding = BytesToFloat32Slice(embBytes)
 			score = CosineSimilarity(queryVec, c.Embedding)
@@ -171,7 +171,7 @@ func (db *DB) searchVectorFullScan(queryVec []float32, queryNorm float32, limit 
 
 		var score float32
 		if queryNorm > 0 && norm > 0 {
-			score = CosineSimilarityWithStoredNorm(queryVec, embBytes, queryNorm)
+			score = CosineSimilarityWithStoredNorm(queryVec, embBytes, queryNorm, norm)
 		} else {
 			c.Embedding = BytesToFloat32Slice(embBytes)
 			score = CosineSimilarity(queryVec, c.Embedding)

@@ -271,8 +271,11 @@ func TestSearchVectorPrefilterRecall(t *testing.T) {
 	chunks := make([]*Chunk, nChunks)
 	for i := 0; i < nChunks; i++ {
 		emb := make([]float32, 768)
+		// Use sinusoidal embeddings with distinct phases per chunk so that
+		// cosine similarity between non-identical chunks is well below 1.0
+		// and the exact-match query can be unambiguously identified.
 		for j := range emb {
-			emb[j] = float32(i*768+j) / float32(nChunks*768)
+			emb[j] = float32(math.Sin(float64(i)*0.1 + float64(j)*0.1))
 		}
 		var sumSquares float64
 		for _, v := range emb {
@@ -309,7 +312,7 @@ func TestSearchVectorPrefilterRecall(t *testing.T) {
 	}
 
 	if results[0].Chunk.UUID != "recall-50" {
-		t.Logf("top hit: %s (score=%.6f), second: %s (score=%.6f)",
+		t.Errorf("top hit should be recall-50 (exact query match), got %s (score=%.10f); second: %s (score=%.10f)",
 			results[0].Chunk.UUID, results[0].CosineScore,
 			results[1].Chunk.UUID, results[1].CosineScore)
 	}
