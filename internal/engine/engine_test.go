@@ -148,6 +148,10 @@ func (f *fakeEmbedder) GenerateVectors(texts []string) [][]float32 {
 	return out
 }
 
+func (f *fakeEmbedder) GenerateVectorNoRetry(text string) []float32 {
+	return f.GenerateVector(text)
+}
+
 // TestSearchHybridAcceptsEmbedderInterface guards the contract from #35:
 // the indexer must depend on the Embedder interface, not the concrete
 // *EmbeddingsGenerator, so callers can substitute behavior in tests.

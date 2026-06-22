@@ -187,6 +187,11 @@ func (c *countingEmbedder) GenerateVectors(texts []string) [][]float32 {
 	return (&fakeEmbedder{dim: c.dim}).GenerateVectors(texts)
 }
 
+func (c *countingEmbedder) GenerateVectorNoRetry(text string) []float32 {
+	c.calls++
+	return (&fakeEmbedder{dim: c.dim}).GenerateVectorNoRetry(text)
+}
+
 // TestIndexDirectorySiblingPrefix is a regression test for issue #66.
 // Re-indexing a directory must never delete documents that live in a
 // sibling directory whose name shares a string prefix (e.g. /docs vs /docs2).
