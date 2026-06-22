@@ -85,15 +85,13 @@ func (db *DB) SearchVector(queryVec []float32, limit int) ([]*SearchResult, erro
 		if err := rows.Scan(&c.ID, &c.UUID, &c.DocumentPath, &c.ChunkIndex, &embBytes, &c.Hash, &norm); err != nil {
 			return nil, err
 		}
-		c.Embedding = BytesToFloat32Slice(embBytes)
 		c.Norm = norm
 
 		var score float32
 		if queryNorm > 0 && norm > 0 {
-			score = CosineSimilarityWithBothNorms(queryVec, c.Embedding, queryNorm, norm)
-		} else if norm > 0 {
-			score = CosineSimilarityWithNorm(queryVec, c.Embedding, norm)
+			score = CosineSimilarityWithStoredNorm(queryVec, embBytes, queryNorm)
 		} else {
+			c.Embedding = BytesToFloat32Slice(embBytes)
 			score = CosineSimilarity(queryVec, c.Embedding)
 		}
 

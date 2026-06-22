@@ -70,32 +70,33 @@ func userFriendlyError(err error, context, suggestion string) error {
 	return fmt.Errorf("%s: %w\nHint: %s", context, err, suggestion)
 }
 
-// validatePublicURL rejects URLs that do not use http/https or that resolve to
-// a non-public address (loopback, link-local, private, unspecified, multicast).
-// This is the SSRF boundary for both the symfetch and HTTP-GET fetch paths and
-// is re-applied to every redirect hop.
-func validatePublicURL(raw string) error {
+func validatePublicURL(raw string) (string, error) {
 	u, err := url.Parse(raw)
 	if err != nil {
-		return fmt.Errorf("invalid URL: %w", err)
+		return "", fmt.Errorf("invalid URL: %w", err)
 	}
 	if u.Scheme != "http" && u.Scheme != "https" {
-		return fmt.Errorf("unsupported URL scheme %q (only http and https are allowed)", u.Scheme)
+		return "", fmt.Errorf("unsupported URL scheme %q (only http and https are allowed)", u.Scheme)
 	}
 	host := u.Hostname()
 	if host == "" {
-		return fmt.Errorf("URL has no host")
+		return "", fmt.Errorf("URL has no host")
 	}
 	ips, err := net.LookupIP(host)
 	if err != nil {
-		return fmt.Errorf("cannot resolve host %q: %w", host, err)
+		return "", fmt.Errorf("cannot resolve host %q: %w", host, err)
 	}
 	for _, ip := range ips {
-		if isDisallowedIP(ip) {
-			return fmt.Errorf("refusing to fetch %q: host resolves to non-public address %s", raw, ip)
+		if !isDisallowedIP(ip) {
+			return ip.String(), nil
 		}
 	}
-	return nil
+	return "", fmt.Errorf("refusing to fetch %q: host resolves to non-public address", raw)
+}
+
+func validatePublicURLString(raw string) error {
+	_, err := validatePublicURL(raw)
+	return err
 }
 
 // isDisallowedIP reports whether ip is an address that must not be reachable via
@@ -122,26 +123,28 @@ func allowPrivateURLs() bool {
 
 // fetchURLContent attempts to use symfetch, falling back to HTTP GET.
 func fetchURLContent(url string) (string, error) {
-	if err := validatePublicURL(url); err != nil {
+	pinnedIP, err := validatePublicURL(url)
+	if err != nil {
 		return "", err
 	}
 
-	// Try symfetch first
 	if symfetchPath, err := exec.LookPath("symfetch"); err == nil {
-		content, err := fetchWithSymfetch(symfetchPath, url)
-		if err == nil {
-			return content, nil
+		if allowPrivateURLs() {
+			content, err := fetchWithSymfetch(symfetchPath, url)
+			if err == nil {
+				return content, nil
+			}
+			fmt.Fprintf(os.Stderr, "symfetch failed: %v, falling back to HTTP GET\n", err)
+		} else {
+			fmt.Fprintf(os.Stderr, "symfetch skipped: external fetcher cannot pin resolved IP; using HTTP GET\n")
 		}
-		fmt.Fprintf(os.Stderr, "symfetch failed: %v, falling back to HTTP GET\n", err)
 	} else {
 		fmt.Fprintf(os.Stderr, "symfetch not found in PATH, falling back to HTTP GET\n")
 	}
 
-	// Fallback to HTTP GET
-	return fetchWithHTTP(url)
+	return fetchWithHTTP(url, pinnedIP)
 }
 
-// fetchWithSymfetch runs symfetch get <url> --format md and returns stdout.
 func fetchWithSymfetch(symfetchPath, url string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), symfetchTimeout)
 	defer cancel()
@@ -157,19 +160,42 @@ func fetchWithSymfetch(symfetchPath, url string) (string, error) {
 	return string(output), nil
 }
 
-// fetchWithHTTP performs a simple HTTP GET and converts HTML to text.
-func fetchWithHTTP(url string) (string, error) {
+func fetchWithHTTP(rawURL, pinnedIP string) (string, error) {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return "", fmt.Errorf("invalid URL: %w", err)
+	}
+
+	dialer := &net.Dialer{Timeout: httpFallbackTimeout}
 	client := &http.Client{
 		Timeout: httpFallbackTimeout,
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				_, port, err := net.SplitHostPort(addr)
+				if err != nil {
+					port = "80"
+					if u.Scheme == "https" {
+						port = "443"
+					}
+				}
+				return dialer.DialContext(ctx, network, net.JoinHostPort(pinnedIP, port))
+			},
+		},
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) >= 10 {
 				return fmt.Errorf("stopped after 10 redirects")
 			}
-			return validatePublicURL(req.URL.String())
+			return validatePublicURLString(req.URL.String())
 		},
 	}
 
-	resp, err := client.Get(url)
+	req, err := http.NewRequest(http.MethodGet, rawURL, nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Host = u.Host
+
+	resp, err := client.Do(req)
 	if err != nil {
 		return "", userFriendlyError(err, "HTTP request failed",
 			"Check your internet connection and verify the URL is correct")

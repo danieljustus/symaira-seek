@@ -35,6 +35,7 @@ var (
 	limitFlag   int
 	jsonFlag    bool
 	tuiFlag     bool
+	plainFlag   bool
 	watchFlag   bool
 	portFlag    int
 	urlFlag     string
@@ -61,7 +62,7 @@ func main() {
 		},
 	}
 
-	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.config/symaira-seek/config.toml)")
+	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.config/symseek/config.toml)")
 	rootCmd.PersistentFlags().BoolVar(&verboseFlag, "verbose", false, "enable debug-level logging")
 	rootCmd.PersistentFlags().BoolVar(&quietFlag, "quiet", false, "suppress all output except errors")
 
@@ -92,9 +93,7 @@ func main() {
 				return enc.Encode(results)
 			}
 
-			// Launch interactive TUI when --tui is set OR when stdout is a
-			// real terminal (not a pipe/redirect) and --json is not active.
-			useTUI := tuiFlag || (!jsonFlag && isatty.IsTerminal(os.Stdout.Fd()))
+			useTUI := tuiFlag || (!plainFlag && !jsonFlag && isatty.IsTerminal(os.Stdout.Fd()))
 			if useTUI {
 				return tui.Run(query, results)
 			}
@@ -106,6 +105,7 @@ func main() {
 	searchCmd.Flags().IntVarP(&limitFlag, "limit", "l", 5, "Number of search results to return")
 	searchCmd.Flags().BoolVar(&jsonFlag, "json", false, "Output results in JSON format")
 	searchCmd.Flags().BoolVar(&tuiFlag, "tui", false, "Launch interactive TUI browser for results")
+	searchCmd.Flags().BoolVar(&plainFlag, "plain", false, "Output plain human-readable results instead of launching the TUI")
 	rootCmd.AddCommand(searchCmd)
 
 	// 2. Index Command
@@ -315,7 +315,7 @@ func initConfig() {
 		cfgFile = config.GlobalPath()
 	}
 
-	loaded, err := config.Load()
+	loaded, err := config.LoadFromPath(cfgFile)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "symseek: could not load config: %v; using built-in defaults\n", err)
 		cfg = *config.DefaultConfig()

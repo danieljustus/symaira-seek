@@ -62,11 +62,16 @@ func Open() (*DB, error) {
 	}
 
 	dir := filepath.Join(home, ".local", "share", "symaira-seek")
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := os.MkdirAll(dir, 0700); err != nil {
 		return nil, fmt.Errorf("failed to create database directory: %w", err)
 	}
 
 	dbPath := filepath.Join(dir, "symseek.db")
+	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+		if f, err := os.OpenFile(dbPath, os.O_CREATE|os.O_RDWR, 0600); err == nil {
+			f.Close()
+		}
+	}
 	conn, err := sqlitekit.Open(dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open sqlite database: %w", err)

@@ -235,6 +235,13 @@ Indexes a local file or directory immediately.
 
 Fetches and indexes content from a URL.
 
+### Environment Variables
+
+| Variable | Description |
+| --- | --- |
+| `SEEK_API_TOKEN` | Bearer token required by the HTTP REST daemon (`/search`, `/index`, `/status`). When unset, the daemon is accessible to any local process. |
+| `SEEK_ALLOW_PRIVATE_URLS` | Set to `1` or `true` to allow `index_url` to fetch private, loopback, or link-local addresses. Without this, `index_url` refuses non-public targets to prevent SSRF. |
+
 ---
 
 ## HTTP REST Daemon
