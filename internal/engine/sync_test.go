@@ -10,6 +10,118 @@ import (
 	"github.com/danieljustus/symaira-seek/internal/db"
 )
 
+type countingStore struct {
+	db.Store
+	getDocCalls int
+}
+
+func (c *countingStore) GetDocument(path string) (*db.Document, error) {
+	c.getDocCalls++
+	return c.Store.GetDocument(path)
+}
+
+// Regression test for issue #159: one GetDocument per IndexFile call.
+func TestIndexFileSingleGetDocumentCall(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "seek-159-test")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	t.Setenv("HOME", tempDir)
+
+	dbClient, err := db.Open()
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer dbClient.Close()
+
+	cs := &countingStore{Store: dbClient}
+	embedder := &fakeEmbedder{dim: 768}
+
+	file := filepath.Join(tempDir, "doc.md")
+	if err := os.WriteFile(file, []byte("original content"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	// First index: new file — expect 1 GetDocument (returns nil)
+	cs.getDocCalls = 0
+	if _, err := IndexFile(cs, embedder, file); err != nil {
+		t.Fatalf("first IndexFile: %v", err)
+	}
+	if cs.getDocCalls != 1 {
+		t.Errorf("first index: expected 1 GetDocument call, got %d", cs.getDocCalls)
+	}
+
+	// Second index: unchanged file — expect 1 GetDocument (skip)
+	cs.getDocCalls = 0
+	if _, err := IndexFile(cs, embedder, file); err != nil {
+		t.Fatalf("second IndexFile: %v", err)
+	}
+	if cs.getDocCalls != 1 {
+		t.Errorf("unchanged index: expected 1 GetDocument call, got %d", cs.getDocCalls)
+	}
+
+	// Third index: changed file — expect 1 GetDocument (prepareIndex), 0 in commitIndex
+	cs.getDocCalls = 0
+	if err := os.WriteFile(file, []byte("updated content"), 0644); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if _, err := IndexFile(cs, embedder, file); err != nil {
+		t.Fatalf("third IndexFile: %v", err)
+	}
+	if cs.getDocCalls != 1 {
+		t.Errorf("changed index: expected 1 GetDocument call, got %d", cs.getDocCalls)
+	}
+}
+
+// Regression test for issue #159: one GetDocument per indexContent call.
+func TestIndexContentSingleGetDocumentCall(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "seek-159-content-test")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	t.Setenv("HOME", tempDir)
+
+	dbClient, err := db.Open()
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer dbClient.Close()
+
+	cs := &countingStore{Store: dbClient}
+	embedder := &fakeEmbedder{dim: 768}
+
+	// First index: new content — expect 1 GetDocument
+	cs.getDocCalls = 0
+	if err := indexContent(cs, embedder, "test://issue159", "first version"); err != nil {
+		t.Fatalf("first indexContent: %v", err)
+	}
+	if cs.getDocCalls != 1 {
+		t.Errorf("first content index: expected 1 GetDocument call, got %d", cs.getDocCalls)
+	}
+
+	// Second index: unchanged content — expect 1 GetDocument (skip)
+	cs.getDocCalls = 0
+	if err := indexContent(cs, embedder, "test://issue159", "first version"); err != nil {
+		t.Fatalf("second indexContent: %v", err)
+	}
+	if cs.getDocCalls != 1 {
+		t.Errorf("unchanged content index: expected 1 GetDocument call, got %d", cs.getDocCalls)
+	}
+
+	// Third index: changed content — expect 1 GetDocument, 0 in commitIndex
+	cs.getDocCalls = 0
+	if err := indexContent(cs, embedder, "test://issue159", "second version"); err != nil {
+		t.Fatalf("third indexContent: %v", err)
+	}
+	if cs.getDocCalls != 1 {
+		t.Errorf("changed content index: expected 1 GetDocument call, got %d", cs.getDocCalls)
+	}
+}
+
 // TestParallelIndexSkipsUnchangedFiles is a regression test for issue #70.
 // The parallel indexing path must check the file hash before generating
 // embeddings, so unchanged files are not re-embedded on every index run.
