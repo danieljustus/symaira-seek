@@ -62,7 +62,7 @@ func main() {
 		},
 	}
 
-	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.config/symaira-seek/config.toml)")
+	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.config/symseek/config.toml)")
 	rootCmd.PersistentFlags().BoolVar(&verboseFlag, "verbose", false, "enable debug-level logging")
 	rootCmd.PersistentFlags().BoolVar(&quietFlag, "quiet", false, "suppress all output except errors")
 
