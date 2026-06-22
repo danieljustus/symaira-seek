@@ -95,6 +95,11 @@ func IndexDirectory(dbClient db.Store, embedder Embedder, dirPath string) error 
 
 		ext := strings.ToLower(filepath.Ext(path))
 		if supportedExtensions[ext] {
+			di, infoErr := d.Info()
+			if infoErr == nil && di.Size() > parser.MaxIndexFileSize {
+				fmt.Fprintf(os.Stderr, "Skipping %s: file size %d exceeds %d byte limit\n", path, di.Size(), parser.MaxIndexFileSize)
+				return nil
+			}
 			foundPaths[path] = true
 		}
 
