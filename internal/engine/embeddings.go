@@ -34,6 +34,7 @@ type EmbeddingsGenerator struct {
 	Timeout      time.Duration
 	RetryCount   int
 	RetryBackoff time.Duration
+	sleepFn      func(time.Duration) // injectable for tests; defaults to time.Sleep
 	httpClient   *http.Client
 	cache        map[string]*list.Element
 	cacheOrder   *list.List
@@ -53,6 +54,7 @@ func newEmbeddingsGenerator() *EmbeddingsGenerator {
 		Timeout:      defaultOllamaTimeout,
 		RetryCount:   defaultOllamaRetries,
 		RetryBackoff: defaultOllamaBackoff,
+		sleepFn:      time.Sleep,
 		httpClient: &http.Client{
 			Timeout: defaultOllamaTimeout,
 			CheckRedirect: func(req *http.Request, via []*http.Request) error {
@@ -332,7 +334,7 @@ func (eg *EmbeddingsGenerator) doOllamaRequest(url string, reqBody []byte, resul
 	for attempt := 0; attempt <= retries; attempt++ {
 		if attempt > 0 {
 			fmt.Fprintf(os.Stderr, "engine: ollama retry %d/%d after %v (last error: %v)\n", attempt, retries, backoff, lastErr)
-			time.Sleep(backoff)
+			eg.sleepFn(backoff)
 			backoff *= 2
 			if backoff > maxBackoff {
 				backoff = maxBackoff

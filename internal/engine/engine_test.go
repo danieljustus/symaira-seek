@@ -75,6 +75,7 @@ func TestLocalHashVector(t *testing.T) {
 // runtime denial of service and is exercised by no test in this repo.
 func TestNewEmbeddingsGeneratorWithConfig(t *testing.T) {
 	eg := NewEmbeddingsGeneratorWithConfig("http://localhost:11434/api/embeddings", "nomic-embed-text")
+	eg.sleepFn = func(time.Duration) {}
 	if eg == nil {
 		t.Fatal("expected non-nil EmbeddingsGenerator")
 	}
@@ -104,6 +105,12 @@ func TestNewEmbeddingsGeneratorWithConfig(t *testing.T) {
 			t.Errorf("batch index %d: expected 768-dim vector, got %d", i, len(v))
 		}
 	}
+}
+
+func newTestEmbeddingsGenerator() *EmbeddingsGenerator {
+	eg := NewEmbeddingsGenerator()
+	eg.sleepFn = func(time.Duration) {}
+	return eg
 }
 
 // fakeEmbedder is a deterministic in-memory Embedder used to prove that
@@ -306,7 +313,7 @@ func TestHybridSearch(t *testing.T) {
 		UpdatedAt: time.Now(),
 	})
 
-	embedder := NewEmbeddingsGenerator()
+	embedder := newTestEmbeddingsGenerator()
 
 	// Embed some sample text
 	text1 := "The swift azure falcon soars above the sleeping canine"

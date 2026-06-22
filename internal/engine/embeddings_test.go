@@ -19,6 +19,7 @@ func TestNewEmbeddingsGeneratorWithOllamaConfig_AppliesConfig(t *testing.T) {
 		RetryBackoff: 100 * time.Millisecond,
 	}
 	eg := NewEmbeddingsGeneratorWithOllamaConfig(cfg)
+	eg.sleepFn = func(time.Duration) {}
 	if eg.OllamaURL != cfg.URL {
 		t.Errorf("expected URL %q, got %q", cfg.URL, eg.OllamaURL)
 	}

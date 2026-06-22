@@ -157,7 +157,7 @@ func TestApplyIncrementalChangesTouchesOnlyChangedFiles(t *testing.T) {
 	}
 	defer dbClient.Close()
 
-	embedder := NewEmbeddingsGenerator()
+	embedder := newTestEmbeddingsGenerator()
 
 	docsDir := filepath.Join(tempDir, "docs")
 	if err := os.MkdirAll(docsDir, 0755); err != nil {
@@ -228,7 +228,7 @@ func TestApplyIncrementalChangesDropsMissingFiles(t *testing.T) {
 	}
 	defer dbClient.Close()
 
-	embedder := NewEmbeddingsGenerator()
+	embedder := newTestEmbeddingsGenerator()
 
 	docsDir := filepath.Join(tempDir, "docs")
 	if err := os.MkdirAll(docsDir, 0755); err != nil {
@@ -283,7 +283,7 @@ func TestProcessFilesInParallelMatchesSequential(t *testing.T) {
 	}
 	defer dbClient.Close()
 
-	embedder := NewEmbeddingsGenerator()
+	embedder := newTestEmbeddingsGenerator()
 
 	const nFiles = 20
 	docsDir := filepath.Join(tempDir, "docs")
@@ -352,7 +352,7 @@ func benchmarkIndexDirectory(b *testing.B, parallel bool) {
 	}
 	defer dbClient.Close()
 
-	embedder := NewEmbeddingsGenerator()
+	embedder := newTestEmbeddingsGenerator()
 
 	const nFiles = 20
 	docsDir := filepath.Join(tempDir, "docs")
@@ -397,7 +397,7 @@ func TestIndexDirectory(t *testing.T) {
 	}
 	defer dbClient.Close()
 
-	embedder := NewEmbeddingsGenerator()
+	embedder := newTestEmbeddingsGenerator()
 
 	// 1. Create a dummy folder with markdown files
 	docsDir := filepath.Join(tempDir, "docs")
