@@ -31,7 +31,7 @@ func TestValidatePublicURL_RejectsPrivateAndBadScheme(t *testing.T) {
 		"ftp://example.com/x",
 	}
 	for _, u := range cases {
-		if err := validatePublicURL(u); err == nil {
+		if err := validatePublicURLString(u); err == nil {
 			t.Errorf("expected rejection for %q", u)
 		}
 	}
@@ -467,7 +467,7 @@ func TestFetchWithHTTP_StatusError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	_, err := fetchWithHTTP(server.URL)
+	_, err := fetchWithHTTP(server.URL, "127.0.0.1")
 	if err == nil {
 		t.Fatal("expected error for 404 status")
 	}
@@ -584,7 +584,7 @@ func TestFetchWithHTTP_LargeResponse(t *testing.T) {
 	}))
 	defer server.Close()
 
-	content, err := fetchWithHTTP(server.URL)
+	content, err := fetchWithHTTP(server.URL, "127.0.0.1")
 	if err != nil {
 		t.Fatalf("fetchWithHTTP failed: %v", err)
 	}
@@ -601,7 +601,7 @@ func TestFetchWithHTTP_NonHTMLContentType(t *testing.T) {
 	}))
 	defer server.Close()
 
-	content, err := fetchWithHTTP(server.URL)
+	content, err := fetchWithHTTP(server.URL, "127.0.0.1")
 	if err != nil {
 		t.Fatalf("fetchWithHTTP failed: %v", err)
 	}

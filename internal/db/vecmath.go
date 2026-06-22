@@ -74,6 +74,22 @@ func CosineSimilarityWithBothNorms(a, b []float32, normA, normB float32) float32
 	return float32(dotProduct / (float64(normA) * float64(normB)))
 }
 
+func CosineSimilarityWithStoredNorm(queryVec []float32, embBytes []byte, queryNorm float32) float32 {
+	if len(embBytes)%4 != 0 || len(embBytes)/4 != len(queryVec) || len(queryVec) == 0 {
+		return 0
+	}
+	var dotProduct float64
+	for i, q := range queryVec {
+		offset := i * 4
+		bits := uint32(embBytes[offset]) |
+			uint32(embBytes[offset+1])<<8 |
+			uint32(embBytes[offset+2])<<16 |
+			uint32(embBytes[offset+3])<<24
+		dotProduct += float64(q * math.Float32frombits(bits))
+	}
+	return float32(dotProduct / float64(queryNorm))
+}
+
 func l2Norm(v []float32) float32 {
 	var sum float64
 	for _, x := range v {

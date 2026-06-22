@@ -36,24 +36,31 @@ func DefaultConfig() *Config {
 	}
 }
 
-var loader = configkit.NewLoader[Config](
-	configkit.Options{AppName: "symseek"},
-	DefaultConfig,
-)
-
-// Load returns the configuration, loading and caching on first call.
-// Before loading, it attempts to migrate config.json to config.toml if needed.
 func Load() (*Config, error) {
-	MigrateJSONToTOML()
-	return loader.Load()
+	return LoadFromPath(GlobalPath())
 }
 
-// Reload reads a fresh config from disk, bypassing the cache.
+func LoadFromPath(path string) (*Config, error) {
+	MigrateJSONToTOMLAt(path)
+
+	cfg := DefaultConfig()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return cfg, nil
+		}
+		return nil, fmt.Errorf("failed to read config file: %w", err)
+	}
+	if err := toml.Unmarshal(data, cfg); err != nil {
+		return nil, fmt.Errorf("failed to decode config file: %w", err)
+	}
+	return cfg, nil
+}
+
 func Reload() (*Config, error) {
-	return loader.Reload()
+	return Load()
 }
 
-// GlobalPath returns the default global config file path.
 func GlobalPath() string {
 	return configkit.DefaultPath("symseek")
 }
@@ -69,11 +76,7 @@ func (c *Config) OllamaConfig() engine.OllamaConfig {
 	}
 }
 
-// MigrateJSONToTOML migrates config.json to config.toml if the TOML file
-// does not exist but the JSON file does. This provides backward compatibility
-// for users upgrading from the pre-corekit configuration format.
-func MigrateJSONToTOML() {
-	tomlPath := GlobalPath()
+func MigrateJSONToTOMLAt(tomlPath string) {
 	jsonPath := filepath.Join(filepath.Dir(tomlPath), "config.json")
 
 	if _, err := os.Stat(tomlPath); err == nil {
@@ -102,6 +105,10 @@ func MigrateJSONToTOML() {
 	defer f.Close()
 
 	_ = toml.NewEncoder(f).Encode(cfg)
+}
+
+func MigrateJSONToTOML() {
+	MigrateJSONToTOMLAt(GlobalPath())
 }
 
 // Save writes the config to the specified TOML file.
