@@ -36,11 +36,6 @@ func DefaultConfig() *Config {
 	}
 }
 
-var loader = configkit.NewLoader[Config](
-	configkit.Options{AppName: "symseek"},
-	DefaultConfig,
-)
-
 func Load() (*Config, error) {
 	return LoadFromPath(GlobalPath())
 }
