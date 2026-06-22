@@ -315,7 +315,7 @@ func initConfig() {
 		cfgFile = config.GlobalPath()
 	}
 
-	loaded, err := config.Load()
+	loaded, err := config.LoadFromPath(cfgFile)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "symseek: could not load config: %v; using built-in defaults\n", err)
 		cfg = *config.DefaultConfig()
