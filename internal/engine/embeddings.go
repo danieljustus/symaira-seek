@@ -151,14 +151,16 @@ func (eg *EmbeddingsGenerator) GenerateVector(text string) []float32 {
 
 	dims := 768
 
-	// Try Ollama first
 	vec, err := eg.queryOllama(text)
-	if err == nil && len(vec) == dims {
-		eg.cachePut(key, vec)
-		return vec
+	if err == nil {
+		if len(vec) != dims {
+			fmt.Fprintf(os.Stderr, "engine: embedding dimension mismatch: expected %d, got %d; falling back to local hash vector\n", dims, len(vec))
+		} else {
+			eg.cachePut(key, vec)
+			return vec
+		}
 	}
 
-	// Local pure-Go fallback vector
 	fallback := GenerateLocalHashVector(text, dims)
 	eg.cachePut(key, fallback)
 	return fallback
@@ -254,13 +256,13 @@ func (eg *EmbeddingsGenerator) GenerateVectors(texts []string) [][]float32 {
 		for i, u := range uncachedList {
 			vec := batchVectors[i]
 			key := hashKey(u.text)
-			if len(vec) == dims {
-				results[u.idx] = vec
-				eg.cachePut(key, vec)
-			} else {
+			if len(vec) != dims {
+				fmt.Fprintf(os.Stderr, "engine: batch embedding dimension mismatch for text %q: expected %d, got %d; using local hash fallback\n", u.text, dims, len(vec))
 				results[u.idx] = GenerateLocalHashVector(u.text, dims)
-				eg.cachePut(key, results[u.idx])
+			} else {
+				results[u.idx] = vec
 			}
+			eg.cachePut(key, results[u.idx])
 		}
 		return results
 	}
