@@ -1,6 +1,7 @@
 package db
 
 import (
+	"fmt"
 	"strings"
 )
 
@@ -71,7 +72,32 @@ func (db *DB) SearchVector(queryVec []float32, limit int) ([]*SearchResult, erro
 
 	queryNorm := l2Norm(queryVec)
 
-	rows, err := db.conn.Query(searchVectorScanSelect)
+	// Fast path: use IVF prefilter when an index is ready.
+	if idx := db.vectorIndex; idx != nil && idx.IsReady() {
+		candidateIDs := idx.CandidateIDs(queryVec, idx.ProbeCount())
+		if candidateIDs != nil {
+			return db.searchVectorFiltered(queryVec, queryNorm, candidateIDs, limit)
+		}
+	}
+
+	return db.searchVectorFullScan(queryVec, queryNorm, limit)
+}
+
+// searchVectorFiltered scores only the given candidate chunk IDs.
+func (db *DB) searchVectorFiltered(queryVec []float32, queryNorm float32, candidateIDs []int64, limit int) ([]*SearchResult, error) {
+	placeholders := make([]string, len(candidateIDs))
+	args := make([]interface{}, len(candidateIDs))
+	for i, id := range candidateIDs {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+
+	query := fmt.Sprintf(
+		"SELECT id, uuid, document_path, chunk_index, embedding, hash, norm FROM chunks WHERE id IN (%s)",
+		strings.Join(placeholders, ","),
+	)
+
+	rows, err := db.conn.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -115,7 +141,76 @@ func (db *DB) SearchVector(queryVec []float32, limit int) ([]*SearchResult, erro
 		r.VectorRank = i + 1
 	}
 
-	// Fetch content only for the top-k survivors of the scan.
+	if err := db.hydrateContent(results); err != nil {
+		return nil, err
+	}
+	return results, nil
+}
+
+// searchVectorFullScan scans every chunk, scores it, and builds the IVF
+// index on the first call so that subsequent queries use the prefilter.
+func (db *DB) searchVectorFullScan(queryVec []float32, queryNorm float32, limit int) ([]*SearchResult, error) {
+	rows, err := db.conn.Query(searchVectorScanSelect)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	needIndex := db.vectorIndex == nil || !db.vectorIndex.IsReady()
+	var indexChunks []*Chunk
+
+	results := make([]*SearchResult, 0, limit)
+	for rows.Next() {
+		var c Chunk
+		var embBytes []byte
+		var norm float32
+		if err := rows.Scan(&c.ID, &c.UUID, &c.DocumentPath, &c.ChunkIndex, &embBytes, &c.Hash, &norm); err != nil {
+			return nil, err
+		}
+		c.Norm = norm
+
+		var score float32
+		if queryNorm > 0 && norm > 0 {
+			score = CosineSimilarityWithStoredNorm(queryVec, embBytes, queryNorm)
+		} else {
+			c.Embedding = BytesToFloat32Slice(embBytes)
+			score = CosineSimilarity(queryVec, c.Embedding)
+		}
+
+		if len(results) < limit {
+			results = appendSortedByScoreDesc(results, &SearchResult{
+				Chunk:       &c,
+				CosineScore: score,
+			})
+		} else if score > results[limit-1].CosineScore {
+			results = appendSortedByScoreDesc(results[:limit-1], &SearchResult{
+				Chunk:       &c,
+				CosineScore: score,
+			})
+		}
+
+		if needIndex {
+			if c.Embedding == nil {
+				c.Embedding = BytesToFloat32Slice(embBytes)
+			}
+			indexChunks = append(indexChunks, &Chunk{ID: c.ID, Embedding: c.Embedding})
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	if needIndex && len(indexChunks) >= indexBuildThreshold {
+		if db.vectorIndex == nil {
+			db.vectorIndex = NewVectorIndex()
+		}
+		db.vectorIndex.Build(indexChunks)
+	}
+
+	for i, r := range results {
+		r.VectorRank = i + 1
+	}
+
 	if err := db.hydrateContent(results); err != nil {
 		return nil, err
 	}
