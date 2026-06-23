@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -493,5 +494,27 @@ func TestRateLimiterKeyedByHostAcrossConnections(t *testing.T) {
 	// After the cooldown elapses, the same host is allowed again.
 	if !rl.Allow(clientKey("127.0.0.1:54004"), now.Add(2*time.Minute)) {
 		t.Fatal("request after cooldown should be allowed")
+	}
+}
+
+func TestWarnIfNoAuthToken_Unset(t *testing.T) {
+	t.Setenv("SEEK_API_TOKEN", "")
+	var buf bytes.Buffer
+	warnIfNoAuthToken(&buf)
+	out := buf.String()
+	if !strings.Contains(out, "WARNING") {
+		t.Errorf("expected warning on stderr when SEEK_API_TOKEN is unset, got %q", out)
+	}
+	if !strings.Contains(out, "SEEK_API_TOKEN") {
+		t.Errorf("warning should mention SEEK_API_TOKEN, got %q", out)
+	}
+}
+
+func TestWarnIfNoAuthToken_Set(t *testing.T) {
+	t.Setenv("SEEK_API_TOKEN", "my-secret-token")
+	var buf bytes.Buffer
+	warnIfNoAuthToken(&buf)
+	if buf.Len() != 0 {
+		t.Errorf("expected no warning when SEEK_API_TOKEN is set, got %q", buf.String())
 	}
 }

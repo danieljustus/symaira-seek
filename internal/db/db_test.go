@@ -319,8 +319,8 @@ func (db *DB) searchVectorTwoPass(queryVec []float32, candidateIDs []int64, limi
 		for rows.Next() {
 			var id int64
 			var embBytes []byte
-			var norm float32
-			if err := rows.Scan(&id, &embBytes, &norm); err != nil {
+			var discard float32 // SQL still selects norm; scan it to keep column alignment
+			if err := rows.Scan(&id, &embBytes, &discard); err != nil {
 				rows.Close()
 				return nil, err
 			}
@@ -332,12 +332,7 @@ func (db *DB) searchVectorTwoPass(queryVec []float32, candidateIDs []int64, limi
 			}
 
 			vec := BytesToFloat32Slice(embBytes)
-			var score float32
-			if norm > 0 {
-				score = CosineSimilarityWithNorm(queryVec, vec, norm)
-			} else {
-				score = CosineSimilarity(queryVec, vec)
-			}
+			score := CosineSimilarity(queryVec, vec)
 			batchCount++
 
 			topK = insertSorted(topK, &scoredEntry{id: id, score: score}, limit)
