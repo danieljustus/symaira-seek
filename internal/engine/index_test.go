@@ -974,8 +974,7 @@ func TestFetchWithHTTP_RedirectToPublicHost(t *testing.T) {
 	}))
 	defer target.Close()
 
-	var targetURL string
-	targetURL = target.URL
+	targetURL := target.URL
 
 	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, targetURL, http.StatusFound)
