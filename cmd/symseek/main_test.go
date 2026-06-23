@@ -8,6 +8,42 @@ import (
 	"github.com/danieljustus/symaira-seek/internal/db"
 )
 
+func TestRootCmd_VersionIsSet(t *testing.T) {
+	cmd := newRootCmd()
+	if cmd.Version == "" {
+		t.Error("expected rootCmd.Version to be set")
+	}
+	if cmd.Version != version {
+		t.Errorf("expected rootCmd.Version == %q, got %q", version, cmd.Version)
+	}
+}
+
+func TestRootCmd_VersionFlag(t *testing.T) {
+	cmd := newRootCmd()
+	buf := new(bytes.Buffer)
+	cmd.SetOut(buf)
+	cmd.SetArgs([]string{"--version"})
+
+	err := cmd.Execute()
+	if err != nil {
+		t.Fatalf("expected no error on --version, got %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, version) {
+		t.Errorf("expected output to contain version %q, got %q", version, out)
+	}
+}
+
+func TestRootCmd_VersionSubcommandStillWorks(t *testing.T) {
+	cmd := newRootCmd()
+	cmd.SetArgs([]string{"version"})
+
+	err := cmd.Execute()
+	if err != nil {
+		t.Fatalf("expected no error on 'version' subcommand, got %v", err)
+	}
+}
+
 func TestWriteSearchHuman_EmptyResults(t *testing.T) {
 	var buf bytes.Buffer
 	writeSearchHuman(&buf, nil)

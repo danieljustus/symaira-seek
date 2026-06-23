@@ -70,6 +70,10 @@ func (f *fakeEmbedder) GenerateVectors(texts []string) [][]float32 {
 	return result
 }
 
+func (f *fakeEmbedder) GenerateVectorNoRetry(text string) []float32 {
+	return f.GenerateVector(text)
+}
+
 func newTestServer(store db.Store, embedder engine.Embedder) *mcpserver.Server {
 	ServerVersion = "test-version"
 	s := mcpserver.New("symseek", ServerVersion)

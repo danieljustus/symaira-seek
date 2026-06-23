@@ -19,6 +19,7 @@ func TestNewEmbeddingsGeneratorWithOllamaConfig_AppliesConfig(t *testing.T) {
 		RetryBackoff: 100 * time.Millisecond,
 	}
 	eg := NewEmbeddingsGeneratorWithOllamaConfig(cfg)
+	eg.sleepFn = func(time.Duration) {}
 	if eg.OllamaURL != cfg.URL {
 		t.Errorf("expected URL %q, got %q", cfg.URL, eg.OllamaURL)
 	}
@@ -410,5 +411,134 @@ func TestIsStopWordUsesPackageMap(t *testing.T) {
 		if isStopWord(w) {
 			t.Errorf("expected %q to NOT be classified as a stop word", w)
 		}
+	}
+}
+
+// TestGenerateVectorNoRetry_SkipsRetries verifies that GenerateVectorNoRetry
+// makes only a single Ollama attempt (no retry/backoff) when the server
+// returns 5xx, then falls back to the local hash vector (issue #162).
+func TestGenerateVectorNoRetry_SkipsRetries(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	var sleepCount int32
+	eg := NewEmbeddingsGeneratorWithOllamaConfig(OllamaConfig{
+		URL:          srv.URL,
+		Model:        "test",
+		RetryCount:   2,
+		RetryBackoff: 500 * time.Millisecond,
+	})
+	eg.sleepFn = func(d time.Duration) {
+		atomic.AddInt32(&sleepCount, 1)
+	}
+
+	vec := eg.GenerateVectorNoRetry("hello")
+	if len(vec) != 768 {
+		t.Fatalf("expected 768-dim hash fallback vector, got %d", len(vec))
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Errorf("expected exactly 1 call (no retries), got %d", got)
+	}
+	if got := atomic.LoadInt32(&sleepCount); got != 0 {
+		t.Errorf("expected 0 sleeps, got %d", got)
+	}
+}
+
+// TestGenerateVectorNoRetry_FastReturnWhenUnreachable verifies that
+// GenerateVectorNoRetry returns quickly (well under the retry penalty)
+// when Ollama is unreachable on the network (issue #162).
+func TestGenerateVectorNoRetry_FastReturnWhenUnreachable(t *testing.T) {
+	eg := NewEmbeddingsGeneratorWithOllamaConfig(OllamaConfig{
+		URL:          "http://127.0.0.1:1/api/embeddings",
+		Model:        "test",
+		RetryCount:   2,
+		RetryBackoff: 1 * time.Second,
+		Timeout:      100 * time.Millisecond,
+	})
+
+	start := time.Now()
+	vec := eg.GenerateVectorNoRetry("hello")
+	elapsed := time.Since(start)
+
+	if len(vec) != 768 {
+		t.Fatalf("expected 768-dim hash fallback vector, got %d", len(vec))
+	}
+	if elapsed > 500*time.Millisecond {
+		t.Errorf("GenerateVectorNoRetry took %v; expected well under the ~1.5s retry penalty", elapsed)
+	}
+}
+
+// TestGenerateVector_StillRetriesOnFailure verifies that the normal
+// GenerateVector path still retries with backoff when Ollama returns 5xx,
+// preserving indexing-time retry behavior (issue #162).
+func TestGenerateVector_StillRetriesOnFailure(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	var sleepCount int32
+	eg := NewEmbeddingsGeneratorWithOllamaConfig(OllamaConfig{
+		URL:          srv.URL,
+		Model:        "test",
+		RetryCount:   2,
+		RetryBackoff: 1 * time.Millisecond,
+	})
+	eg.sleepFn = func(d time.Duration) {
+		atomic.AddInt32(&sleepCount, 1)
+	}
+
+	vec := eg.GenerateVector("hello")
+	if len(vec) != 768 {
+		t.Fatalf("expected 768-dim hash fallback vector, got %d", len(vec))
+	}
+	if got := atomic.LoadInt32(&calls); got != 3 {
+		t.Errorf("expected 3 calls (1 initial + 2 retries), got %d", got)
+	}
+	if got := atomic.LoadInt32(&sleepCount); got != 2 {
+		t.Errorf("expected 2 sleeps for 2 retries, got %d", got)
+	}
+}
+
+// TestDoOllamaRequestWithRetries_ZeroRetriesMakesSingleAttempt verifies that
+// calling doOllamaRequestWithRetries with maxRetries=0 makes exactly one
+// HTTP request with no sleep (issue #162).
+func TestDoOllamaRequestWithRetries_ZeroRetriesMakesSingleAttempt(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	eg := NewEmbeddingsGeneratorWithOllamaConfig(OllamaConfig{
+		URL:          srv.URL,
+		Model:        "test",
+		RetryCount:   5,
+		RetryBackoff: 1 * time.Second,
+	})
+	var sleepCount int32
+	eg.sleepFn = func(d time.Duration) {
+		atomic.AddInt32(&sleepCount, 1)
+	}
+
+	var res struct {
+		Embedding []float32 `json:"embedding"`
+	}
+	err := eg.doOllamaRequestWithRetries(srv.URL, []byte(`{}`), &res, 0)
+	if err == nil {
+		t.Fatal("expected error from 500 response")
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Errorf("expected exactly 1 call, got %d", got)
+	}
+	if got := atomic.LoadInt32(&sleepCount); got != 0 {
+		t.Errorf("expected 0 sleeps, got %d", got)
 	}
 }

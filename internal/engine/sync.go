@@ -95,6 +95,11 @@ func IndexDirectory(dbClient db.Store, embedder Embedder, dirPath string) error 
 
 		ext := strings.ToLower(filepath.Ext(path))
 		if supportedExtensions[ext] {
+			di, infoErr := d.Info()
+			if infoErr == nil && di.Size() > parser.MaxIndexFileSize {
+				fmt.Fprintf(os.Stderr, "Skipping %s: file size %d exceeds %d byte limit\n", path, di.Size(), parser.MaxIndexFileSize)
+				return nil
+			}
 			foundPaths[path] = true
 		}
 
@@ -129,7 +134,7 @@ func IndexDirectory(dbClient db.Store, embedder Embedder, dirPath string) error 
 
 // IndexFile indexes a single file by delegating to the shared prepareIndex/commitIndex pipeline.
 func IndexFile(dbClient db.Store, embedder Embedder, path string) (string, error) {
-	chunks, doc, skipped, err := prepareIndex(dbClient, embedder, path)
+	chunks, doc, existing, skipped, err := prepareIndex(dbClient, embedder, path)
 	if err != nil {
 		return "", err
 	}
@@ -137,7 +142,7 @@ func IndexFile(dbClient db.Store, embedder Embedder, path string) (string, error
 		currentHash, _ := parser.GetFileHash(path)
 		return currentHash, nil
 	}
-	if err := commitIndex(dbClient, path, chunks, doc); err != nil {
+	if err := commitIndex(dbClient, path, chunks, doc, existing); err != nil {
 		return "", err
 	}
 	return doc.Hash, nil
@@ -360,6 +365,7 @@ func processFilesInParallel(dbClient db.Store, embedder Embedder, paths map[stri
 		path    string
 		chunks  []*db.Chunk
 		doc     *db.Document
+		existing *db.Document
 		err     error
 		skipped bool
 	}
@@ -378,8 +384,8 @@ func processFilesInParallel(dbClient db.Store, embedder Embedder, paths map[stri
 		go func() {
 			defer prepWG.Done()
 			for path := range jobs {
-				chunks, doc, skipped, err := prepareIndex(dbClient, embedder, path)
-				prepared <- result{path: path, chunks: chunks, doc: doc, err: err, skipped: skipped}
+				chunks, doc, existing, skipped, err := prepareIndex(dbClient, embedder, path)
+				prepared <- result{path: path, chunks: chunks, doc: doc, existing: existing, err: err, skipped: skipped}
 			}
 		}()
 	}
@@ -397,30 +403,30 @@ func processFilesInParallel(dbClient db.Store, embedder Embedder, paths map[stri
 			fmt.Fprintf(os.Stderr, "Warning: %v\n", r.err)
 			continue
 		}
-		if err := commitIndex(dbClient, r.path, r.chunks, r.doc); err != nil {
+		if err := commitIndex(dbClient, r.path, r.chunks, r.doc, r.existing); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: %v\n", err)
 			continue
 		}
 	}
 }
 
-func prepareIndex(dbClient db.Store, embedder Embedder, path string) ([]*db.Chunk, *db.Document, bool, error) {
+func prepareIndex(dbClient db.Store, embedder Embedder, path string) ([]*db.Chunk, *db.Document, *db.Document, bool, error) {
 	currentHash, err := parser.GetFileHash(path)
 	if err != nil {
-		return nil, nil, false, fmt.Errorf("failed to compute hash for %s: %w", path, err)
+		return nil, nil, nil, false, fmt.Errorf("failed to compute hash for %s: %w", path, err)
 	}
 
 	existing, err := dbClient.GetDocument(path)
 	if err != nil {
-		return nil, nil, false, fmt.Errorf("failed to query document from DB: %w", err)
+		return nil, nil, nil, false, fmt.Errorf("failed to query document from DB: %w", err)
 	}
 	if existing != nil && existing.Hash == currentHash {
-		return nil, nil, true, nil
+		return nil, nil, existing, true, nil
 	}
 
 	content, err := parser.ParseFile(path)
 	if err != nil {
-		return nil, nil, false, fmt.Errorf("failed to parse %s: %w", path, err)
+		return nil, nil, nil, false, fmt.Errorf("failed to parse %s: %w", path, err)
 	}
 
 	chunks := buildChunks(embedder, path, content)
@@ -429,7 +435,7 @@ func prepareIndex(dbClient db.Store, embedder Embedder, path string) ([]*db.Chun
 		Path:      path,
 		Hash:      currentHash,
 		UpdatedAt: time.Now(),
-	}, false, nil
+	}, existing, false, nil
 }
 
 // buildChunks splits content into overlapping chunks, generates their
@@ -456,15 +462,11 @@ func buildChunks(embedder Embedder, source, content string) []*db.Chunk {
 	return chunks
 }
 
-func commitIndex(dbClient db.Store, path string, chunks []*db.Chunk, doc *db.Document) error {
-	existing, err := dbClient.GetDocument(path)
-	if err != nil {
-		return fmt.Errorf("failed to query document from DB: %w", err)
-	}
+// commitIndex persists a prepared document and its chunks to the database.
+// The caller must pass the already-fetched existing document (or nil for new
+// documents) so commitIndex avoids a redundant GetDocument round-trip.
+func commitIndex(dbClient db.Store, path string, chunks []*db.Chunk, doc *db.Document, existing *db.Document) error {
 	if existing != nil {
-		if existing.Hash == doc.Hash {
-			return nil
-		}
 		if err := dbClient.DeleteDocument(path); err != nil {
 			return fmt.Errorf("failed to delete old document version: %w", err)
 		}

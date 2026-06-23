@@ -15,6 +15,11 @@ import (
 	"github.com/ledongthuc/pdf"
 )
 
+// MaxIndexFileSize is the maximum file size (in bytes) that the indexer will
+// read into memory. Files and individual ZIP entries exceeding this limit are
+// skipped or rejected to prevent memory exhaustion.
+const MaxIndexFileSize = 10 << 20
+
 var (
 	fileCache   = make(map[string]fileCacheEntry)
 	fileCacheMu sync.RWMutex
@@ -86,9 +91,17 @@ func ParseFile(path string) (string, error) {
 	case ".pptx":
 		return parsePPTX(path)
 	default:
-		data, err := os.ReadFile(path)
+		f, err := os.Open(path)
+		if err != nil {
+			return "", fmt.Errorf("failed to open file: %w", err)
+		}
+		defer f.Close()
+		data, err := io.ReadAll(io.LimitReader(f, MaxIndexFileSize+1))
 		if err != nil {
 			return "", fmt.Errorf("failed to read file: %w", err)
+		}
+		if int64(len(data)) > MaxIndexFileSize {
+			return "", fmt.Errorf("file %s exceeds %d byte limit (%d bytes)", path, MaxIndexFileSize, len(data))
 		}
 		return string(data), nil
 	}
@@ -303,7 +316,7 @@ func parseOfficeXML(path, xmlEntry string) (string, error) {
 				return "", fmt.Errorf("failed to read %s: %w", xmlEntry, err)
 			}
 			defer rc.Close()
-			return extractXMLText(rc)
+			return extractXMLText(io.LimitReader(rc, MaxIndexFileSize))
 		}
 	}
 	return "", fmt.Errorf("entry %s not found in archive", xmlEntry)
@@ -348,7 +361,7 @@ func readXLSXSharedStrings(files []*zip.File) ([]string, error) {
 				return nil, err
 			}
 			defer rc.Close()
-			return parseSharedStrings(rc)
+			return parseSharedStrings(io.LimitReader(rc, MaxIndexFileSize))
 		}
 	}
 	return nil, fmt.Errorf("shared strings not found")
@@ -396,7 +409,7 @@ func extractXLSXSheetText(f *zip.File, sharedStrings []string) (string, error) {
 	}
 	defer rc.Close()
 
-	decoder := xml.NewDecoder(rc)
+	decoder := xml.NewDecoder(io.LimitReader(rc, MaxIndexFileSize))
 	var text strings.Builder
 	inV := false
 	var cellType string
@@ -456,7 +469,7 @@ func extractPPTXSlideText(f *zip.File) (string, error) {
 	}
 	defer rc.Close()
 
-	decoder := xml.NewDecoder(rc)
+	decoder := xml.NewDecoder(io.LimitReader(rc, MaxIndexFileSize))
 	var text strings.Builder
 	inT := false
 

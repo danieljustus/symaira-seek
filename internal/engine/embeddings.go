@@ -34,6 +34,7 @@ type EmbeddingsGenerator struct {
 	Timeout      time.Duration
 	RetryCount   int
 	RetryBackoff time.Duration
+	sleepFn      func(time.Duration) // injectable for tests; defaults to time.Sleep
 	httpClient   *http.Client
 	cache        map[string]*list.Element
 	cacheOrder   *list.List
@@ -53,6 +54,7 @@ func newEmbeddingsGenerator() *EmbeddingsGenerator {
 		Timeout:      defaultOllamaTimeout,
 		RetryCount:   defaultOllamaRetries,
 		RetryBackoff: defaultOllamaBackoff,
+		sleepFn:      time.Sleep,
 		httpClient: &http.Client{
 			Timeout: defaultOllamaTimeout,
 			CheckRedirect: func(req *http.Request, via []*http.Request) error {
@@ -75,6 +77,12 @@ func NewEmbeddingsGenerator() *EmbeddingsGenerator {
 type Embedder interface {
 	GenerateVector(text string) []float32
 	GenerateVectors(texts []string) [][]float32
+	// GenerateVectorNoRetry produces an embedding vector for the given text
+	// without retrying on Ollama failures. If Ollama is unreachable or
+	// returns an error, the local hash fallback is used immediately. This
+	// is intended for interactive search paths where latency matters more
+	// than embedding quality (issue #162).
+	GenerateVectorNoRetry(text string) []float32
 }
 
 // Compile-time check that *EmbeddingsGenerator satisfies Embedder.
@@ -137,8 +145,21 @@ func NewEmbeddingsGeneratorWithOllamaConfig(cfg OllamaConfig) *EmbeddingsGenerat
 
 // GenerateVector produces a 768-dimensional normalized embedding vector.
 // Uses an LRU in-memory cache to avoid recomputing embeddings for repeated text.
-// Queries Ollama first, falling back to local deterministic hashing if offline.
+// Queries Ollama first with the configured retry/backoff, falling back to
+// local deterministic hashing if offline.
 func (eg *EmbeddingsGenerator) GenerateVector(text string) []float32 {
+	return eg.generateVectorImpl(text, eg.RetryCount)
+}
+
+// GenerateVectorNoRetry produces a 768-dimensional embedding vector without
+// retrying on Ollama failures. If Ollama is unreachable or returns an error,
+// the local hash fallback is used immediately. Designed for interactive search
+// paths where latency matters more than embedding quality (issue #162).
+func (eg *EmbeddingsGenerator) GenerateVectorNoRetry(text string) []float32 {
+	return eg.generateVectorImpl(text, 0)
+}
+
+func (eg *EmbeddingsGenerator) generateVectorImpl(text string, maxRetries int) []float32 {
 	key := hashKey(text)
 
 	eg.cacheMu.Lock()
@@ -151,7 +172,7 @@ func (eg *EmbeddingsGenerator) GenerateVector(text string) []float32 {
 
 	dims := 768
 
-	vec, err := eg.queryOllama(text)
+	vec, err := eg.queryOllamaWithRetries(text, maxRetries)
 	if err == nil {
 		if len(vec) != dims {
 			fmt.Fprintf(os.Stderr, "engine: embedding dimension mismatch: expected %d, got %d; falling back to local hash vector\n", dims, len(vec))
@@ -277,8 +298,15 @@ func (eg *EmbeddingsGenerator) GenerateVectors(texts []string) [][]float32 {
 	return results
 }
 
-// queryOllama sends a single embedding request to Ollama.
+// queryOllama sends a single embedding request to Ollama with the
+// configured retry count.
 func (eg *EmbeddingsGenerator) queryOllama(text string) ([]float32, error) {
+	return eg.queryOllamaWithRetries(text, eg.RetryCount)
+}
+
+// queryOllamaWithRetries sends a single embedding request to Ollama,
+// retrying up to maxRetries times on transient failures.
+func (eg *EmbeddingsGenerator) queryOllamaWithRetries(text string, maxRetries int) ([]float32, error) {
 	reqBody, err := json.Marshal(map[string]string{
 		"model":  eg.Model,
 		"prompt": text,
@@ -290,7 +318,7 @@ func (eg *EmbeddingsGenerator) queryOllama(text string) ([]float32, error) {
 	var res struct {
 		Embedding []float32 `json:"embedding"`
 	}
-	if err := eg.doOllamaRequest(eg.OllamaURL, reqBody, &res); err != nil {
+	if err := eg.doOllamaRequestWithRetries(eg.OllamaURL, reqBody, &res, maxRetries); err != nil {
 		return nil, err
 	}
 	return res.Embedding, nil
@@ -311,19 +339,27 @@ func (eg *EmbeddingsGenerator) queryOllamaBatch(texts []string) ([][]float32, er
 	var res struct {
 		Embeddings [][]float32 `json:"embeddings"`
 	}
-	if err := eg.doOllamaRequest(eg.batchURL(), reqBody, &res); err != nil {
+	if err := eg.doOllamaRequestWithRetries(eg.batchURL(), reqBody, &res, eg.RetryCount); err != nil {
 		return nil, err
 	}
 	return res.Embeddings, nil
 }
 
+// doOllamaRequest sends an HTTP request to Ollama with the configured retry count.
 func (eg *EmbeddingsGenerator) doOllamaRequest(url string, reqBody []byte, result interface{}) error {
+	return eg.doOllamaRequestWithRetries(url, reqBody, result, eg.RetryCount)
+}
+
+// doOllamaRequestWithRetries is the core HTTP transport for Ollama embedding
+// requests. It retries up to maxRetries times on 5xx or network errors with
+// exponential backoff. A maxRetries of 0 means a single attempt with no sleep.
+func (eg *EmbeddingsGenerator) doOllamaRequestWithRetries(url string, reqBody []byte, result interface{}, maxRetries int) error {
 	backoff := eg.RetryBackoff
 	if backoff <= 0 {
 		backoff = defaultOllamaBackoff
 	}
 	maxBackoff := defaultOllamaMaxBackoff
-	retries := eg.RetryCount
+	retries := maxRetries
 	if retries < 0 {
 		retries = 0
 	}
@@ -332,7 +368,7 @@ func (eg *EmbeddingsGenerator) doOllamaRequest(url string, reqBody []byte, resul
 	for attempt := 0; attempt <= retries; attempt++ {
 		if attempt > 0 {
 			fmt.Fprintf(os.Stderr, "engine: ollama retry %d/%d after %v (last error: %v)\n", attempt, retries, backoff, lastErr)
-			time.Sleep(backoff)
+			eg.sleepFn(backoff)
 			backoff *= 2
 			if backoff > maxBackoff {
 				backoff = maxBackoff

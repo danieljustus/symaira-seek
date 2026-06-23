@@ -48,33 +48,7 @@ func CosineSimilarity(a, b []float32) float32 {
 	return float32(dotProduct / (math.Sqrt(normA) * math.Sqrt(normB)))
 }
 
-func CosineSimilarityWithNorm(a, b []float32, normB float32) float32 {
-	if len(a) != len(b) || len(a) == 0 || normB == 0 {
-		return 0
-	}
-	var dotProduct, normA float64
-	for i := 0; i < len(a); i++ {
-		dotProduct += float64(a[i] * b[i])
-		normA += float64(a[i] * a[i])
-	}
-	if normA == 0 {
-		return 0
-	}
-	return float32(dotProduct / (math.Sqrt(normA) * float64(normB)))
-}
-
-func CosineSimilarityWithBothNorms(a, b []float32, normA, normB float32) float32 {
-	if len(a) != len(b) || len(a) == 0 || normA == 0 || normB == 0 {
-		return 0
-	}
-	var dotProduct float64
-	for i := 0; i < len(a); i++ {
-		dotProduct += float64(a[i] * b[i])
-	}
-	return float32(dotProduct / (float64(normA) * float64(normB)))
-}
-
-func CosineSimilarityWithStoredNorm(queryVec []float32, embBytes []byte, queryNorm float32) float32 {
+func CosineSimilarityWithStoredNorm(queryVec []float32, embBytes []byte, queryNorm, storedNorm float32) float32 {
 	if len(embBytes)%4 != 0 || len(embBytes)/4 != len(queryVec) || len(queryVec) == 0 {
 		return 0
 	}
@@ -87,7 +61,11 @@ func CosineSimilarityWithStoredNorm(queryVec []float32, embBytes []byte, queryNo
 			uint32(embBytes[offset+3])<<24
 		dotProduct += float64(q * math.Float32frombits(bits))
 	}
-	return float32(dotProduct / float64(queryNorm))
+	denom := float64(queryNorm) * float64(storedNorm)
+	if denom == 0 {
+		return 0
+	}
+	return float32(dotProduct / denom)
 }
 
 func l2Norm(v []float32) float32 {

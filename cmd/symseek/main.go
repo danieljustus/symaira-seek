@@ -48,6 +48,15 @@ var (
 func main() {
 	cobra.OnInitialize(initConfig)
 
+	rootCmd := newRootCmd()
+
+	if err := rootCmd.Execute(); err != nil {
+		fmt.Fprintln(os.Stderr, exitcodes.FormatCLIError(err))
+		os.Exit(int(exitcodes.ExitCodeFromError(err)))
+	}
+}
+
+func newRootCmd() *cobra.Command {
 	rootCmd := &cobra.Command{
 		Use:   "symseek",
 		Short: "Symaira-Seek: A local hybrid document retrieval CLI and MCP tool",
@@ -61,6 +70,7 @@ func main() {
 			slog.SetDefault(logkit.New(os.Stderr, level, "text"))
 		},
 	}
+	rootCmd.Version = version
 
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.config/symseek/config.toml)")
 	rootCmd.PersistentFlags().BoolVar(&verboseFlag, "verbose", false, "enable debug-level logging")
@@ -304,10 +314,7 @@ func main() {
 	serveCmd.Flags().IntVarP(&portFlag, "port", "p", 0, "Launch HTTP REST server on this port instead of stdio MCP")
 	rootCmd.AddCommand(serveCmd)
 
-	if err := rootCmd.Execute(); err != nil {
-		fmt.Fprintln(os.Stderr, exitcodes.FormatCLIError(err))
-		os.Exit(int(exitcodes.ExitCodeFromError(err)))
-	}
+	return rootCmd
 }
 
 func initConfig() {

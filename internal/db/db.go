@@ -37,7 +37,8 @@ type SearchResult struct {
 }
 
 type DB struct {
-	conn *sql.DB
+	conn        *sql.DB
+	vectorIndex *VectorIndex
 }
 
 type Store interface {
@@ -116,7 +117,11 @@ func (db *DB) DeleteDocument(path string) error {
 		return err
 	}
 
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	db.vectorIndex = nil
+	return nil
 }
 
 func (db *DB) GetDocument(path string) (*Document, error) {
@@ -177,7 +182,13 @@ func (db *DB) SaveChunks(chunks []*Chunk) error {
 		}
 	}
 
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+
+	// Invalidate the vector index so it is rebuilt on the next search.
+	db.vectorIndex = nil
+	return nil
 }
 
 func (db *DB) GetChunksForDocument(docPath string) ([]*Chunk, error) {

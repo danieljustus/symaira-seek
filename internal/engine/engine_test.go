@@ -78,6 +78,7 @@ func TestNewEmbeddingsGeneratorWithConfig(t *testing.T) {
 	if eg == nil {
 		t.Fatal("expected non-nil EmbeddingsGenerator")
 	}
+	eg.sleepFn = func(time.Duration) {}
 	if eg.OllamaURL == "" {
 		t.Error("expected OllamaURL to be set from config")
 	}
@@ -104,6 +105,12 @@ func TestNewEmbeddingsGeneratorWithConfig(t *testing.T) {
 			t.Errorf("batch index %d: expected 768-dim vector, got %d", i, len(v))
 		}
 	}
+}
+
+func newTestEmbeddingsGenerator() *EmbeddingsGenerator {
+	eg := NewEmbeddingsGenerator()
+	eg.sleepFn = func(time.Duration) {}
+	return eg
 }
 
 // fakeEmbedder is a deterministic in-memory Embedder used to prove that
@@ -139,6 +146,10 @@ func (f *fakeEmbedder) GenerateVectors(texts []string) [][]float32 {
 		out[i] = f.GenerateVector(t)
 	}
 	return out
+}
+
+func (f *fakeEmbedder) GenerateVectorNoRetry(text string) []float32 {
+	return f.GenerateVector(text)
 }
 
 // TestSearchHybridAcceptsEmbedderInterface guards the contract from #35:
@@ -306,7 +317,7 @@ func TestHybridSearch(t *testing.T) {
 		UpdatedAt: time.Now(),
 	})
 
-	embedder := NewEmbeddingsGenerator()
+	embedder := newTestEmbeddingsGenerator()
 
 	// Embed some sample text
 	text1 := "The swift azure falcon soars above the sleeping canine"

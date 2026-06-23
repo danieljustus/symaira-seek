@@ -18,8 +18,8 @@ func SearchHybrid(dbClient db.Store, embedder Embedder, query string, limit int)
 		return nil, nil
 	}
 
-	// 1. Generate query vector
-	queryVec := embedder.GenerateVector(query)
+	// 1. Generate query vector (no retry — fast fallback when Ollama is offline, issue #162)
+	queryVec := embedder.GenerateVectorNoRetry(query)
 
 	// We fetch a bit more than limit to ensure good fusion overlap
 	fetchLimit := limit * 3

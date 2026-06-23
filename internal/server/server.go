@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -156,6 +157,14 @@ func bearerTokenAuth(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// warnIfNoAuthToken emits a prominent warning to w when SEEK_API_TOKEN is
+// not set, signaling that the HTTP daemon is unauthenticated.
+func warnIfNoAuthToken(w io.Writer) {
+	if os.Getenv("SEEK_API_TOKEN") == "" {
+		fmt.Fprintln(w, "WARNING: SEEK_API_TOKEN not set — HTTP daemon is unauthenticated and reachable by any local process")
+	}
 }
 
 // StartHTTPServer runs the local HTTP REST daemon.
@@ -313,6 +322,7 @@ func StartHTTPServer(port int, ollamaCfg engine.OllamaConfig, indexCooldown time
 	})
 
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
+	warnIfNoAuthToken(os.Stderr)
 	fmt.Fprintf(os.Stderr, "HTTP daemon listening on http://%s...\n", addr)
 
 	srv := &http.Server{
