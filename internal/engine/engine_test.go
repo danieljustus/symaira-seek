@@ -75,10 +75,10 @@ func TestLocalHashVector(t *testing.T) {
 // runtime denial of service and is exercised by no test in this repo.
 func TestNewEmbeddingsGeneratorWithConfig(t *testing.T) {
 	eg := NewEmbeddingsGeneratorWithConfig("http://localhost:11434/api/embeddings", "nomic-embed-text")
-	eg.sleepFn = func(time.Duration) {}
 	if eg == nil {
 		t.Fatal("expected non-nil EmbeddingsGenerator")
 	}
+	eg.sleepFn = func(time.Duration) {}
 	if eg.OllamaURL == "" {
 		t.Error("expected OllamaURL to be set from config")
 	}
