@@ -10,11 +10,176 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
+	"github.com/danieljustus/symaira-seek/internal/db"
+	"github.com/danieljustus/symaira-seek/internal/engine"
 	"github.com/danieljustus/symaira-seek/internal/pathutil"
 )
+
+// ---------------------------------------------------------------------------
+// Mock db.Store
+// ---------------------------------------------------------------------------
+
+type mockStore struct {
+	getStatsFn            func() (*db.Stats, error)
+	searchBM25Fn          func(query string, limit int) ([]*db.SearchResult, error)
+	searchVectorFn        func(queryVec []float32, limit int) ([]*db.SearchResult, error)
+	listDocumentsFn       func() ([]*db.Document, error)
+	deleteDocumentFn      func(path string) error
+	saveDocumentFn        func(doc *db.Document) error
+	saveChunksFn          func(chunks []*db.Chunk) error
+	getDocumentFn         func(path string) (*db.Document, error)
+	getChunksForDocFn     func(path string) ([]*db.Chunk, error)
+}
+
+func (m *mockStore) Close() error { return nil }
+
+func (m *mockStore) GetStats() (*db.Stats, error) {
+	if m.getStatsFn != nil {
+		return m.getStatsFn()
+	}
+	return &db.Stats{DocumentCount: 0, ChunkCount: 0, DatabaseSize: 0}, nil
+}
+
+func (m *mockStore) SearchBM25(query string, limit int) ([]*db.SearchResult, error) {
+	if m.searchBM25Fn != nil {
+		return m.searchBM25Fn(query, limit)
+	}
+	return nil, nil
+}
+
+func (m *mockStore) SearchVector(queryVec []float32, limit int) ([]*db.SearchResult, error) {
+	if m.searchVectorFn != nil {
+		return m.searchVectorFn(queryVec, limit)
+	}
+	return nil, nil
+}
+
+func (m *mockStore) ListDocuments() ([]*db.Document, error) {
+	if m.listDocumentsFn != nil {
+		return m.listDocumentsFn()
+	}
+	return nil, nil
+}
+
+func (m *mockStore) DeleteDocument(path string) error {
+	if m.deleteDocumentFn != nil {
+		return m.deleteDocumentFn(path)
+	}
+	return nil
+}
+
+func (m *mockStore) SaveDocument(doc *db.Document) error {
+	if m.saveDocumentFn != nil {
+		return m.saveDocumentFn(doc)
+	}
+	return nil
+}
+
+func (m *mockStore) SaveChunks(chunks []*db.Chunk) error {
+	if m.saveChunksFn != nil {
+		return m.saveChunksFn(chunks)
+	}
+	return nil
+}
+
+func (m *mockStore) GetDocument(path string) (*db.Document, error) {
+	if m.getDocumentFn != nil {
+		return m.getDocumentFn(path)
+	}
+	return nil, nil
+}
+
+func (m *mockStore) GetChunksForDocument(docPath string) ([]*db.Chunk, error) {
+	if m.getChunksForDocFn != nil {
+		return m.getChunksForDocFn(docPath)
+	}
+	return nil, nil
+}
+
+// ---------------------------------------------------------------------------
+// Mock engine.Embedder
+// ---------------------------------------------------------------------------
+
+type mockEmbedder struct {
+	generateVectorFn        func(text string) []float32
+	generateVectorsFn       func(texts []string) [][]float32
+	generateVectorNoRetryFn func(text string) []float32
+}
+
+func (m *mockEmbedder) GenerateVector(text string) []float32 {
+	if m.generateVectorFn != nil {
+		return m.generateVectorFn(text)
+	}
+	return make([]float32, 768)
+}
+
+func (m *mockEmbedder) GenerateVectors(texts []string) [][]float32 {
+	if m.generateVectorsFn != nil {
+		return m.generateVectorsFn(texts)
+	}
+	vecs := make([][]float32, len(texts))
+	for i := range vecs {
+		vecs[i] = make([]float32, 768)
+	}
+	return vecs
+}
+
+func (m *mockEmbedder) GenerateVectorNoRetry(text string) []float32 {
+	if m.generateVectorNoRetryFn != nil {
+		return m.generateVectorNoRetryFn(text)
+	}
+	return make([]float32, 768)
+}
+
+// ---------------------------------------------------------------------------
+// Test helpers
+// ---------------------------------------------------------------------------
+
+// testHandler returns the full middleware-wrapped handler for the mux.
+func testHandler(t *testing.T, store db.Store, embedder engine.Embedder, indexCooldown time.Duration) http.Handler {
+	t.Helper()
+	mux := newServeMux(store, embedder, indexCooldown)
+	return hostValidation(originValidation(contentTypeEnforcement(bearerTokenAuth(mux))))
+}
+
+// newTestServer starts an httptest.Server with the full handler chain.
+// The server is automatically closed when the test finishes.
+func newTestServer(t *testing.T, store db.Store, embedder engine.Embedder) *httptest.Server {
+	t.Helper()
+	handler := testHandler(t, store, embedder, 5*time.Second)
+	srv := httptest.NewServer(handler)
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// doRequest is a convenience wrapper for making HTTP requests.
+func doRequest(t *testing.T, method, url string, body string, headers map[string]string) *http.Response {
+	t.Helper()
+	var bodyReader io.Reader
+	if body != "" {
+		bodyReader = strings.NewReader(body)
+	}
+	req, err := http.NewRequest(method, url, bodyReader)
+	if err != nil {
+		t.Fatalf("failed to create request: %v", err)
+	}
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	return resp
+}
+
+// ---------------------------------------------------------------------------
+// Existing tests (preserved)
+// ---------------------------------------------------------------------------
 
 func TestIsLocalhostHost(t *testing.T) {
 	tests := []struct {
@@ -233,8 +398,6 @@ func TestBearerTokenAuth_AcceptsValidToken(t *testing.T) {
 	}
 }
 
-// withTempHome points HOME at a temporary directory for the duration of a
-// test so pathutil.RestrictToHome's UserHomeDir() lookup is hermetic.
 func withTempHome(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -331,8 +494,6 @@ func TestRateLimiter_KeysAreIsolated(t *testing.T) {
 	}
 }
 
-// TestSSEStreamEndpoint verifies the SSE streaming search endpoint
-// returns proper event: result blocks and a terminal event: done (issue #74).
 func TestSSEStreamEndpoint(t *testing.T) {
 	var gotResults, gotDone bool
 	var resultCount int
@@ -453,21 +614,13 @@ func TestRateLimiter_EvictsStaleEntries(t *testing.T) {
 	rl := newRateLimiter(5 * time.Second)
 	now := time.Now()
 
-	// Add many entries
 	for i := 0; i < 2000; i++ {
 		key := fmt.Sprintf("key%d", i)
 		rl.Allow(key, now)
 	}
 
-	// Force eviction by adding one more after cooldown
 	rl.Allow("newkey", now.Add(6*time.Second))
 
-	// The eviction happens when len(lastSeen) > 1024, but it only evicts
-	// entries that are older than cooldown. Since we're checking with the
-	// same key at a later time, it should be allowed because the old entry
-	// was evicted.
-	// Note: This test verifies that the eviction mechanism runs without panic.
-	// The actual eviction behavior depends on the implementation details.
 	if !rl.Allow("key0", now.Add(6*time.Second)) {
 		t.Log("key0 was not evicted, but eviction mechanism ran without panic")
 	}
@@ -477,8 +630,6 @@ func TestRateLimiterKeyedByHostAcrossConnections(t *testing.T) {
 	rl := newRateLimiter(time.Minute)
 	now := time.Now()
 
-	// Two requests from the same host but different ephemeral source ports
-	// must share one bucket: the second is rejected within the cooldown.
 	if !rl.Allow(clientKey("127.0.0.1:54001"), now) {
 		t.Fatal("first request from host should be allowed")
 	}
@@ -486,12 +637,10 @@ func TestRateLimiterKeyedByHostAcrossConnections(t *testing.T) {
 		t.Fatal("second request from same host (different port) should be rate limited")
 	}
 
-	// A different host is independent.
 	if !rl.Allow(clientKey("127.0.0.2:54003"), now.Add(time.Second)) {
 		t.Fatal("request from a different host should be allowed")
 	}
 
-	// After the cooldown elapses, the same host is allowed again.
 	if !rl.Allow(clientKey("127.0.0.1:54004"), now.Add(2*time.Minute)) {
 		t.Fatal("request after cooldown should be allowed")
 	}
@@ -516,5 +665,728 @@ func TestWarnIfNoAuthToken_Set(t *testing.T) {
 	warnIfNoAuthToken(&buf)
 	if buf.Len() != 0 {
 		t.Errorf("expected no warning when SEEK_API_TOKEN is set, got %q", buf.String())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// newServeMux handler tests (issue #164)
+// ---------------------------------------------------------------------------
+
+func TestMux_HealthEndpoint(t *testing.T) {
+	store := &mockStore{}
+	embedder := &mockEmbedder{}
+	srv := newTestServer(t, store, embedder)
+
+	resp := doRequest(t, "GET", srv.URL+"/health", "", nil)
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /health: status %d, want 200", resp.StatusCode)
+	}
+
+	ct := resp.Header.Get("Content-Type")
+	if ct != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", ct)
+	}
+
+	var body map[string]string
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if body["status"] != "ok" {
+		t.Errorf("status = %q, want %q", body["status"], "ok")
+	}
+}
+
+func TestMux_StatusEndpoint_Success(t *testing.T) {
+	store := &mockStore{
+		getStatsFn: func() (*db.Stats, error) {
+			return &db.Stats{DocumentCount: 42, ChunkCount: 100, DatabaseSize: 1024}, nil
+		},
+	}
+	embedder := &mockEmbedder{}
+	srv := newTestServer(t, store, embedder)
+
+	resp := doRequest(t, "GET", srv.URL+"/status", "", nil)
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /status: status %d, want 200", resp.StatusCode)
+	}
+
+	var stats db.Stats
+	if err := json.NewDecoder(resp.Body).Decode(&stats); err != nil {
+		t.Fatalf("failed to decode stats: %v", err)
+	}
+	if stats.DocumentCount != 42 {
+		t.Errorf("DocumentCount = %d, want 42", stats.DocumentCount)
+	}
+	if stats.ChunkCount != 100 {
+		t.Errorf("ChunkCount = %d, want 100", stats.ChunkCount)
+	}
+	if stats.DatabaseSize != 1024 {
+		t.Errorf("DatabaseSize = %d, want 1024", stats.DatabaseSize)
+	}
+}
+
+func TestMux_StatusEndpoint_DBError(t *testing.T) {
+	store := &mockStore{
+		getStatsFn: func() (*db.Stats, error) {
+			return nil, fmt.Errorf("database locked")
+		},
+	}
+	embedder := &mockEmbedder{}
+	srv := newTestServer(t, store, embedder)
+
+	resp := doRequest(t, "GET", srv.URL+"/status", "", nil)
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("GET /status: status %d, want 500", resp.StatusCode)
+	}
+}
+
+func TestMux_SearchEndpoint_MissingQuery(t *testing.T) {
+	store := &mockStore{}
+	embedder := &mockEmbedder{}
+	srv := newTestServer(t, store, embedder)
+
+	resp := doRequest(t, "GET", srv.URL+"/search", "", nil)
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("GET /search (no q): status %d, want 400", resp.StatusCode)
+	}
+
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "missing query parameter 'q'") {
+		t.Errorf("error body = %q, want 'missing query parameter 'q''", string(body))
+	}
+}
+
+func TestMux_SearchEndpoint_EmptyQuery(t *testing.T) {
+	store := &mockStore{}
+	embedder := &mockEmbedder{}
+	srv := newTestServer(t, store, embedder)
+
+	resp := doRequest(t, "GET", srv.URL+"/search?q=", "", nil)
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("GET /search?q=: status %d, want 400", resp.StatusCode)
+	}
+}
+
+func TestMux_SearchEndpoint_Success(t *testing.T) {
+	store := &mockStore{
+		searchBM25Fn: func(query string, limit int) ([]*db.SearchResult, error) {
+			return []*db.SearchResult{
+				{
+					Chunk:    &db.Chunk{UUID: "u1", Content: "found it"},
+					BM25Rank: 1,
+					RRFScore: 0.1,
+				},
+			}, nil
+		},
+		searchVectorFn: func(queryVec []float32, limit int) ([]*db.SearchResult, error) {
+			return nil, nil
+		},
+	}
+	embedder := &mockEmbedder{}
+	srv := newTestServer(t, store, embedder)
+
+	resp := doRequest(t, "GET", srv.URL+"/search?q=test+query", "", nil)
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /search?q=test: status %d, want 200", resp.StatusCode)
+	}
+
+	ct := resp.Header.Get("Content-Type")
+	if ct != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", ct)
+	}
+
+	var results []*db.SearchResult
+	if err := json.NewDecoder(resp.Body).Decode(&results); err != nil {
+		t.Fatalf("failed to decode results: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("len(results) = %d, want 1", len(results))
+	}
+	if results[0].Chunk.UUID != "u1" {
+		t.Errorf("results[0].Chunk.UUID = %q, want %q", results[0].Chunk.UUID, "u1")
+	}
+}
+
+func TestMux_SearchEndpoint_CustomLimit(t *testing.T) {
+	store := &mockStore{
+		searchBM25Fn: func(query string, limit int) ([]*db.SearchResult, error) {
+			return nil, nil
+		},
+		searchVectorFn: func(queryVec []float32, limit int) ([]*db.SearchResult, error) {
+			return nil, nil
+		},
+	}
+	embedder := &mockEmbedder{}
+	srv := newTestServer(t, store, embedder)
+
+	resp := doRequest(t, "GET", srv.URL+"/search?q=test&limit=10", "", nil)
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status %d, want 200", resp.StatusCode)
+	}
+
+	var results []*db.SearchResult
+	if err := json.NewDecoder(resp.Body).Decode(&results); err != nil {
+		t.Fatalf("failed to decode results: %v", err)
+	}
+}
+
+func TestMux_SearchEndpoint_InvalidLimitFallback(t *testing.T) {
+	store := &mockStore{
+		searchBM25Fn: func(query string, limit int) ([]*db.SearchResult, error) {
+			return nil, nil
+		},
+		searchVectorFn: func(queryVec []float32, limit int) ([]*db.SearchResult, error) {
+			return nil, nil
+		},
+	}
+	embedder := &mockEmbedder{}
+	srv := newTestServer(t, store, embedder)
+
+	resp := doRequest(t, "GET", srv.URL+"/search?q=test&limit=abc", "", nil)
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status %d, want 200", resp.StatusCode)
+	}
+}
+
+func TestMux_SearchEndpoint_NegativeLimitFallback(t *testing.T) {
+	store := &mockStore{
+		searchBM25Fn: func(query string, limit int) ([]*db.SearchResult, error) {
+			return nil, nil
+		},
+		searchVectorFn: func(queryVec []float32, limit int) ([]*db.SearchResult, error) {
+			return nil, nil
+		},
+	}
+	embedder := &mockEmbedder{}
+	srv := newTestServer(t, store, embedder)
+
+	resp := doRequest(t, "GET", srv.URL+"/search?q=test&limit=-3", "", nil)
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status %d, want 200", resp.StatusCode)
+	}
+}
+
+func TestMux_SearchEndpoint_SearchError(t *testing.T) {
+	store := &mockStore{
+		searchBM25Fn: func(query string, limit int) ([]*db.SearchResult, error) {
+			return nil, nil
+		},
+		searchVectorFn: func(queryVec []float32, limit int) ([]*db.SearchResult, error) {
+			return nil, fmt.Errorf("vector search failed")
+		},
+	}
+	embedder := &mockEmbedder{}
+	srv := newTestServer(t, store, embedder)
+
+	resp := doRequest(t, "GET", srv.URL+"/search?q=test", "", nil)
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("GET /search: status %d, want 500", resp.StatusCode)
+	}
+}
+
+func TestMux_SearchStreamEndpoint_MissingQuery(t *testing.T) {
+	store := &mockStore{}
+	embedder := &mockEmbedder{}
+	srv := newTestServer(t, store, embedder)
+
+	resp := doRequest(t, "GET", srv.URL+"/search/stream", "", nil)
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("GET /search/stream (no q): status %d, want 400", resp.StatusCode)
+	}
+}
+
+func TestMux_SearchStreamEndpoint_Success(t *testing.T) {
+	store := &mockStore{
+		searchBM25Fn: func(query string, limit int) ([]*db.SearchResult, error) {
+			return []*db.SearchResult{
+				{
+					Chunk:    &db.Chunk{UUID: "u1", Content: "stream result"},
+					BM25Rank: 1,
+					RRFScore: 0.15,
+				},
+				{
+					Chunk:    &db.Chunk{UUID: "u2", Content: "second result"},
+					BM25Rank: 2,
+					RRFScore: 0.08,
+				},
+			}, nil
+		},
+		searchVectorFn: func(queryVec []float32, limit int) ([]*db.SearchResult, error) {
+			return nil, nil
+		},
+	}
+	embedder := &mockEmbedder{}
+	srv := newTestServer(t, store, embedder)
+
+	resp := doRequest(t, "GET", srv.URL+"/search/stream?q=test+stream", "", nil)
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /search/stream: status %d, want 200", resp.StatusCode)
+	}
+
+	ct := resp.Header.Get("Content-Type")
+	if ct != "text/event-stream" {
+		t.Errorf("Content-Type = %q, want text/event-stream", ct)
+	}
+	if cc := resp.Header.Get("Cache-Control"); cc != "no-cache" {
+		t.Errorf("Cache-Control = %q, want no-cache", cc)
+	}
+	if conn := resp.Header.Get("Connection"); conn != "keep-alive" {
+		t.Errorf("Connection = %q, want keep-alive", conn)
+	}
+
+	body, _ := io.ReadAll(resp.Body)
+	s := string(body)
+
+	var resultCount int
+	for _, line := range strings.Split(s, "\n") {
+		if strings.HasPrefix(line, "event: result") {
+			resultCount++
+		}
+	}
+	if resultCount != 2 {
+		t.Errorf("expected 2 result events, got %d", resultCount)
+	}
+	if !strings.Contains(s, "event: done") {
+		t.Error("expected event: done in SSE stream")
+	}
+	if !strings.Contains(s, `"count":2`) {
+		t.Errorf("expected done event to report count 2, got: %s", s)
+	}
+}
+
+func TestMux_SearchStreamEndpoint_SearchError(t *testing.T) {
+	store := &mockStore{
+		searchBM25Fn: func(query string, limit int) ([]*db.SearchResult, error) {
+			return nil, nil
+		},
+		searchVectorFn: func(queryVec []float32, limit int) ([]*db.SearchResult, error) {
+			return nil, fmt.Errorf("stream search failed")
+		},
+	}
+	embedder := &mockEmbedder{}
+	srv := newTestServer(t, store, embedder)
+
+	resp := doRequest(t, "GET", srv.URL+"/search/stream?q=fail", "", nil)
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("GET /search/stream: status %d, want 500", resp.StatusCode)
+	}
+}
+
+func TestMux_IndexEndpoint_MethodNotAllowed(t *testing.T) {
+	store := &mockStore{}
+	embedder := &mockEmbedder{}
+	srv := newTestServer(t, store, embedder)
+
+	resp := doRequest(t, "GET", srv.URL+"/index", "", nil)
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("GET /index: status %d, want 405", resp.StatusCode)
+	}
+}
+
+func TestMux_IndexEndpoint_BadContentType(t *testing.T) {
+	store := &mockStore{}
+	embedder := &mockEmbedder{}
+	srv := newTestServer(t, store, embedder)
+
+	resp := doRequest(t, "POST", srv.URL+"/index", `{"path":"/tmp"}`,
+		map[string]string{"Content-Type": "text/plain"})
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusUnsupportedMediaType {
+		t.Fatalf("POST /index (text/plain): status %d, want 415", resp.StatusCode)
+	}
+}
+
+func TestMux_IndexEndpoint_BadJSON(t *testing.T) {
+	store := &mockStore{}
+	embedder := &mockEmbedder{}
+	srv := newTestServer(t, store, embedder)
+
+	resp := doRequest(t, "POST", srv.URL+"/index", `not-json`,
+		map[string]string{"Content-Type": "application/json"})
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("POST /index (bad json): status %d, want 400", resp.StatusCode)
+	}
+}
+
+func TestMux_IndexEndpoint_EmptyJSONBody(t *testing.T) {
+	store := &mockStore{}
+	embedder := &mockEmbedder{}
+	srv := newTestServer(t, store, embedder)
+
+	resp := doRequest(t, "POST", srv.URL+"/index", `{}`,
+		map[string]string{"Content-Type": "application/json"})
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("POST /index (empty body): status %d, want 400", resp.StatusCode)
+	}
+
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "missing 'path' field") {
+		t.Errorf("error body = %q, want 'missing path field'", string(body))
+	}
+}
+
+func TestMux_IndexEndpoint_PathOutsideHome(t *testing.T) {
+	withTempHome(t)
+	store := &mockStore{}
+	embedder := &mockEmbedder{}
+	srv := newTestServer(t, store, embedder)
+
+	resp := doRequest(t, "POST", srv.URL+"/index",
+		`{"path":"/etc"}`,
+		map[string]string{"Content-Type": "application/json"})
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("POST /index (outside home): status %d, want 403", resp.StatusCode)
+	}
+}
+
+func TestMux_IndexEndpoint_PathNotFound(t *testing.T) {
+	withTempHome(t)
+	store := &mockStore{}
+	embedder := &mockEmbedder{}
+	srv := newTestServer(t, store, embedder)
+
+	resp := doRequest(t, "POST", srv.URL+"/index",
+		`{"path":"/nonexistent/path/that/does/not/exist"}`,
+		map[string]string{"Content-Type": "application/json"})
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("POST /index (not found): status %d, want 403", resp.StatusCode)
+	}
+}
+
+func TestMux_IndexEndpoint_RateLimit(t *testing.T) {
+	home := withTempHome(t)
+	subdir := filepath.Join(home, "docs")
+	if err := os.MkdirAll(subdir, 0755); err != nil {
+		t.Fatalf("create subdir: %v", err)
+	}
+
+	store := &mockStore{
+		listDocumentsFn: func() ([]*db.Document, error) { return nil, nil },
+	}
+	embedder := &mockEmbedder{}
+	// Very long cooldown to guarantee rate limiting on second request
+	handler := testHandler(t, store, embedder, 24*time.Hour)
+	srv := httptest.NewServer(handler)
+	t.Cleanup(srv.Close)
+
+	payload := fmt.Sprintf(`{"path":%q}`, subdir)
+	ct := map[string]string{"Content-Type": "application/json"}
+
+	resp1 := doRequest(t, "POST", srv.URL+"/index", payload, ct)
+	resp1.Body.Close()
+	if resp1.StatusCode != http.StatusOK {
+		t.Fatalf("first POST /index: status %d, want 200", resp1.StatusCode)
+	}
+
+	resp2 := doRequest(t, "POST", srv.URL+"/index", payload, ct)
+	resp2.Body.Close()
+	if resp2.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("second POST /index: status %d, want 429", resp2.StatusCode)
+	}
+}
+
+func TestMux_IndexEndpoint_Success(t *testing.T) {
+	home := withTempHome(t)
+	subdir := filepath.Join(home, "docs")
+	if err := os.MkdirAll(subdir, 0755); err != nil {
+		t.Fatalf("create subdir: %v", err)
+	}
+	testFile := filepath.Join(subdir, "hello.txt")
+	if err := os.WriteFile(testFile, []byte("hello world"), 0644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	var savedChunks bool
+	store := &mockStore{
+		listDocumentsFn: func() ([]*db.Document, error) { return nil, nil },
+		saveDocumentFn: func(doc *db.Document) error { return nil },
+		saveChunksFn: func(chunks []*db.Chunk) error {
+			savedChunks = true
+			return nil
+		},
+	}
+	embedder := &mockEmbedder{
+		generateVectorsFn: func(texts []string) [][]float32 {
+			vecs := make([][]float32, len(texts))
+			for i := range vecs {
+				vecs[i] = make([]float32, 768)
+				vecs[i][0] = 1.0
+			}
+			return vecs
+		},
+	}
+	srv := newTestServer(t, store, embedder)
+
+	payload := fmt.Sprintf(`{"path":%q}`, subdir)
+	resp := doRequest(t, "POST", srv.URL+"/index", payload,
+		map[string]string{"Content-Type": "application/json"})
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("POST /index: status %d, want 200; body: %s", resp.StatusCode, string(body))
+	}
+
+	var result map[string]string
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if result["status"] != "indexed" {
+		t.Errorf("status = %q, want indexed", result["status"])
+	}
+	canonicalSubdir, _ := filepath.EvalSymlinks(subdir)
+	if result["path"] != canonicalSubdir {
+		t.Errorf("path = %q, want %q", result["path"], canonicalSubdir)
+	}
+	if !savedChunks {
+		t.Error("expected SaveChunks to be called")
+	}
+}
+
+func TestMux_IndexEndpoint_IndexDirectoryError(t *testing.T) {
+	home := withTempHome(t)
+	subdir := filepath.Join(home, "docs")
+	if err := os.MkdirAll(subdir, 0755); err != nil {
+		t.Fatalf("create subdir: %v", err)
+	}
+
+	store := &mockStore{
+		listDocumentsFn: func() ([]*db.Document, error) {
+			return nil, fmt.Errorf("db list failed")
+		},
+	}
+	embedder := &mockEmbedder{}
+	srv := newTestServer(t, store, embedder)
+
+	payload := fmt.Sprintf(`{"path":%q}`, subdir)
+	resp := doRequest(t, "POST", srv.URL+"/index", payload,
+		map[string]string{"Content-Type": "application/json"})
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("POST /index: status %d, want 500", resp.StatusCode)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Full middleware chain tests through newServeMux
+// ---------------------------------------------------------------------------
+
+func TestFullChain_HostValidationRejects(t *testing.T) {
+	store := &mockStore{}
+	embedder := &mockEmbedder{}
+	handler := testHandler(t, store, embedder, 5*time.Second)
+
+	req := httptest.NewRequest("GET", "/health", nil)
+	req.Host = "evil.example.com"
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusForbidden {
+		t.Errorf("non-localhost host: status %d, want 403", rr.Code)
+	}
+}
+
+func TestFullChain_OriginValidationRejects(t *testing.T) {
+	store := &mockStore{}
+	embedder := &mockEmbedder{}
+	handler := testHandler(t, store, embedder, 5*time.Second)
+
+	req := httptest.NewRequest("GET", "/health", nil)
+	req.Host = "127.0.0.1:8788"
+	req.Header.Set("Origin", "http://attacker.com")
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusForbidden {
+		t.Errorf("cross-origin: status %d, want 403", rr.Code)
+	}
+}
+
+func TestFullChain_BearerTokenRejects(t *testing.T) {
+	t.Setenv("SEEK_API_TOKEN", "real-secret")
+	defer t.Setenv("SEEK_API_TOKEN", "")
+
+	store := &mockStore{}
+	embedder := &mockEmbedder{}
+	handler := testHandler(t, store, embedder, 5*time.Second)
+
+	req := httptest.NewRequest("GET", "/health", nil)
+	req.Host = "127.0.0.1:8788"
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("missing bearer token: status %d, want 401", rr.Code)
+	}
+}
+
+func TestFullChain_BearerTokenAccepts(t *testing.T) {
+	t.Setenv("SEEK_API_TOKEN", "real-secret")
+	defer t.Setenv("SEEK_API_TOKEN", "")
+
+	store := &mockStore{}
+	embedder := &mockEmbedder{}
+	handler := testHandler(t, store, embedder, 5*time.Second)
+
+	req := httptest.NewRequest("GET", "/health", nil)
+	req.Host = "127.0.0.1:8788"
+	req.Header.Set("Authorization", "Bearer real-secret")
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Errorf("valid bearer token: status %d, want 200", rr.Code)
+	}
+}
+
+func TestFullChain_ContentTypeRejectsOnIndex(t *testing.T) {
+	store := &mockStore{}
+	embedder := &mockEmbedder{}
+	handler := testHandler(t, store, embedder, 5*time.Second)
+
+	req := httptest.NewRequest("POST", "/index", strings.NewReader(`{"path":"/tmp"}`))
+	req.Host = "127.0.0.1:8788"
+	req.Header.Set("Content-Type", "text/plain")
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnsupportedMediaType {
+		t.Errorf("wrong content-type: status %d, want 415", rr.Code)
+	}
+}
+
+func TestFullChain_AllowsGETOnNonIndexWithoutContentType(t *testing.T) {
+	store := &mockStore{}
+	embedder := &mockEmbedder{}
+	handler := testHandler(t, store, embedder, 5*time.Second)
+
+	req := httptest.NewRequest("GET", "/search?q=test", nil)
+	req.Host = "127.0.0.1:8788"
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Errorf("GET /search without content-type: status %d, want 200", rr.Code)
+	}
+}
+
+func TestFullChain_AllOptionsOnHealthEndpoint(t *testing.T) {
+	t.Setenv("SEEK_API_TOKEN", "mytoken")
+	defer t.Setenv("SEEK_API_TOKEN", "")
+
+	store := &mockStore{}
+	embedder := &mockEmbedder{}
+	handler := testHandler(t, store, embedder, 5*time.Second)
+
+	req := httptest.NewRequest("GET", "/health", nil)
+	req.Host = "127.0.0.1:8788"
+	req.Header.Set("Origin", "http://localhost:3000")
+	req.Header.Set("Authorization", "Bearer mytoken")
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Errorf("full chain /health: status %d, want 200", rr.Code)
+	}
+}
+
+func TestFullChain_IndexMethodNotAllowed(t *testing.T) {
+	store := &mockStore{}
+	embedder := &mockEmbedder{}
+	handler := testHandler(t, store, embedder, 5*time.Second)
+
+	req := httptest.NewRequest("DELETE", "/index", nil)
+	req.Host = "127.0.0.1:8788"
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Errorf("DELETE /index: status %d, want 405", rr.Code)
+	}
+}
+
+func TestFullChain_IndexBadContentTypeOverwrites(t *testing.T) {
+	store := &mockStore{}
+	embedder := &mockEmbedder{}
+	handler := testHandler(t, store, embedder, 5*time.Second)
+
+	req := httptest.NewRequest("POST", "/index", strings.NewReader(`{"path":"/tmp"}`))
+	req.Host = "127.0.0.1:8788"
+	req.Header.Set("Content-Type", "application/xml")
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnsupportedMediaType {
+		t.Errorf("POST /index with XML: status %d, want 415", rr.Code)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// StartHTTPServer lifecycle tests
+// ---------------------------------------------------------------------------
+
+func TestStartHTTPServer_ListensAndServe(t *testing.T) {
+	withTempHome(t)
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- StartHTTPServer(0, engine.OllamaConfig{}, 5*time.Second)
+	}()
+
+	time.Sleep(200 * time.Millisecond)
+
+	p, err := os.FindProcess(os.Getpid())
+	if err != nil {
+		t.Fatalf("FindProcess: %v", err)
+	}
+	if err := p.Signal(syscall.SIGTERM); err != nil {
+		t.Fatalf("SIGTERM: %v", err)
+	}
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("StartHTTPServer returned error: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("server did not shut down within 5s")
 	}
 }
