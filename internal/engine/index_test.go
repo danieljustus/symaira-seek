@@ -2,6 +2,7 @@ package engine
 
 import (
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -680,5 +681,312 @@ func TestIndexContent_MultipleSources(t *testing.T) {
 	stats, _ := dbClient.GetStats()
 	if stats.DocumentCount != 3 {
 		t.Errorf("expected 3 documents, got %d", stats.DocumentCount)
+	}
+}
+
+// TestUserFriendlyError verifies that userFriendlyError wraps the underlying
+// error with context and a hint line. Covers index.go:69-71.
+func TestUserFriendlyError(t *testing.T) {
+	inner := fmt.Errorf("dial tcp 127.0.0.1:443: connect: connection refused")
+	err := userFriendlyError(inner, "HTTP request failed",
+		"Check your internet connection and verify the URL is correct")
+
+	if err == nil {
+		t.Fatal("expected non-nil error")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "HTTP request failed") {
+		t.Errorf("expected context message, got: %s", msg)
+	}
+	if !strings.Contains(msg, "connection refused") {
+		t.Errorf("expected inner error to be wrapped, got: %s", msg)
+	}
+	if !strings.Contains(msg, "Hint: Check your internet") {
+		t.Errorf("expected hint line, got: %s", msg)
+	}
+}
+
+// TestFetchWithHTTP_RedirectLoop verifies that fetchWithHTTP returns an error
+// when the server redirects more than 10 times. Covers index.go:184-186.
+func TestFetchWithHTTP_RedirectLoop(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, r.URL.Path, http.StatusFound)
+	}))
+	defer server.Close()
+
+	_, err := fetchWithHTTP(server.URL+"/loop", "127.0.0.1")
+	if err == nil {
+		t.Fatal("expected error for redirect loop")
+	}
+	if !strings.Contains(err.Error(), "redirect") {
+		t.Errorf("expected redirect-related error, got: %v", err)
+	}
+}
+
+// TestFetchWithHTTP_RedirectToPrivateIP verifies that the CheckRedirect
+// callback rejects redirects to private/loopback IPs when SSRF protection
+// is active. Covers index.go:188.
+func TestFetchWithHTTP_RedirectToPrivateIP(t *testing.T) {
+	t.Setenv("SEEK_ALLOW_PRIVATE_URLS", "0")
+
+	var serverURL string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, serverURL+"/target", http.StatusFound)
+	}))
+	defer server.Close()
+	serverURL = server.URL
+
+	_, err := fetchWithHTTP(server.URL+"/start", "127.0.0.1")
+	if err == nil {
+		t.Fatal("expected error when redirecting to private/loopback IP")
+	}
+	if !strings.Contains(err.Error(), "HTTP request failed") {
+		t.Errorf("expected HTTP request failed wrapper, got: %v", err)
+	}
+}
+
+// TestFetchWithHTTP_ConnectionError verifies that a connection-level failure
+// is wrapped by userFriendlyError with a user-friendly hint. Covers
+// index.go:199-202 and index.go:69-71.
+func TestFetchWithHTTP_ConnectionError(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to listen: %v", err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			conn.Close()
+		}
+	}()
+
+	_, err = fetchWithHTTP("http://"+ln.Addr().String()+"/fail", "127.0.0.1")
+	if err == nil {
+		t.Fatal("expected error for connection failure")
+	}
+	if !strings.Contains(err.Error(), "HTTP request failed") {
+		t.Errorf("expected 'HTTP request failed' in error, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "Hint:") {
+		t.Errorf("expected hint in error message, got: %v", err)
+	}
+}
+
+// TestFetchWithHTTP_StatusErrors is a table-driven test for non-200 HTTP
+// status codes. Covers index.go:205-207.
+func TestFetchWithHTTP_StatusErrors(t *testing.T) {
+	cases := []struct {
+		name       string
+		statusCode int
+	}{
+		{"404 Not Found", http.StatusNotFound},
+		{"500 Internal Server Error", http.StatusInternalServerError},
+		{"301 Moved Permanently (without following)", http.StatusMovedPermanently},
+		{"403 Forbidden", http.StatusForbidden},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.statusCode)
+				fmt.Fprint(w, "error page")
+			}))
+			defer server.Close()
+
+			_, err := fetchWithHTTP(server.URL, "127.0.0.1")
+			if err == nil {
+				t.Fatalf("expected error for status %d", tc.statusCode)
+			}
+			if !strings.Contains(err.Error(), fmt.Sprintf("%d", tc.statusCode)) {
+				t.Errorf("expected status %d in error, got: %v", tc.statusCode, err)
+			}
+		})
+	}
+}
+
+// TestFetchWithHTTP_LargeResponseTruncation verifies that responses larger
+// than maxHTTPResponseSize are truncated. Covers index.go:209-217.
+func TestFetchWithHTTP_LargeResponseTruncation(t *testing.T) {
+	oversized := strings.Repeat("X", int(maxHTTPResponseSize)+1024)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		fmt.Fprint(w, oversized)
+	}))
+	defer server.Close()
+
+	content, err := fetchWithHTTP(server.URL, "127.0.0.1")
+	if err != nil {
+		t.Fatalf("fetchWithHTTP failed: %v", err)
+	}
+	if int64(len(content)) > maxHTTPResponseSize {
+		t.Errorf("expected content truncated to %d bytes, got %d", maxHTTPResponseSize, len(content))
+	}
+	if len(content) == 0 {
+		t.Error("expected non-empty truncated content")
+	}
+}
+
+// TestFetchWithHTTP_ContentTypeBranches is a table-driven test for the
+// content-type branching in fetchWithHTTP: text/html triggers htmlToText,
+// everything else is returned verbatim. (covers lines 219-224)
+func TestFetchWithHTTP_ContentTypeBranches(t *testing.T) {
+	cases := []struct {
+		name        string
+		contentType string
+		body        string
+		wantHTML    bool
+	}{
+		{
+			name:        "text/html",
+			contentType: "text/html; charset=utf-8",
+			body:        "<p>Hello <b>world</b></p>",
+			wantHTML:    true,
+		},
+		{
+			name:        "application/json",
+			contentType: "application/json",
+			body:        `{"key": "value"}`,
+			wantHTML:    false,
+		},
+		{
+			name:        "text/plain",
+			contentType: "text/plain",
+			body:        "plain text content",
+			wantHTML:    false,
+		},
+		{
+			name:        "empty content-type",
+			contentType: "",
+			body:        "fallback content",
+			wantHTML:    false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if tc.contentType != "" {
+					w.Header().Set("Content-Type", tc.contentType)
+				}
+				fmt.Fprint(w, tc.body)
+			}))
+			defer server.Close()
+
+			content, err := fetchWithHTTP(server.URL, "127.0.0.1")
+			if err != nil {
+				t.Fatalf("fetchWithHTTP failed: %v", err)
+			}
+			if tc.wantHTML {
+				if strings.Contains(content, "<p>") || strings.Contains(content, "<b>") {
+					t.Errorf("expected HTML tags to be stripped, got: %s", content)
+				}
+				if !strings.Contains(content, "Hello") {
+					t.Errorf("expected visible text preserved, got: %s", content)
+				}
+			} else {
+				if !strings.Contains(content, tc.body) {
+					t.Errorf("expected body preserved verbatim, got: %s", content)
+				}
+			}
+		})
+	}
+}
+
+// TestFetchWithHTTP_BadScheme verifies fetchWithHTTP rejects ftp:// URLs.
+func TestFetchWithHTTP_BadScheme(t *testing.T) {
+	_, err := fetchWithHTTP("ftp://example.com/file", "93.184.216.34")
+	if err == nil {
+		t.Fatal("expected error for ftp scheme")
+	}
+}
+
+// TestValidatePublicURL_AllBranches exercises every branch of
+// validatePublicURL and isDisallowedIP beyond the existing rejection test.
+func TestValidatePublicURL_AllBranches(t *testing.T) {
+	t.Run("unsupported scheme ftp", func(t *testing.T) {
+		_, err := validatePublicURL("ftp://example.com/file")
+		if err == nil {
+			t.Fatal("expected error for ftp scheme")
+		}
+		if !strings.Contains(err.Error(), "unsupported URL scheme") {
+			t.Errorf("expected unsupported scheme error, got: %v", err)
+		}
+	})
+
+	t.Run("unsupported scheme file", func(t *testing.T) {
+		_, err := validatePublicURL("file:///etc/passwd")
+		if err == nil {
+			t.Fatal("expected error for file scheme")
+		}
+	})
+
+	t.Run("no host", func(t *testing.T) {
+		_, err := validatePublicURL("http:///path")
+		if err == nil {
+			t.Fatal("expected error for URL with no host")
+		}
+		if !strings.Contains(err.Error(), "no host") {
+			t.Errorf("expected 'no host' error, got: %v", err)
+		}
+	})
+
+	t.Run("unresolvable host", func(t *testing.T) {
+		_, err := validatePublicURL("http://this-host-does-not-exist-xyzzy.example./path")
+		if err == nil {
+			t.Fatal("expected error for unresolvable host")
+		}
+		if !strings.Contains(err.Error(), "cannot resolve host") {
+			t.Errorf("expected 'cannot resolve host' error, got: %v", err)
+		}
+	})
+
+	t.Run("all IPs private triggers refusal", func(t *testing.T) {
+		t.Setenv("SEEK_ALLOW_PRIVATE_URLS", "0")
+		_, err := validatePublicURL("http://127.0.0.1/loopback")
+		if err == nil {
+			t.Fatal("expected refusal for loopback address")
+		}
+		if !strings.Contains(err.Error(), "non-public address") {
+			t.Errorf("expected 'non-public address' error, got: %v", err)
+		}
+	})
+
+	t.Run("private URLs allowed bypasses block", func(t *testing.T) {
+		t.Setenv("SEEK_ALLOW_PRIVATE_URLS", "1")
+		ip, err := validatePublicURL("http://127.0.0.1/loopback")
+		if err != nil {
+			t.Fatalf("expected no error when private URLs allowed, got: %v", err)
+		}
+		if ip != "127.0.0.1" {
+			t.Errorf("expected resolved IP 127.0.0.1, got: %s", ip)
+		}
+	})
+}
+
+// TestFetchWithHTTP_RedirectToPublicHost verifies that a redirect to a
+// resolvable public host is followed when SSRF protection allows it.
+func TestFetchWithHTTP_RedirectToPublicHost(t *testing.T) {
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		fmt.Fprint(w, "redirect target content")
+	}))
+	defer target.Close()
+
+	var targetURL string
+	targetURL = target.URL
+
+	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, targetURL, http.StatusFound)
+	}))
+	defer source.Close()
+
+	content, err := fetchWithHTTP(source.URL+"/start", "127.0.0.1")
+	if err != nil {
+		t.Fatalf("fetchWithHTTP failed: %v", err)
+	}
+	if !strings.Contains(content, "redirect target content") {
+		t.Errorf("expected redirected content, got: %s", content)
 	}
 }
