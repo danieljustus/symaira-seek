@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -711,5 +713,360 @@ func TestServerGetContextWithResults(t *testing.T) {
 
 	if resp.Error != nil {
 		t.Fatalf("unexpected error: %v", resp.Error)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// StartServer smoke test  (covers lines 24-42)
+// ---------------------------------------------------------------------------
+
+// TestStartServer_StdinEOF verifies that StartServer builds the configured
+// MCP server, opens the database, registers all tools, and serves over stdio.
+// With stdin at EOF, ServeStdio returns immediately without blocking.
+func TestStartServer_StdinEOF(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	// Redirect stdin to EOF so ServeStdio returns immediately.
+	origStdin := os.Stdin
+	r, w, _ := os.Pipe()
+	os.Stdin = r
+	w.Close() // immediate EOF
+	defer func() { os.Stdin = origStdin }()
+
+	// Redirect stdout to /dev/null so MCP JSON-RPC output does not pollute
+	// test output.
+	origStdout := os.Stdout
+	devNull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = devNull
+	defer func() {
+		os.Stdout = origStdout
+		devNull.Close()
+	}()
+
+	if err := StartServer(engine.OllamaConfig{}); err != nil {
+		t.Fatalf("StartServer returned error: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// registerIndexDocument tests  (covers lines 224-266)
+// ---------------------------------------------------------------------------
+
+// TestRegisterIndexDocument_MissingPath verifies validation error when the
+// path argument is omitted.
+func TestRegisterIndexDocument_MissingPath(t *testing.T) {
+	store := &fakeStore{}
+	embed := &fakeEmbedder{}
+	server := newTestServer(store, embed)
+
+	params, _ := json.Marshal(map[string]interface{}{
+		"name":      "index_document",
+		"arguments": map[string]interface{}{},
+	})
+	resp := pipeRequest(t, server, jsonRPCRequest{
+		JSONRPC: "2.0",
+		ID:      float64(1),
+		Method:  "tools/call",
+		Params:  params,
+	})
+
+	if resp.Error != nil {
+		t.Fatalf("unexpected JSON-RPC error: %v", resp.Error)
+	}
+	result, ok := resp.Result.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected result map, got %T", resp.Result)
+	}
+	if result["isError"] != true {
+		t.Fatal("expected isError=true for missing path")
+	}
+}
+
+// TestRegisterIndexDocument_PathOutsideHome verifies that a path outside the
+// home directory is rejected by pathutil.RestrictToHome.
+func TestRegisterIndexDocument_PathOutsideHome(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	store := &fakeStore{}
+	embed := &fakeEmbedder{}
+	server := newTestServer(store, embed)
+
+	params, _ := json.Marshal(map[string]interface{}{
+		"name": "index_document",
+		"arguments": map[string]interface{}{
+			"path": "/etc/passwd",
+		},
+	})
+	resp := pipeRequest(t, server, jsonRPCRequest{
+		JSONRPC: "2.0",
+		ID:      float64(1),
+		Method:  "tools/call",
+		Params:  params,
+	})
+
+	if resp.Error != nil {
+		t.Fatalf("unexpected JSON-RPC error: %v", resp.Error)
+	}
+	result, ok := resp.Result.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected result map, got %T", resp.Result)
+	}
+	if result["isError"] != true {
+		t.Fatal("expected isError=true for path outside home")
+	}
+}
+
+// TestRegisterIndexDocument_NonexistentPath verifies error when the path does
+// not exist on disk (os.Stat fails).
+func TestRegisterIndexDocument_NonexistentPath(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	store := &fakeStore{}
+	embed := &fakeEmbedder{}
+	server := newTestServer(store, embed)
+
+	params, _ := json.Marshal(map[string]interface{}{
+		"name": "index_document",
+		"arguments": map[string]interface{}{
+			"path": filepath.Join(home, "nonexistent.txt"),
+		},
+	})
+	resp := pipeRequest(t, server, jsonRPCRequest{
+		JSONRPC: "2.0",
+		ID:      float64(1),
+		Method:  "tools/call",
+		Params:  params,
+	})
+
+	if resp.Error != nil {
+		t.Fatalf("unexpected JSON-RPC error: %v", resp.Error)
+	}
+	result, ok := resp.Result.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected result map, got %T", resp.Result)
+	}
+	if result["isError"] != true {
+		t.Fatal("expected isError=true for nonexistent path")
+	}
+}
+
+// TestRegisterIndexDocument_ValidFile exercises the single-file indexing path
+// (line 260-264): IndexSingleFile → engine.IndexFile. A real file under a
+// temporary HOME is created and indexed through the MCP tool interface.
+func TestRegisterIndexDocument_ValidFile(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	// Create a small test file inside the HOME directory.
+	testFile := filepath.Join(home, "hello.md")
+	if err := os.WriteFile(testFile, []byte("# Hello\nWorld"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	store := &fakeStore{}
+	embed := &fakeEmbedder{}
+	server := newTestServer(store, embed)
+
+	params, _ := json.Marshal(map[string]interface{}{
+		"name": "index_document",
+		"arguments": map[string]interface{}{
+			"path": testFile,
+		},
+	})
+	resp := pipeRequest(t, server, jsonRPCRequest{
+		JSONRPC: "2.0",
+		ID:      float64(1),
+		Method:  "tools/call",
+		Params:  params,
+	})
+
+	if resp.Error != nil {
+		t.Fatalf("unexpected JSON-RPC error: %v", resp.Error)
+	}
+	result, ok := resp.Result.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected result map, got %T", resp.Result)
+	}
+	if result["isError"] == true {
+		t.Fatalf("expected success, got tool error: %v", result["content"])
+	}
+
+	// Verify the response text indicates successful indexing.
+	content := result["content"].([]interface{})
+	text := content[0].(map[string]interface{})["text"].(string)
+	if !strings.Contains(text, "Successfully indexed file") {
+		t.Errorf("unexpected response text: %s", text)
+	}
+}
+
+// TestRegisterIndexDocument_ValidDirectory exercises the directory indexing
+// path (lines 253-258): engine.IndexDirectory.
+func TestRegisterIndexDocument_ValidDirectory(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	// Create a small directory with one supported file.
+	testDir := filepath.Join(home, "docs")
+	if err := os.MkdirAll(testDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(testDir, "note.txt"), []byte("some content"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	store := &fakeStore{}
+	embed := &fakeEmbedder{}
+	server := newTestServer(store, embed)
+
+	params, _ := json.Marshal(map[string]interface{}{
+		"name": "index_document",
+		"arguments": map[string]interface{}{
+			"path": testDir,
+		},
+	})
+	resp := pipeRequest(t, server, jsonRPCRequest{
+		JSONRPC: "2.0",
+		ID:      float64(1),
+		Method:  "tools/call",
+		Params:  params,
+	})
+
+	if resp.Error != nil {
+		t.Fatalf("unexpected JSON-RPC error: %v", resp.Error)
+	}
+	result, ok := resp.Result.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected result map, got %T", resp.Result)
+	}
+	if result["isError"] == true {
+		t.Fatalf("expected success, got tool error: %v", result["content"])
+	}
+
+	content := result["content"].([]interface{})
+	text := content[0].(map[string]interface{})["text"].(string)
+	if !strings.Contains(text, "Successfully indexed directory") {
+		t.Errorf("unexpected response text: %s", text)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// registerIndexURL tests  (covers lines 273-294)
+// ---------------------------------------------------------------------------
+
+// TestRegisterIndexURL_MissingURL verifies validation error when the url
+// argument is omitted.
+func TestRegisterIndexURL_MissingURL(t *testing.T) {
+	store := &fakeStore{}
+	embed := &fakeEmbedder{}
+	server := newTestServer(store, embed)
+
+	params, _ := json.Marshal(map[string]interface{}{
+		"name":      "index_url",
+		"arguments": map[string]interface{}{},
+	})
+	resp := pipeRequest(t, server, jsonRPCRequest{
+		JSONRPC: "2.0",
+		ID:      float64(1),
+		Method:  "tools/call",
+		Params:  params,
+	})
+
+	if resp.Error != nil {
+		t.Fatalf("unexpected JSON-RPC error: %v", resp.Error)
+	}
+	result, ok := resp.Result.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected result map, got %T", resp.Result)
+	}
+	if result["isError"] != true {
+		t.Fatal("expected isError=true for missing URL")
+	}
+}
+
+// TestRegisterIndexURL_FetchFailure verifies error handling when the URL
+// cannot be fetched (connection refused).
+func TestRegisterIndexURL_FetchFailure(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("SEEK_ALLOW_PRIVATE_URLS", "1")
+
+	store := &fakeStore{}
+	embed := &fakeEmbedder{}
+	server := newTestServer(store, embed)
+
+	params, _ := json.Marshal(map[string]interface{}{
+		"name": "index_url",
+		"arguments": map[string]interface{}{
+			"url": "http://127.0.0.1:1/nonexistent",
+		},
+	})
+	resp := pipeRequest(t, server, jsonRPCRequest{
+		JSONRPC: "2.0",
+		ID:      float64(1),
+		Method:  "tools/call",
+		Params:  params,
+	})
+
+	if resp.Error != nil {
+		t.Fatalf("unexpected JSON-RPC error: %v", resp.Error)
+	}
+	result, ok := resp.Result.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected result map, got %T", resp.Result)
+	}
+	if result["isError"] != true {
+		t.Fatal("expected isError=true for fetch failure")
+	}
+}
+
+// TestRegisterIndexURL_Success exercises the happy path: a local HTTP test
+// server returns plain text content that is indexed successfully.
+func TestRegisterIndexURL_Success(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("SEEK_ALLOW_PRIVATE_URLS", "1")
+
+	// Start a local HTTP server that returns plain-text content.
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		fmt.Fprint(w, "Hello from test server")
+	}))
+	defer ts.Close()
+
+	store := &fakeStore{}
+	embed := &fakeEmbedder{}
+	server := newTestServer(store, embed)
+
+	params, _ := json.Marshal(map[string]interface{}{
+		"name": "index_url",
+		"arguments": map[string]interface{}{
+			"url": ts.URL,
+		},
+	})
+	resp := pipeRequest(t, server, jsonRPCRequest{
+		JSONRPC: "2.0",
+		ID:      float64(1),
+		Method:  "tools/call",
+		Params:  params,
+	})
+
+	if resp.Error != nil {
+		t.Fatalf("unexpected JSON-RPC error: %v", resp.Error)
+	}
+	result, ok := resp.Result.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected result map, got %T", resp.Result)
+	}
+	if result["isError"] == true {
+		t.Fatalf("expected success, got tool error: %v", result["content"])
+	}
+
+	content := result["content"].([]interface{})
+	text := content[0].(map[string]interface{})["text"].(string)
+	if !strings.Contains(text, "Successfully indexed URL") {
+		t.Errorf("unexpected response text: %s", text)
 	}
 }

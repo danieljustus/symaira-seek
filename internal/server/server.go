@@ -167,16 +167,11 @@ func warnIfNoAuthToken(w io.Writer) {
 	}
 }
 
-// StartHTTPServer runs the local HTTP REST daemon.
-func StartHTTPServer(port int, ollamaCfg engine.OllamaConfig, indexCooldown time.Duration) error {
-	dbClient, err := db.Open()
-	if err != nil {
-		return fmt.Errorf("failed to open database: %w", err)
-	}
-	defer dbClient.Close()
-
-	embedder := engine.NewEmbeddingsGeneratorWithOllamaConfig(ollamaCfg)
-
+// newServeMux builds the HTTP handler mux with all endpoint handlers.
+// It is extracted from StartHTTPServer so that tests can exercise the full
+// handler chain via a mock db.Store and engine.Embedder without starting a
+// real server or database.
+func newServeMux(dbClient db.Store, embedder engine.Embedder, indexCooldown time.Duration) *http.ServeMux {
 	mux := http.NewServeMux()
 
 	// 1. Health check endpoint
@@ -320,6 +315,20 @@ func StartHTTPServer(port int, ollamaCfg engine.OllamaConfig, indexCooldown time
 			"path":   absPath,
 		})
 	})
+
+	return mux
+}
+
+// StartHTTPServer runs the local HTTP REST daemon.
+func StartHTTPServer(port int, ollamaCfg engine.OllamaConfig, indexCooldown time.Duration) error {
+	dbClient, err := db.Open()
+	if err != nil {
+		return fmt.Errorf("failed to open database: %w", err)
+	}
+	defer dbClient.Close()
+
+	embedder := engine.NewEmbeddingsGeneratorWithOllamaConfig(ollamaCfg)
+	mux := newServeMux(dbClient, embedder, indexCooldown)
 
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	warnIfNoAuthToken(os.Stderr)
