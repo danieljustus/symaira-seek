@@ -34,11 +34,14 @@ type EmbeddingsGenerator struct {
 	Timeout      time.Duration
 	RetryCount   int
 	RetryBackoff time.Duration
+	configDim    int // from config; 0 means auto-detect from first response
 	sleepFn      func(time.Duration) // injectable for tests; defaults to time.Sleep
 	httpClient   *http.Client
 	cache        map[string]*list.Element
 	cacheOrder   *list.List
 	cacheMu      sync.Mutex
+	dim          int // cached dimension from first successful Ollama response
+	dimOnce      sync.Once
 	sf           singleflight.Group
 }
 
@@ -66,6 +69,29 @@ func newEmbeddingsGenerator() *EmbeddingsGenerator {
 	}
 }
 
+const defaultEmbeddingDim = 768
+
+// Dim returns the cached embedding dimension. If no Ollama response has been
+// received yet and no config-driven dimension was set, it returns the legacy
+// default of 768 for backwards compatibility.
+func (eg *EmbeddingsGenerator) Dim() int {
+	if eg.configDim > 0 {
+		return eg.configDim
+	}
+	if eg.dim > 0 {
+		return eg.dim
+	}
+	return defaultEmbeddingDim
+}
+
+func (eg *EmbeddingsGenerator) effectiveDim() int {
+	return eg.Dim()
+}
+
+func (eg *EmbeddingsGenerator) ModelName() string {
+	return eg.Model
+}
+
 // NewEmbeddingsGenerator sets up the standard engine configuration.
 func NewEmbeddingsGenerator() *EmbeddingsGenerator {
 	return newEmbeddingsGenerator()
@@ -83,6 +109,8 @@ type Embedder interface {
 	// is intended for interactive search paths where latency matters more
 	// than embedding quality (issue #162).
 	GenerateVectorNoRetry(text string) []float32
+	Dim() int
+	ModelName() string
 }
 
 // Compile-time check that *EmbeddingsGenerator satisfies Embedder.
@@ -93,6 +121,7 @@ var _ Embedder = (*EmbeddingsGenerator)(nil)
 type OllamaConfig struct {
 	URL          string
 	Model        string
+	Dim          int
 	Timeout      time.Duration
 	RetryCount   int
 	RetryBackoff time.Duration
@@ -136,6 +165,7 @@ func NewEmbeddingsGeneratorWithOllamaConfig(cfg OllamaConfig) *EmbeddingsGenerat
 	eg := newEmbeddingsGenerator()
 	eg.OllamaURL = cfg.URL
 	eg.Model = cfg.Model
+	eg.configDim = cfg.Dim
 	eg.Timeout = cfg.Timeout
 	eg.RetryCount = cfg.RetryCount
 	eg.RetryBackoff = cfg.RetryBackoff
@@ -170,19 +200,26 @@ func (eg *EmbeddingsGenerator) generateVectorImpl(text string, maxRetries int) [
 	}
 	eg.cacheMu.Unlock()
 
-	dims := 768
+	hasKnownDim := eg.configDim > 0 || eg.dim > 0
+	expectedDim := eg.effectiveDim()
 
 	vec, err := eg.queryOllamaWithRetries(text, maxRetries)
 	if err == nil {
-		if len(vec) != dims {
-			fmt.Fprintf(os.Stderr, "engine: embedding dimension mismatch: expected %d, got %d; falling back to local hash vector\n", dims, len(vec))
+		if !hasKnownDim {
+			eg.cacheDimOnce(len(vec))
+			eg.cachePut(key, vec)
+			return vec
+		}
+		eg.cacheDimOnce(len(vec))
+		if len(vec) != expectedDim {
+			fmt.Fprintf(os.Stderr, "engine: embedding dimension mismatch: expected %d, got %d; falling back to local hash vector\n", expectedDim, len(vec))
 		} else {
 			eg.cachePut(key, vec)
 			return vec
 		}
 	}
 
-	fallback := GenerateLocalHashVector(text, dims)
+	fallback := GenerateLocalHashVector(text, expectedDim)
 	eg.cachePut(key, fallback)
 	return fallback
 }
@@ -218,6 +255,15 @@ func (eg *EmbeddingsGenerator) cachePut(key string, value []float32) {
 	eg.cache[key] = elem
 }
 
+func (eg *EmbeddingsGenerator) cacheDimOnce(actualDim int) {
+	if actualDim <= 0 {
+		return
+	}
+	eg.dimOnce.Do(func() {
+		eg.dim = actualDim
+	})
+}
+
 // GenerateVectors produces embeddings for a batch of texts.
 // Sends them to Ollama in a single HTTP request when possible, falling back
 // to individual queries and local hashing per text.
@@ -227,7 +273,8 @@ func (eg *EmbeddingsGenerator) GenerateVectors(texts []string) [][]float32 {
 		return nil
 	}
 
-	dims := 768
+	hasKnownDim := eg.configDim > 0 || eg.dim > 0
+	expectedDim := eg.effectiveDim()
 	results := make([][]float32, len(texts))
 
 	// Collect uncached texts and their indexes
@@ -277,9 +324,15 @@ func (eg *EmbeddingsGenerator) GenerateVectors(texts []string) [][]float32 {
 		for i, u := range uncachedList {
 			vec := batchVectors[i]
 			key := hashKey(u.text)
-			if len(vec) != dims {
-				fmt.Fprintf(os.Stderr, "engine: batch embedding dimension mismatch for text %q: expected %d, got %d; using local hash fallback\n", u.text, dims, len(vec))
-				results[u.idx] = GenerateLocalHashVector(u.text, dims)
+			if !hasKnownDim && i == 0 {
+				eg.cacheDimOnce(len(vec))
+				expectedDim = eg.effectiveDim()
+			} else {
+				eg.cacheDimOnce(len(vec))
+			}
+			if len(vec) != expectedDim {
+				fmt.Fprintf(os.Stderr, "engine: batch embedding dimension mismatch for text %q: expected %d, got %d; using local hash fallback\n", u.text, expectedDim, len(vec))
+				results[u.idx] = GenerateLocalHashVector(u.text, expectedDim)
 			} else {
 				results[u.idx] = vec
 			}

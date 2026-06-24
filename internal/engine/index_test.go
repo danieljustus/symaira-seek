@@ -555,7 +555,7 @@ func TestIndexContent_IndexAndSearch(t *testing.T) {
 		t.Fatalf("indexContent failed: %v", err)
 	}
 
-	results, err := SearchHybrid(dbClient, embedder, "quantum computing", 5)
+	results, err := SearchHybrid(dbClient, dbClient, embedder, "quantum computing", 5)
 	if err != nil {
 		t.Fatalf("SearchHybrid failed: %v", err)
 	}

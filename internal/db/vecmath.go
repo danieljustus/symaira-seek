@@ -2,6 +2,7 @@ package db
 
 import (
 	"math"
+	"math/bits"
 	"sort"
 )
 
@@ -84,4 +85,53 @@ func appendSortedByScoreDesc(list []*SearchResult, res *SearchResult) []*SearchR
 	copy(list[pos+1:], list[pos:len(list)-1])
 	list[pos] = res
 	return list
+}
+
+// SignBinarySignature packs one bit per dimension (1 if value >= 0, else 0),
+// padding to whole bytes and grouping into uint64 words for fast Hamming
+// distance computation. For a 768-dim vector this produces 96 bytes (12 words).
+func SignBinarySignature(vec []float32) []byte {
+	if len(vec) == 0 {
+		return nil
+	}
+	nWords := (len(vec) + 63) / 64
+	words := make([]uint64, nWords)
+	for i, v := range vec {
+		if v >= 0 {
+			words[i/64] |= 1 << uint(i%64)
+		}
+	}
+	// Encode as little-endian uint64 words.
+	buf := make([]byte, nWords*8)
+	for i, w := range words {
+		off := i * 8
+		buf[off] = byte(w)
+		buf[off+1] = byte(w >> 8)
+		buf[off+2] = byte(w >> 16)
+		buf[off+3] = byte(w >> 24)
+		buf[off+4] = byte(w >> 32)
+		buf[off+5] = byte(w >> 40)
+		buf[off+6] = byte(w >> 48)
+		buf[off+7] = byte(w >> 56)
+	}
+	return buf
+}
+
+// HammingDistance returns the number of differing bits between two binary
+// signatures encoded as byte slices of little-endian uint64 words.
+// Returns math.MaxInt if the slices have different lengths or are not
+// multiples of 8 bytes.
+func HammingDistance(a, b []byte) int {
+	if len(a) != len(b) || len(a) == 0 || len(a)%8 != 0 {
+		return math.MaxInt
+	}
+	dist := 0
+	for i := 0; i < len(a); i += 8 {
+		wa := uint64(a[i]) | uint64(a[i+1])<<8 | uint64(a[i+2])<<16 | uint64(a[i+3])<<24 |
+			uint64(a[i+4])<<32 | uint64(a[i+5])<<40 | uint64(a[i+6])<<48 | uint64(a[i+7])<<56
+		wb := uint64(b[i]) | uint64(b[i+1])<<8 | uint64(b[i+2])<<16 | uint64(b[i+3])<<24 |
+			uint64(b[i+4])<<32 | uint64(b[i+5])<<40 | uint64(b[i+6])<<48 | uint64(b[i+7])<<56
+		dist += bits.OnesCount64(wa ^ wb)
+	}
+	return dist
 }

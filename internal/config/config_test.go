@@ -242,3 +242,51 @@ func TestMigrateJSONToTOML_SkipsWhenNeitherExists(t *testing.T) {
 		t.Error("expected no TOML file when neither config exists")
 	}
 }
+
+func TestSetValue_AcceptsEmbeddingDim(t *testing.T) {
+	dir := t.TempDir()
+	cfgFile := filepath.Join(dir, "config.toml")
+	cfg := DefaultConfig()
+
+	if err := SetValue(cfgFile, "embedding_dim", "512", cfg); err != nil {
+		t.Fatalf("SetValue(embedding_dim): %v", err)
+	}
+	if cfg.EmbeddingDim != 512 {
+		t.Errorf("expected EmbeddingDim=512, got %d", cfg.EmbeddingDim)
+	}
+}
+
+func TestSetValue_AcceptsEmbeddingDimZero(t *testing.T) {
+	dir := t.TempDir()
+	cfgFile := filepath.Join(dir, "config.toml")
+	cfg := DefaultConfig()
+
+	if err := SetValue(cfgFile, "embedding_dim", "0", cfg); err != nil {
+		t.Fatalf("SetValue(embedding_dim=0): %v", err)
+	}
+	if cfg.EmbeddingDim != 0 {
+		t.Errorf("expected EmbeddingDim=0 (auto-detect), got %d", cfg.EmbeddingDim)
+	}
+}
+
+func TestSetValue_RejectsInvalidEmbeddingDim(t *testing.T) {
+	dir := t.TempDir()
+	cfgFile := filepath.Join(dir, "config.toml")
+	cfg := DefaultConfig()
+
+	if err := SetValue(cfgFile, "embedding_dim", "abc", cfg); err == nil {
+		t.Error("expected error for non-numeric embedding_dim")
+	}
+}
+
+func TestOllamaConfig_PassesEmbeddingDim(t *testing.T) {
+	c := Config{
+		OllamaURL:    "http://x.test/api",
+		Model:        "m",
+		EmbeddingDim: 512,
+	}
+	oc := c.OllamaConfig()
+	if oc.Dim != 512 {
+		t.Errorf("expected Dim=512 in OllamaConfig, got %d", oc.Dim)
+	}
+}

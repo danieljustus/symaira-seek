@@ -31,17 +31,17 @@ func StartServer(cfg engine.OllamaConfig) error {
 	embedder := engine.NewEmbeddingsGeneratorWithOllamaConfig(cfg)
 	server := mcpserver.New("symseek", ServerVersion)
 
-	registerSearchDocuments(server, dbClient, embedder)
+	registerSearchDocuments(server, dbClient, dbClient, embedder)
 	registerReadDocument(server, dbClient, embedder)
 	registerListDocuments(server, dbClient, embedder)
-	registerGetContext(server, dbClient, embedder)
+	registerGetContext(server, dbClient, dbClient, embedder)
 	registerIndexDocument(server, dbClient, embedder)
 	registerIndexURL(server, dbClient, embedder)
 
 	return server.ServeStdio(context.Background())
 }
 
-func registerSearchDocuments(server *mcpserver.Server, dbClient db.Store, embedder engine.Embedder) {
+func registerSearchDocuments(server *mcpserver.Server, dbClient db.Store, vectorStore db.VectorStore, embedder engine.Embedder) {
 	server.RegisterTool(&mcpserver.Tool{
 		Name:        "search_documents",
 		Description: "Search the local document index for relevant content using hybrid keyword (BM25) and vector search. Use when the user asks about specific topics, files, or information that might be indexed.",
@@ -61,7 +61,7 @@ func registerSearchDocuments(server *mcpserver.Server, dbClient db.Store, embedd
 				params.Limit = 5
 			}
 
-			results, err := engine.SearchHybrid(dbClient, embedder, params.Query, params.Limit)
+			results, err := engine.SearchHybrid(dbClient, vectorStore, embedder, params.Query, params.Limit)
 			if err != nil {
 				return nil, &symerrors.SearchError{Query: params.Query, Err: err}
 			}
@@ -172,7 +172,7 @@ func registerListDocuments(server *mcpserver.Server, dbClient db.Store, _ engine
 	})
 }
 
-func registerGetContext(server *mcpserver.Server, dbClient db.Store, embedder engine.Embedder) {
+func registerGetContext(server *mcpserver.Server, dbClient db.Store, vectorStore db.VectorStore, embedder engine.Embedder) {
 	server.RegisterTool(&mcpserver.Tool{
 		Name:        "get_context",
 		Description: "Compile a consolidated context block from multiple matching documents on a given topic. This combines search and read tools.",
@@ -194,7 +194,7 @@ func registerGetContext(server *mcpserver.Server, dbClient db.Store, embedder en
 				maxChars = 4000
 			}
 
-			results, err := engine.SearchHybrid(dbClient, embedder, params.Topic, 10)
+			results, err := engine.SearchHybrid(dbClient, vectorStore, embedder, params.Topic, 10)
 			if err != nil {
 				return nil, &symerrors.SearchError{Query: params.Topic, Err: err}
 			}

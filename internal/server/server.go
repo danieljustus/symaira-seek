@@ -171,7 +171,7 @@ func warnIfNoAuthToken(w io.Writer) {
 // It is extracted from StartHTTPServer so that tests can exercise the full
 // handler chain via a mock db.Store and engine.Embedder without starting a
 // real server or database.
-func newServeMux(dbClient db.Store, embedder engine.Embedder, indexCooldown time.Duration) *http.ServeMux {
+func newServeMux(dbClient db.Store, vectorStore db.VectorStore, embedder engine.Embedder, indexCooldown time.Duration) *http.ServeMux {
 	mux := http.NewServeMux()
 
 	// 1. Health check endpoint
@@ -207,7 +207,7 @@ func newServeMux(dbClient db.Store, embedder engine.Embedder, indexCooldown time
 			}
 		}
 
-		results, err := engine.SearchHybrid(dbClient, embedder, query, limit)
+		results, err := engine.SearchHybrid(dbClient, vectorStore, embedder, query, limit)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -241,7 +241,7 @@ func newServeMux(dbClient db.Store, embedder engine.Embedder, indexCooldown time
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("Connection", "keep-alive")
 
-		results, err := engine.SearchHybrid(dbClient, embedder, query, limit)
+		results, err := engine.SearchHybrid(dbClient, vectorStore, embedder, query, limit)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -328,7 +328,7 @@ func StartHTTPServer(port int, ollamaCfg engine.OllamaConfig, indexCooldown time
 	defer dbClient.Close()
 
 	embedder := engine.NewEmbeddingsGeneratorWithOllamaConfig(ollamaCfg)
-	mux := newServeMux(dbClient, embedder, indexCooldown)
+	mux := newServeMux(dbClient, dbClient, embedder, indexCooldown)
 
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	warnIfNoAuthToken(os.Stderr)

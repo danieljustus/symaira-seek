@@ -399,3 +399,145 @@ func (db *DB) searchVectorTwoPass(queryVec []float32, candidateIDs []int64, limi
 
 	return unsortedResults, nil
 }
+
+func TestChunkDimModelMetadata(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "seek-dim-model-test")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+	t.Setenv("HOME", tempDir)
+
+	db, err := Open()
+	if err != nil {
+		t.Fatalf("failed to open test database: %v", err)
+	}
+	defer db.Close()
+
+	docPath := filepath.Join(tempDir, "dimtest.md")
+	doc := &Document{Path: docPath, Hash: "dimhash", UpdatedAt: time.Now()}
+	if err := db.SaveDocument(doc); err != nil {
+		t.Fatalf("SaveDocument: %v", err)
+	}
+
+	chunks := []*Chunk{
+		{
+			UUID:         "dim-c1",
+			DocumentPath: docPath,
+			ChunkIndex:   0,
+			Content:      "content with dim metadata",
+			Embedding:    []float32{1.0, 0.0, 0.0},
+			Hash:         "dimhash1",
+			Dim:          3,
+			Model:        "test-model",
+		},
+		{
+			UUID:         "dim-c2",
+			DocumentPath: docPath,
+			ChunkIndex:   1,
+			Content:      "content without dim",
+			Embedding:    []float32{0.0, 1.0, 0.0},
+			Hash:         "dimhash2",
+		},
+	}
+
+	if err := db.SaveChunks(chunks); err != nil {
+		t.Fatalf("SaveChunks: %v", err)
+	}
+
+	fetched, err := db.GetChunksForDocument(docPath)
+	if err != nil {
+		t.Fatalf("GetChunksForDocument: %v", err)
+	}
+	if len(fetched) != 2 {
+		t.Fatalf("expected 2 chunks, got %d", len(fetched))
+	}
+
+	if fetched[0].Dim != 3 {
+		t.Errorf("expected Dim=3, got %d", fetched[0].Dim)
+	}
+	if fetched[0].Model != "test-model" {
+		t.Errorf("expected Model=test-model, got %q", fetched[0].Model)
+	}
+
+	if fetched[1].Dim != 0 {
+		t.Errorf("expected Dim=0 (unset), got %d", fetched[1].Dim)
+	}
+	if fetched[1].Model != "" {
+		t.Errorf("expected Model='' (unset), got %q", fetched[1].Model)
+	}
+}
+
+func TestDetectMixedEmbeddingSpaces_Uniform(t *testing.T) {
+	d := setupDB(t)
+	docPath := filepath.Join(t.TempDir(), "uniform.md")
+	if err := d.SaveDocument(&Document{Path: docPath, Hash: "u", UpdatedAt: time.Now()}); err != nil {
+		t.Fatalf("SaveDocument: %v", err)
+	}
+	chunks := make([]*Chunk, 5)
+	for i := range chunks {
+		emb := make([]float32, 768)
+		emb[0] = 1.0
+		chunks[i] = &Chunk{
+			UUID:         "u-" + strconv.Itoa(i),
+			DocumentPath: docPath,
+			ChunkIndex:   i,
+			Content:      "content",
+			Embedding:    emb,
+			Hash:         "u-hash",
+			Dim:          768,
+			Model:        "nomic-embed-text",
+		}
+	}
+	if err := d.SaveChunks(chunks); err != nil {
+		t.Fatalf("SaveChunks: %v", err)
+	}
+
+	spaces, err := d.DetectMixedEmbeddingSpaces()
+	if err != nil {
+		t.Fatalf("DetectMixedEmbeddingSpaces: %v", err)
+	}
+	if len(spaces) != 1 {
+		t.Errorf("expected 1 embedding space, got %d", len(spaces))
+	}
+	key := "768/nomic-embed-text"
+	if count, ok := spaces[key]; !ok || count != 5 {
+		t.Errorf("expected %s with count 5, got %v", key, spaces)
+	}
+}
+
+func TestDetectMixedEmbeddingSpaces_Mixed(t *testing.T) {
+	d := setupDB(t)
+	docPath := filepath.Join(t.TempDir(), "mixed.md")
+	if err := d.SaveDocument(&Document{Path: docPath, Hash: "m", UpdatedAt: time.Now()}); err != nil {
+		t.Fatalf("SaveDocument: %v", err)
+	}
+	chunks := []*Chunk{
+		{UUID: "m1", DocumentPath: docPath, ChunkIndex: 0, Content: "c1", Embedding: make([]float32, 768), Hash: "h1", Dim: 768, Model: "model-a"},
+		{UUID: "m2", DocumentPath: docPath, ChunkIndex: 1, Content: "c2", Embedding: make([]float32, 384), Hash: "h2", Dim: 384, Model: "model-b"},
+		{UUID: "m3", DocumentPath: docPath, ChunkIndex: 2, Content: "c3", Embedding: make([]float32, 768), Hash: "h3", Dim: 768, Model: "model-a"},
+	}
+	if err := d.SaveChunks(chunks); err != nil {
+		t.Fatalf("SaveChunks: %v", err)
+	}
+
+	spaces, err := d.DetectMixedEmbeddingSpaces()
+	if err != nil {
+		t.Fatalf("DetectMixedEmbeddingSpaces: %v", err)
+	}
+	if len(spaces) != 2 {
+		t.Errorf("expected 2 embedding spaces, got %d: %v", len(spaces), spaces)
+	}
+}
+
+func TestDetectMixedEmbeddingSpaces_Empty(t *testing.T) {
+	d := setupDB(t)
+
+	spaces, err := d.DetectMixedEmbeddingSpaces()
+	if err != nil {
+		t.Fatalf("DetectMixedEmbeddingSpaces: %v", err)
+	}
+	if len(spaces) != 0 {
+		t.Errorf("expected 0 embedding spaces for empty DB, got %d", len(spaces))
+	}
+}

@@ -457,6 +457,8 @@ func buildChunks(embedder Embedder, source, content string) []*db.Chunk {
 			Content:      tc,
 			Embedding:    embeddings[idx],
 			Hash:         chunkHash,
+			Dim:          len(embeddings[idx]),
+			Model:        embedder.ModelName(),
 		})
 	}
 	return chunks

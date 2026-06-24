@@ -26,6 +26,8 @@ type Chunk struct {
 	Embedding    []float32 `json:"embedding"`
 	Hash         string    `json:"hash"`
 	Norm         float32   `json:"norm"`
+	Dim          int       `json:"dim"`
+	Model        string    `json:"embedding_model"`
 }
 
 type SearchResult struct {
@@ -53,6 +55,7 @@ type Store interface {
 	GetStats() (*Stats, error)
 	SearchBM25(queryStr string, limit int) ([]*SearchResult, error)
 	SearchVector(queryVec []float32, limit int) ([]*SearchResult, error)
+	DetectMixedEmbeddingSpaces() (map[string]int, error)
 }
 
 var _ Store = (*DB)(nil)
@@ -303,8 +306,8 @@ func (db *DB) SaveChunks(chunks []*Chunk) error {
 	}
 	defer tx.Rollback()
 
-	query := `INSERT INTO chunks (uuid, document_path, chunk_index, content, embedding, hash, norm)
-		VALUES (?, ?, ?, ?, ?, ?, ?)`
+	query := `INSERT INTO chunks (uuid, document_path, chunk_index, content, embedding, hash, norm, binary_signature, embedding_dim, embedding_model)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 	stmt, err := tx.Prepare(query)
 	if err != nil {
@@ -315,7 +318,8 @@ func (db *DB) SaveChunks(chunks []*Chunk) error {
 	for _, c := range chunks {
 		c.Norm = l2Norm(c.Embedding)
 		embBytes := Float32SliceToBytes(c.Embedding)
-		res, err := stmt.Exec(c.UUID, c.DocumentPath, c.ChunkIndex, c.Content, embBytes, c.Hash, c.Norm)
+		sigBytes := SignBinarySignature(c.Embedding)
+		res, err := stmt.Exec(c.UUID, c.DocumentPath, c.ChunkIndex, c.Content, embBytes, c.Hash, c.Norm, sigBytes, c.Dim, c.Model)
 		if err != nil {
 			return fmt.Errorf("failed to insert chunk: %w", err)
 		}
@@ -344,7 +348,7 @@ func (db *DB) SaveChunks(chunks []*Chunk) error {
 }
 
 func (db *DB) GetChunksForDocument(docPath string) ([]*Chunk, error) {
-	query := "SELECT id, uuid, document_path, chunk_index, content, embedding, hash, norm FROM chunks WHERE document_path = ? ORDER BY chunk_index ASC"
+	query := "SELECT id, uuid, document_path, chunk_index, content, embedding, hash, norm, embedding_dim, embedding_model FROM chunks WHERE document_path = ? ORDER BY chunk_index ASC"
 	rows, err := db.conn.Query(query, docPath)
 	if err != nil {
 		return nil, err
@@ -355,7 +359,7 @@ func (db *DB) GetChunksForDocument(docPath string) ([]*Chunk, error) {
 	for rows.Next() {
 		var c Chunk
 		var embBytes []byte
-		if err := rows.Scan(&c.ID, &c.UUID, &c.DocumentPath, &c.ChunkIndex, &c.Content, &embBytes, &c.Hash, &c.Norm); err != nil {
+		if err := rows.Scan(&c.ID, &c.UUID, &c.DocumentPath, &c.ChunkIndex, &c.Content, &embBytes, &c.Hash, &c.Norm, &c.Dim, &c.Model); err != nil {
 			return nil, err
 		}
 		c.Embedding = BytesToFloat32Slice(embBytes)
@@ -394,4 +398,32 @@ func (db *DB) GetStats() (*Stats, error) {
 	s.DatabaseSize = pageCount * pageSize
 
 	return &s, nil
+}
+
+// DetectMixedEmbeddingSpaces returns the distinct (dim, model) combinations
+// present in the chunks table and their row counts.
+func (db *DB) DetectMixedEmbeddingSpaces() (map[string]int, error) {
+	rows, err := db.conn.Query(
+		"SELECT embedding_dim, embedding_model, COUNT(*) FROM chunks GROUP BY embedding_dim, embedding_model",
+	)
+	if err != nil {
+		return nil, fmt.Errorf("detect mixed embedding spaces: %w", err)
+	}
+	defer rows.Close()
+
+	result := make(map[string]int)
+	for rows.Next() {
+		var dim int
+		var model string
+		var count int
+		if err := rows.Scan(&dim, &model, &count); err != nil {
+			return nil, fmt.Errorf("detect mixed embedding spaces: %w", err)
+		}
+		key := fmt.Sprintf("%d/%s", dim, model)
+		result[key] = count
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("detect mixed embedding spaces: %w", err)
+	}
+	return result, nil
 }
