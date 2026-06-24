@@ -72,6 +72,9 @@ func (db *DB) SearchVector(queryVec []float32, limit int) ([]*SearchResult, erro
 
 	queryNorm := l2Norm(queryVec)
 
+	// Detect writes from other processes before trusting the warm index.
+	db.checkGeneration()
+
 	// Fast path: use IVF prefilter when an index is ready.
 	if idx := db.vectorIndex; idx != nil && idx.IsReady() {
 		candidateIDs := idx.CandidateIDs(queryVec, idx.ProbeCount())

@@ -39,6 +39,7 @@ type SearchResult struct {
 type DB struct {
 	conn        *sql.DB
 	vectorIndex *VectorIndex
+	generation  int64 // index_meta 'generation' value last seen by this process
 }
 
 type Store interface {
@@ -83,11 +84,40 @@ func Open() (*DB, error) {
 		return nil, fmt.Errorf("failed to run migrations: %w", err)
 	}
 
-	return &DB{conn: conn}, nil
+	db := &DB{conn: conn}
+	db.generation = db.loadGeneration()
+	return db, nil
 }
 
 func (db *DB) Close() error {
 	return db.conn.Close()
+}
+
+// loadGeneration reads the current index generation from index_meta.
+func (db *DB) loadGeneration() int64 {
+	var gen int64
+	_ = db.conn.QueryRow("SELECT value FROM index_meta WHERE key = 'generation'").Scan(&gen)
+	return gen
+}
+
+// bumpGeneration atomically increments the stored generation and updates the
+// in-memory copy.  Any other process reading the same database will observe
+// the new value on its next vector query.
+func (db *DB) bumpGeneration() {
+	_, err := db.conn.Exec("UPDATE index_meta SET value = value + 1 WHERE key = 'generation'")
+	if err == nil {
+		db.generation = db.loadGeneration()
+	}
+}
+
+// checkGeneration invalidates the in-memory IVF index when another process
+// has written to the database.  It is called before serving a vector query.
+func (db *DB) checkGeneration() {
+	current := db.loadGeneration()
+	if current != db.generation {
+		db.generation = current
+		db.vectorIndex = nil
+	}
 }
 
 // rebuildVectorIndex reconstructs the in-memory IVF index from the current
@@ -186,6 +216,7 @@ func (db *DB) DeleteDocument(path string) error {
 			db.rebuildVectorIndex()
 		}
 	}
+	db.bumpGeneration()
 	return nil
 }
 
@@ -260,6 +291,7 @@ func (db *DB) SaveChunks(chunks []*Chunk) error {
 			db.rebuildVectorIndex()
 		}
 	}
+	db.bumpGeneration()
 	return nil
 }
 

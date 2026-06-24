@@ -548,6 +548,108 @@ func TestSearchVectorIncrementallyDeletesChunks(t *testing.T) {
 	}
 }
 
+func TestSearchVectorDetectsExternalWrites(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "seek-external-write-test")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+	t.Setenv("HOME", tempDir)
+
+	db1, err := Open()
+	if err != nil {
+		t.Fatalf("failed to open db1: %v", err)
+	}
+	defer db1.Close()
+
+	docPath1 := filepath.Join(t.TempDir(), "external1.md")
+	if err := db1.SaveDocument(&Document{Path: docPath1, Hash: "ext1", UpdatedAt: time.Now()}); err != nil {
+		t.Fatalf("SaveDocument: %v", err)
+	}
+
+	const nChunks = 200
+	chunks := make([]*Chunk, nChunks)
+	for i := 0; i < nChunks; i++ {
+		emb := make([]float32, 768)
+		for j := range emb {
+			emb[j] = float32(i*768+j) / float32(nChunks*768)
+		}
+		var sumSquares float64
+		for _, v := range emb {
+			sumSquares += float64(v * v)
+		}
+		norm := float32(math.Sqrt(sumSquares))
+		if norm > 0 {
+			for j := range emb {
+				emb[j] /= norm
+			}
+		}
+		chunks[i] = &Chunk{
+			UUID:         "ext-" + strconv.Itoa(i),
+			DocumentPath: docPath1,
+			ChunkIndex:   i,
+			Content:      "content " + strconv.Itoa(i),
+			Embedding:    emb,
+			Hash:         "ext-hash-" + strconv.Itoa(i),
+		}
+	}
+	if err := db1.SaveChunks(chunks); err != nil {
+		t.Fatalf("SaveChunks: %v", err)
+	}
+
+	query := make([]float32, 768)
+	for i := range query {
+		query[i] = 0.5
+	}
+	if _, err := db1.SearchVector(query, 5); err != nil {
+		t.Fatalf("SearchVector on db1: %v", err)
+	}
+	if db1.vectorIndex == nil || !db1.vectorIndex.IsReady() {
+		t.Fatal("expected db1 index to be built")
+	}
+
+	// Simulate an external write through a second database connection on the
+	// same underlying file.
+	db2, err := Open()
+	if err != nil {
+		t.Fatalf("failed to open db2: %v", err)
+	}
+	defer db2.Close()
+
+	docPath2 := filepath.Join(t.TempDir(), "external2.md")
+	if err := db2.SaveDocument(&Document{Path: docPath2, Hash: "ext2", UpdatedAt: time.Now()}); err != nil {
+		t.Fatalf("SaveDocument db2: %v", err)
+	}
+	externalChunk := &Chunk{
+		UUID:         "ext-external",
+		DocumentPath: docPath2,
+		ChunkIndex:   0,
+		Content:      "external unique content",
+		Embedding:    make([]float32, 768),
+		Hash:         "ext-external-hash",
+	}
+	if err := db2.SaveChunks([]*Chunk{externalChunk}); err != nil {
+		t.Fatalf("SaveChunks db2: %v", err)
+	}
+
+	// db1's next search must detect the external generation bump, invalidate
+	// its stale index, and find the new chunk.
+	results, err := db1.SearchVector(query, nChunks+10)
+	if err != nil {
+		t.Fatalf("SearchVector on db1 after external write: %v", err)
+	}
+	found := false
+	for _, r := range results {
+		if r.Chunk.UUID == "ext-external" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("db1 did not return the chunk written by db2; results=%d", len(results))
+	}
+}
+
 func BenchmarkVectorIndexBuild(b *testing.B) {
 	const nChunks = 100000
 	chunks := make([]*Chunk, nChunks)
