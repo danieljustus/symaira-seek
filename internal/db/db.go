@@ -90,6 +90,39 @@ func (db *DB) Close() error {
 	return db.conn.Close()
 }
 
+// rebuildVectorIndex reconstructs the in-memory IVF index from the current
+// chunks table.  It is used after incremental churn crosses the rebuild
+// threshold.
+func (db *DB) rebuildVectorIndex() {
+	rows, err := db.conn.Query("SELECT id, embedding FROM chunks")
+	if err != nil {
+		db.vectorIndex = nil
+		return
+	}
+	defer rows.Close()
+
+	var chunks []*Chunk
+	for rows.Next() {
+		var c Chunk
+		var embBytes []byte
+		if err := rows.Scan(&c.ID, &embBytes); err != nil {
+			db.vectorIndex = nil
+			return
+		}
+		c.Embedding = BytesToFloat32Slice(embBytes)
+		chunks = append(chunks, &c)
+	}
+	if err := rows.Err(); err != nil {
+		db.vectorIndex = nil
+		return
+	}
+
+	if db.vectorIndex == nil {
+		db.vectorIndex = NewVectorIndex()
+	}
+	db.vectorIndex.Rebuild(chunks)
+}
+
 func (db *DB) SaveDocument(doc *Document) error {
 	query := `INSERT INTO documents (path, hash, updated_at)
 		VALUES (?, ?, ?)
@@ -107,6 +140,30 @@ func (db *DB) DeleteDocument(path string) error {
 	}
 	defer tx.Rollback()
 
+	// If an IVF index is warm, remove the affected chunk IDs from it before
+	// deleting the rows.  This keeps the index current without forcing a full
+	// rebuild on the next query.
+	var chunkIDs []int64
+	if db.vectorIndex != nil && db.vectorIndex.IsReady() {
+		rows, err := tx.Query("SELECT id FROM chunks WHERE document_path = ?", path)
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			var id int64
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				return err
+			}
+			chunkIDs = append(chunkIDs, id)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return err
+		}
+		rows.Close()
+	}
+
 	_, err = tx.Exec("DELETE FROM chunks WHERE document_path = ?", path)
 	if err != nil {
 		return err
@@ -120,7 +177,15 @@ func (db *DB) DeleteDocument(path string) error {
 	if err := tx.Commit(); err != nil {
 		return err
 	}
-	db.vectorIndex = nil
+
+	if db.vectorIndex != nil && db.vectorIndex.IsReady() {
+		for _, id := range chunkIDs {
+			db.vectorIndex.RemoveChunk(id)
+		}
+		if db.vectorIndex.NeedsRebuild() {
+			db.rebuildVectorIndex()
+		}
+	}
 	return nil
 }
 
@@ -186,8 +251,15 @@ func (db *DB) SaveChunks(chunks []*Chunk) error {
 		return err
 	}
 
-	// Invalidate the vector index so it is rebuilt on the next search.
-	db.vectorIndex = nil
+	// Keep the IVF index warm by adding the new chunks incrementally.  If the
+	// index has never been built, leave it nil so the next search constructs it
+	// lazily from the full chunks table.
+	if db.vectorIndex != nil && db.vectorIndex.IsReady() {
+		db.vectorIndex.AddChunks(chunks)
+		if db.vectorIndex.NeedsRebuild() {
+			db.rebuildVectorIndex()
+		}
+	}
 	return nil
 }
 

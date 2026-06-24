@@ -6,13 +6,21 @@ import (
 	"sync"
 )
 
+// rebuildChurnThreshold is the fraction of the indexed corpus that must be
+// added or deleted before a full re-cluster is triggered.  Keeping this low
+// enough prevents recall drift from centroid drift, while high enough avoids
+// rebuilding on every small write.
+const rebuildChurnThreshold = 0.10
+
 // VectorIndex is an in-memory IVF (Inverted File) index for approximate
 // nearest neighbor search.  It partitions chunk embeddings into K buckets
 // by centroid proximity so that a query only needs to score the chunks in
 // the nprobe nearest buckets instead of the full corpus.
 //
-// The index is NOT persisted — it is built lazily from the chunks table
-// on first use and invalidated whenever the underlying data changes.
+// The index supports incremental updates: writes add or remove chunk IDs
+// from the inverted lists without discarding the whole index.  A full
+// re-cluster is triggered once the fraction of added/removed chunks exceeds
+// rebuildChurnThreshold.
 type VectorIndex struct {
 	dim       int
 	centroids [][]float32
@@ -22,6 +30,13 @@ type VectorIndex struct {
 	totalN    int
 	ready     bool
 	mu        sync.RWMutex
+
+	// churn tracks how many chunks have been added/removed since the last
+	// full rebuild.  It is used to decide when centroid drift warrants a
+	// re-cluster.
+	churnAdded   int
+	churnDeleted int
+	baseTotalN   int
 }
 
 // NewVectorIndex creates a new, empty VectorIndex.
@@ -36,14 +51,39 @@ func (vi *VectorIndex) Build(chunks []*Chunk) {
 	vi.mu.Lock()
 	defer vi.mu.Unlock()
 
+	vi.resetState()
 	if len(chunks) == 0 {
-		vi.ready = false
 		return
 	}
 
 	vi.dim = len(chunks[0].Embedding)
 	vi.totalN = len(chunks)
 
+	vi.initializeCentroids(chunks)
+	if vi.k == 0 {
+		return
+	}
+
+	vi.runKMeans(chunks)
+	vi.reseedEmptyBuckets(chunks)
+	vi.ready = true
+	vi.baseTotalN = vi.totalN
+}
+
+func (vi *VectorIndex) resetState() {
+	vi.dim = 0
+	vi.centroids = nil
+	vi.inverted = nil
+	vi.k = 0
+	vi.nprobe = 0
+	vi.totalN = 0
+	vi.ready = false
+	vi.churnAdded = 0
+	vi.churnDeleted = 0
+	vi.baseTotalN = 0
+}
+
+func (vi *VectorIndex) initializeCentroids(chunks []*Chunk) {
 	// Determine K: sqrt(N), clamped to [4, 256].
 	k := int(math.Sqrt(float64(vi.totalN)))
 	if k < 4 {
@@ -77,61 +117,220 @@ func (vi *VectorIndex) Build(chunks []*Chunk) {
 	if vi.nprobe > vi.k {
 		vi.nprobe = vi.k
 	}
+}
+
+func (vi *VectorIndex) runKMeans(chunks []*Chunk) {
+	vi.inverted = make([][]int64, vi.k)
 
 	// Run 3 iterations of k-means assignment.
-	vi.inverted = make([][]int64, vi.k)
 	for iter := 0; iter < 3; iter++ {
+		// Sums and counts for each bucket, accumulated in a single pass.
+		sums := make([][]float64, vi.k)
+		counts := make([]int, vi.k)
+		for b := range sums {
+			sums[b] = make([]float64, vi.dim)
+		}
+
 		// Clear buckets.
 		for b := range vi.inverted {
 			vi.inverted[b] = vi.inverted[b][:0]
 		}
 
-		// Assign each chunk to its nearest centroid.
+		// Assign each chunk to its nearest centroid and accumulate bucket sums.
 		for _, chunk := range chunks {
-			bestBucket := 0
-			bestScore := float32(-2)
-			for bi, cent := range vi.centroids {
-				score := CosineSimilarity(chunk.Embedding, cent)
-				if score > bestScore {
-					bestScore = score
-					bestBucket = bi
-				}
-			}
+			bestBucket := vi.nearestCentroid(chunk.Embedding)
 			vi.inverted[bestBucket] = append(vi.inverted[bestBucket], chunk.ID)
+			counts[bestBucket]++
+			sum := sums[bestBucket]
+			for d := 0; d < vi.dim; d++ {
+				sum[d] += float64(chunk.Embedding[d])
+			}
 		}
 
-		// Update centroids to the mean of their assigned chunks.
+		// Update centroids from the single-pass sums.
 		for bi := 0; bi < vi.k; bi++ {
-			ids := vi.inverted[bi]
-			if len(ids) == 0 {
+			if counts[bi] == 0 {
 				continue
 			}
-			// Build an ID set for O(1) lookup.
-			idSet := make(map[int64]struct{}, len(ids))
-			for _, id := range ids {
-				idSet[id] = struct{}{}
-			}
 			mean := make([]float32, vi.dim)
-			count := 0
-			for _, chunk := range chunks {
-				if _, ok := idSet[chunk.ID]; ok {
-					for d := 0; d < vi.dim; d++ {
-						mean[d] += chunk.Embedding[d]
-					}
-					count++
-				}
+			inv := float64(counts[bi])
+			for d := 0; d < vi.dim; d++ {
+				mean[d] = float32(sums[bi][d] / inv)
 			}
-			if count > 0 {
-				inv := float32(count)
-				for d := 0; d < vi.dim; d++ {
-					mean[d] /= inv
-				}
-				vi.centroids[bi] = mean
-			}
+			vi.centroids[bi] = mean
+		}
+	}
+}
+
+func (vi *VectorIndex) nearestCentroid(vec []float32) int {
+	bestBucket := 0
+	bestScore := float32(-2)
+	for bi, cent := range vi.centroids {
+		score := CosineSimilarity(vec, cent)
+		if score > bestScore {
+			bestScore = score
+			bestBucket = bi
+		}
+	}
+	return bestBucket
+}
+
+// reseedEmptyBuckets relocates the centroids of buckets that ended up with
+// no assigned chunks by splitting the largest bucket.  This improves cluster
+// balance and prefilter recall, especially on skewed data.
+func (vi *VectorIndex) reseedEmptyBuckets(chunks []*Chunk) {
+	if len(chunks) == 0 {
+		return
+	}
+
+	emptyBuckets := make([]int, 0)
+	largestBucket := -1
+	largestSize := 0
+	for bi, ids := range vi.inverted {
+		if len(ids) == 0 {
+			emptyBuckets = append(emptyBuckets, bi)
+		} else if len(ids) > largestSize {
+			largestSize = len(ids)
+			largestBucket = bi
 		}
 	}
 
-	vi.ready = true
+	if largestBucket < 0 || len(emptyBuckets) == 0 {
+		return
+	}
+
+	// Build a quick lookup from chunk ID to embedding so we can recompute
+	// centroids from actual chunk vectors rather than stale means.
+	embeddingByID := make(map[int64][]float32, len(chunks))
+	for _, c := range chunks {
+		embeddingByID[c.ID] = c.Embedding
+	}
+
+	for _, emptyBi := range emptyBuckets {
+		// Split the largest bucket: move the second half of its IDs to the
+		// empty bucket and recompute both centroids.
+		srcIDs := vi.inverted[largestBucket]
+		if len(srcIDs) < 2 {
+			// Nothing useful to split; seed from a random chunk.
+			seed := embeddingByID[chunks[emptyBi%len(chunks)].ID]
+			newCent := make([]float32, vi.dim)
+			copy(newCent, seed)
+			vi.centroids[emptyBi] = newCent
+			continue
+		}
+
+		split := len(srcIDs) / 2
+		newIDs := make([]int64, split)
+		copy(newIDs, srcIDs[split:])
+		vi.inverted[largestBucket] = srcIDs[:split]
+		vi.inverted[emptyBi] = newIDs
+
+		// Recompute both centroids from the split IDs.
+		vi.recomputeCentroid(largestBucket, embeddingByID)
+		vi.recomputeCentroid(emptyBi, embeddingByID)
+
+		// The formerly largest bucket is now smaller; find the new largest.
+		largestBucket = emptyBi
+		largestSize = len(newIDs)
+		for bi, ids := range vi.inverted {
+			if len(ids) > largestSize {
+				largestSize = len(ids)
+				largestBucket = bi
+			}
+		}
+	}
+}
+
+func (vi *VectorIndex) recomputeCentroid(bucket int, embeddingByID map[int64][]float32) {
+	ids := vi.inverted[bucket]
+	if len(ids) == 0 {
+		return
+	}
+	mean := make([]float64, vi.dim)
+	for _, id := range ids {
+		emb := embeddingByID[id]
+		for d := 0; d < vi.dim; d++ {
+			mean[d] += float64(emb[d])
+		}
+	}
+	inv := float64(len(ids))
+	newCent := make([]float32, vi.dim)
+	for d := 0; d < vi.dim; d++ {
+		newCent[d] = float32(mean[d] / inv)
+	}
+	vi.centroids[bucket] = newCent
+}
+
+// AddChunks assigns the given chunks to their nearest existing centroid and
+// appends their IDs to the inverted lists.  It updates churn so that a full
+// rebuild can be triggered once enough new chunks have arrived.
+func (vi *VectorIndex) AddChunks(chunks []*Chunk) {
+	vi.mu.Lock()
+	defer vi.mu.Unlock()
+
+	if !vi.ready || vi.k == 0 {
+		return
+	}
+
+	for _, chunk := range chunks {
+		if len(chunk.Embedding) != vi.dim {
+			continue
+		}
+		bestBucket := vi.nearestCentroid(chunk.Embedding)
+		vi.inverted[bestBucket] = append(vi.inverted[bestBucket], chunk.ID)
+		vi.totalN++
+		vi.churnAdded++
+	}
+}
+
+// RemoveChunk deletes a chunk ID from every inverted list.  It updates churn
+// so that a full rebuild can be triggered once enough chunks have been
+// removed.
+func (vi *VectorIndex) RemoveChunk(id int64) {
+	vi.mu.Lock()
+	defer vi.mu.Unlock()
+
+	if !vi.ready || vi.k == 0 {
+		return
+	}
+
+	for bi := range vi.inverted {
+		ids := vi.inverted[bi]
+		for i, existing := range ids {
+			if existing == id {
+				vi.inverted[bi] = append(ids[:i], ids[i+1:]...)
+				vi.totalN--
+				vi.churnDeleted++
+				break
+			}
+		}
+	}
+}
+
+// NeedsRebuild reports whether the incremental churn since the last rebuild
+// has exceeded the configured threshold.
+func (vi *VectorIndex) NeedsRebuild() bool {
+	vi.mu.RLock()
+	defer vi.mu.RUnlock()
+
+	if !vi.ready {
+		return false
+	}
+	base := vi.baseTotalN
+	if base == 0 {
+		base = vi.totalN
+	}
+	if base == 0 {
+		return false
+	}
+	churn := vi.churnAdded + vi.churnDeleted
+	return float64(churn) > rebuildChurnThreshold*float64(base)
+}
+
+// Rebuild performs a full re-cluster from the supplied chunks and resets
+// churn tracking.
+func (vi *VectorIndex) Rebuild(chunks []*Chunk) {
+	vi.Build(chunks)
 }
 
 // CandidateIDs returns chunk IDs from the nprobe nearest centroid buckets.
@@ -214,7 +413,7 @@ func (vi *VectorIndex) BucketCount() int {
 	return vi.k
 }
 
-// TotalChunks returns the number of chunks that were indexed.
+// TotalChunks returns the number of chunks that are indexed.
 func (vi *VectorIndex) TotalChunks() int {
 	vi.mu.RLock()
 	defer vi.mu.RUnlock()
