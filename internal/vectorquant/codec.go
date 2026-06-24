@@ -434,3 +434,146 @@ func UnmarshalMetadata(data []byte) (*Metadata, error) {
 func CodecFromMetadata(meta *Metadata) (*Codec, error) {
 	return NewCodec(meta.Dim, BitWidth(meta.BitWidth), meta.Seed, meta.BlockSize)
 }
+
+// ---------------------------------------------------------------------------
+// Sidecar integration — bridges the vectorquant codec with the database
+// quantised sidecar columns (db.QuantSidecarMeta).
+//
+// The sidecar BLOB format prepends 8 bytes (2 × float32 little-endian) for
+// the per-vector quantisation min/max, followed by the packed bit indices.
+// The JSON metadata mirrors db.QuantSidecarMeta's JSON shape so it can be
+// serialised directly into the embedding_quant_meta TEXT column.
+// ---------------------------------------------------------------------------
+
+// sidecarHeaderBytes is the number of bytes prepended to the packed code
+// in the sidecar BLOB to store Min and Max as float32 little-endian.
+const sidecarHeaderBytes = 8
+
+// SidecarMeta is the JSON-serialisable metadata stored alongside a
+// quantised sidecar.  Its JSON tags match db.QuantSidecarMeta so the
+// two types are wire-compatible; vectorquant does not import db to
+// preserve the layering boundary.
+type SidecarMeta struct {
+	CodecVersion   int     `json:"codec_version"`
+	Dimension      int     `json:"dimension"`
+	BitWidth       int     `json:"bit_width"`
+	QuantizerMode  string  `json:"quantizer_mode"`
+	ProjectionSeed int64   `json:"projection_seed,omitempty"`
+	Norm           float32 `json:"norm,omitempty"`
+}
+
+// CodecVersion is the current codec wire version.  Bump whenever the
+// quantisation algorithm or packed layout changes.
+const CodecVersion = 1
+
+// EncodeSidecar encodes a float32 vector and returns the sidecar BLOB
+// (packed code with min/max header) together with the JSON-serialisable
+// SidecarMeta ready for database storage.
+//
+// The caller passes the L2 norm of the original vector (0 if unknown).
+// The returned SidecarMeta is wire-compatible with db.QuantSidecarMeta.
+func (c *Codec) EncodeSidecar(vec []float32, norm float32) ([]byte, *SidecarMeta, error) {
+	code, err := c.Encode(vec)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Pack min/max as float32 LE prefix.
+	blob := make([]byte, sidecarHeaderBytes+len(code.Bytes))
+	binary.LittleEndian.PutUint32(blob[0:4], math.Float32bits(float32(code.Min)))
+	binary.LittleEndian.PutUint32(blob[4:8], math.Float32bits(float32(code.Max)))
+	copy(blob[sidecarHeaderBytes:], code.Bytes)
+
+	meta := &SidecarMeta{
+		CodecVersion:   CodecVersion,
+		Dimension:      c.Dim,
+		BitWidth:       int(c.BitWidth),
+		QuantizerMode:  "scalar",
+		ProjectionSeed: int64(c.Seed),
+		Norm:           norm,
+	}
+	return blob, meta, nil
+}
+
+// DecodeSidecar reconstructs an approximate float32 vector from a sidecar
+// BLOB and its SidecarMeta.  The meta is validated against the codec's
+// expectations before decoding.
+func DecodeSidecar(blob []byte, meta *SidecarMeta) ([]float32, error) {
+	codec, err := CodecFromSidecarMeta(meta)
+	if err != nil {
+		return nil, err
+	}
+	code, err := UnpackSidecarBlob(blob)
+	if err != nil {
+		return nil, err
+	}
+	return codec.Decode(code)
+}
+
+// CodecFromSidecarMeta reconstructs a Codec from a SidecarMeta (the
+// JSON metadata stored in the database).  It validates that the
+// metadata is complete and uses a supported codec version.
+func CodecFromSidecarMeta(meta *SidecarMeta) (*Codec, error) {
+	if meta == nil {
+		return nil, fmt.Errorf("%w: nil sidecar metadata", ErrInvalidSidecarMeta)
+	}
+	if meta.CodecVersion != CodecVersion {
+		return nil, fmt.Errorf("%w: codec_version=%d, want %d",
+			ErrCodecVersionMismatch, meta.CodecVersion, CodecVersion)
+	}
+	if meta.Dimension <= 0 {
+		return nil, fmt.Errorf("%w: dimension=%d", ErrDimMismatch, meta.Dimension)
+	}
+	if meta.BitWidth <= 0 {
+		return nil, fmt.Errorf("%w: bit_width=%d", ErrInvalidBitWidth, meta.BitWidth)
+	}
+	return NewCodec(meta.Dimension, BitWidth(meta.BitWidth), int(meta.ProjectionSeed), 0)
+}
+
+// UnpackSidecarBlob extracts the min/max header and packed code bytes
+// from a sidecar BLOB produced by EncodeSidecar.
+func UnpackSidecarBlob(blob []byte) (*PackedCode, error) {
+	if len(blob) < sidecarHeaderBytes {
+		return nil, fmt.Errorf("%w: blob %d bytes, need >= %d",
+			ErrCodeTooShort, len(blob), sidecarHeaderBytes)
+	}
+	minBits := binary.LittleEndian.Uint32(blob[0:4])
+	maxBits := binary.LittleEndian.Uint32(blob[4:8])
+	return &PackedCode{
+		Bytes: blob[sidecarHeaderBytes:],
+		Min:   float64(math.Float32frombits(minBits)),
+		Max:   float64(math.Float32frombits(maxBits)),
+	}, nil
+}
+
+// ValidateSidecarMeta checks that meta is internally consistent and
+// matches the given codec.  Returns nil when valid.
+func ValidateSidecarMeta(meta *SidecarMeta, c *Codec) error {
+	if meta == nil {
+		return fmt.Errorf("%w: nil sidecar metadata", ErrInvalidSidecarMeta)
+	}
+	if meta.CodecVersion != CodecVersion {
+		return fmt.Errorf("%w: codec_version=%d, want %d",
+			ErrCodecVersionMismatch, meta.CodecVersion, CodecVersion)
+	}
+	if meta.Dimension != c.Dim {
+		return fmt.Errorf("%w: meta dimension=%d, codec dimension=%d",
+			ErrDimMismatch, meta.Dimension, c.Dim)
+	}
+	if BitWidth(meta.BitWidth) != c.BitWidth {
+		return fmt.Errorf("%w: meta bit_width=%d, codec bit_width=%d",
+			ErrInvalidBitWidth, meta.BitWidth, int(c.BitWidth))
+	}
+	if int(meta.ProjectionSeed) != c.Seed {
+		return fmt.Errorf("%w: meta projection_seed=%d, codec seed=%d",
+			ErrSeedMismatch, meta.ProjectionSeed, c.Seed)
+	}
+	return nil
+}
+
+// Errors specific to sidecar integration.
+var (
+	ErrInvalidSidecarMeta = errors.New("vectorquant: invalid sidecar metadata")
+	ErrCodecVersionMismatch = errors.New("vectorquant: sidecar codec version mismatch")
+	ErrSeedMismatch       = errors.New("vectorquant: sidecar seed mismatch")
+)

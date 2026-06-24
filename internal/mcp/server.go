@@ -21,12 +21,13 @@ import (
 
 var ServerVersion = "dev"
 
-func StartServer(cfg engine.OllamaConfig) error {
+func StartServer(cfg engine.OllamaConfig, quantCfg *db.QuantConfig) error {
 	dbClient, err := db.Open()
 	if err != nil {
 		return fmt.Errorf("failed to open database: %w", err)
 	}
 	defer dbClient.Close()
+	dbClient.SetQuantConfig(quantCfg)
 
 	embedder := engine.NewEmbeddingsGeneratorWithOllamaConfig(cfg)
 	server := mcpserver.New("symseek", ServerVersion)

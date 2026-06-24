@@ -41,7 +41,34 @@ type SearchResult struct {
 type DB struct {
 	conn        *sql.DB
 	vectorIndex *VectorIndex
-	generation  int64 // index_meta 'generation' value last seen by this process
+	generation  int64
+	quantConfig *QuantConfig
+}
+
+// QuantConfig holds opt-in parameters for TurboQuant quantized vector search.
+type QuantConfig struct {
+	Enabled      bool
+	BitWidth     int
+	Shortlist    int
+	ExactRerank  bool
+	Seed         int
+}
+
+// SetQuantConfig enables or reconfigures quantized search on this DB handle.
+// A nil or disabled config falls back to the standard search path.
+func (db *DB) SetQuantConfig(cfg *QuantConfig) {
+	if cfg != nil && cfg.BitWidth == 0 {
+		cfg.BitWidth = 4
+	}
+	if cfg != nil && cfg.Shortlist <= 0 {
+		cfg.Shortlist = 200
+	}
+	db.quantConfig = cfg
+}
+
+// QuantConfig returns the current quantization configuration, or nil if disabled.
+func (db *DB) GetQuantConfig() *QuantConfig {
+	return db.quantConfig
 }
 
 type Store interface {

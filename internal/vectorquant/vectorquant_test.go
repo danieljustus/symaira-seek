@@ -1,6 +1,7 @@
 package vectorquant
 
 import (
+	"encoding/json"
 	"math"
 	"math/rand"
 	"testing"
@@ -513,5 +514,190 @@ func TestRealisticFixture(t *testing.T) {
 			t.Errorf("dbVec %d not normalized: norm=%f", i, norm)
 			break
 		}
+	}
+}
+
+func TestSidecarEncodeDecodeRoundTrip(t *testing.T) {
+	for _, bw := range []BitWidth{BitWidth2, BitWidth3, BitWidth4} {
+		t.Run(bw.String(), func(t *testing.T) {
+			dim := 128
+			codec, err := NewCodec(dim, bw, 42, 0)
+			if err != nil {
+				t.Fatalf("NewCodec: %v", err)
+			}
+
+			rng := rand.New(rand.NewSource(7))
+			vec := make([]float32, dim)
+			for i := range vec {
+				vec[i] = float32(rng.NormFloat64())
+			}
+
+			var norm float64
+			for _, v := range vec {
+				norm += float64(v) * float64(v)
+			}
+			norm32 := float32(math.Sqrt(norm))
+
+			blob, meta, err := codec.EncodeSidecar(vec, norm32)
+			if err != nil {
+				t.Fatalf("EncodeSidecar: %v", err)
+			}
+
+			if meta.CodecVersion != CodecVersion {
+				t.Errorf("CodecVersion: got %d, want %d", meta.CodecVersion, CodecVersion)
+			}
+			if meta.Dimension != dim {
+				t.Errorf("Dimension: got %d, want %d", meta.Dimension, dim)
+			}
+			if meta.BitWidth != int(bw) {
+				t.Errorf("BitWidth: got %d, want %d", meta.BitWidth, int(bw))
+			}
+			if meta.Norm != norm32 {
+				t.Errorf("Norm: got %f, want %f", meta.Norm, norm32)
+			}
+			if meta.QuantizerMode != "scalar" {
+				t.Errorf("QuantizerMode: got %q, want %q", meta.QuantizerMode, "scalar")
+			}
+
+			decoded, err := DecodeSidecar(blob, meta)
+			if err != nil {
+				t.Fatalf("DecodeSidecar: %v", err)
+			}
+			if len(decoded) != dim {
+				t.Fatalf("decoded dim: got %d, want %d", len(decoded), dim)
+			}
+
+			totalMSE := 0.0
+			for i := range vec {
+				diff := float64(vec[i]) - float64(decoded[i])
+				totalMSE += diff * diff
+			}
+			mse := totalMSE / float64(dim)
+
+			maxMSE := 0.5
+			switch bw {
+			case BitWidth4:
+				maxMSE = 0.05
+			case BitWidth3:
+				maxMSE = 0.2
+			case BitWidth2:
+				maxMSE = 0.5
+			}
+			if mse > maxMSE {
+				t.Errorf("Sidecar round-trip MSE too high for %s: %f (max %f)", bw, mse, maxMSE)
+			}
+		})
+	}
+}
+
+func TestSidecarMetaValidationMismatch(t *testing.T) {
+	codec, _ := NewCodec(128, BitWidth3, 42, 0)
+
+	meta := &SidecarMeta{
+		CodecVersion:   CodecVersion,
+		Dimension:      128,
+		BitWidth:       int(BitWidth3),
+		QuantizerMode:  "scalar",
+		ProjectionSeed: 42,
+	}
+	if err := ValidateSidecarMeta(meta, codec); err != nil {
+		t.Errorf("expected valid meta, got %v", err)
+	}
+
+	badDim := *meta
+	badDim.Dimension = 256
+	if err := ValidateSidecarMeta(&badDim, codec); err == nil {
+		t.Error("expected error for dimension mismatch")
+	}
+
+	badBW := *meta
+	badBW.BitWidth = int(BitWidth4)
+	if err := ValidateSidecarMeta(&badBW, codec); err == nil {
+		t.Error("expected error for bit width mismatch")
+	}
+
+	badSeed := *meta
+	badSeed.ProjectionSeed = 999
+	if err := ValidateSidecarMeta(&badSeed, codec); err == nil {
+		t.Error("expected error for seed mismatch")
+	}
+
+	badVersion := *meta
+	badVersion.CodecVersion = 99
+	if err := ValidateSidecarMeta(&badVersion, codec); err == nil {
+		t.Error("expected error for version mismatch")
+	}
+
+	if err := ValidateSidecarMeta(nil, codec); err == nil {
+		t.Error("expected error for nil meta")
+	}
+}
+
+func TestCodecFromSidecarMetaErrors(t *testing.T) {
+	_, err := CodecFromSidecarMeta(nil)
+	if err == nil {
+		t.Error("expected error for nil meta")
+	}
+
+	_, err = CodecFromSidecarMeta(&SidecarMeta{CodecVersion: 99, Dimension: 128, BitWidth: 3})
+	if err == nil {
+		t.Error("expected error for wrong codec version")
+	}
+
+	_, err = CodecFromSidecarMeta(&SidecarMeta{CodecVersion: CodecVersion, Dimension: 0, BitWidth: 3})
+	if err == nil {
+		t.Error("expected error for zero dimension")
+	}
+
+	_, err = CodecFromSidecarMeta(&SidecarMeta{CodecVersion: CodecVersion, Dimension: 128, BitWidth: 0})
+	if err == nil {
+		t.Error("expected error for zero bit width")
+	}
+}
+
+func TestUnpackSidecarBlobTooShort(t *testing.T) {
+	_, err := UnpackSidecarBlob([]byte{1, 2, 3})
+	if err == nil {
+		t.Error("expected error for short blob")
+	}
+}
+
+func TestSidecarMetaJSONCompatibility(t *testing.T) {
+	meta := SidecarMeta{
+		CodecVersion:   1,
+		Dimension:      768,
+		BitWidth:       4,
+		QuantizerMode:  "scalar",
+		ProjectionSeed: 1337,
+		Norm:           1.5,
+	}
+
+	raw, err := json.Marshal(meta)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+
+	var parsed map[string]interface{}
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+
+	if parsed["codec_version"].(float64) != 1 {
+		t.Errorf("codec_version: got %v, want 1", parsed["codec_version"])
+	}
+	if parsed["dimension"].(float64) != 768 {
+		t.Errorf("dimension: got %v, want 768", parsed["dimension"])
+	}
+	if parsed["bit_width"].(float64) != 4 {
+		t.Errorf("bit_width: got %v, want 4", parsed["bit_width"])
+	}
+	if parsed["quantizer_mode"].(string) != "scalar" {
+		t.Errorf("quantizer_mode: got %v, want scalar", parsed["quantizer_mode"])
+	}
+	if parsed["projection_seed"].(float64) != 1337 {
+		t.Errorf("projection_seed: got %v, want 1337", parsed["projection_seed"])
+	}
+	if parsed["norm"].(float64) != 1.5 {
+		t.Errorf("norm: got %v, want 1.5", parsed["norm"])
 	}
 }
