@@ -2,8 +2,15 @@ package db
 
 import (
 	"fmt"
+	"math"
+	"sort"
 	"strings"
 )
+
+// binarySignatureCandidateMultiplier controls the Hamming shortlist size as
+// limit * multiplier, capped at the total row count. Higher values improve
+// recall at the cost of more cosine computations in stage 2.
+const binarySignatureCandidateMultiplier = 4
 
 func escapeFTS5Query(query string) string {
 	replacer := strings.NewReplacer(
@@ -63,7 +70,7 @@ func (db *DB) SearchBM25(queryStr string, limit int) ([]*SearchResult, error) {
 // needs only the embedding and its precomputed norm. Streaming every chunk's
 // text on every query is the dominant cost on large indexes, so content is
 // fetched afterwards for just the surviving top-k rows (see hydrateContent).
-const searchVectorScanSelect = "SELECT id, uuid, document_path, chunk_index, embedding, hash, norm FROM chunks"
+const searchVectorScanSelect = "SELECT id, uuid, document_path, chunk_index, embedding, hash, norm, binary_signature FROM chunks"
 
 func (db *DB) SearchVector(queryVec []float32, limit int) ([]*SearchResult, error) {
 	if limit <= 0 {
@@ -86,7 +93,49 @@ func (db *DB) SearchVector(queryVec []float32, limit int) ([]*SearchResult, erro
 	return db.searchVectorFullScan(queryVec, queryNorm, limit)
 }
 
-// searchVectorFiltered scores only the given candidate chunk IDs.
+func hammingDistFallback(query, stored []byte) int {
+	if stored == nil {
+		return math.MaxInt
+	}
+	return HammingDistance(query, stored)
+}
+
+type rowEntry struct {
+	chunk    Chunk
+	embBytes []byte
+	sigBytes []byte
+	norm     float32
+}
+
+// hammingShortlist ranks allRows by Hamming distance from querySig and returns
+// the top candidates for cosine rescoring. When the Hamming pre-filter
+// provides no discrimination (all distances equal, querySig nil, or the
+// shortlist covers all rows), it returns all rows so exact cosine scoring is
+// preserved.
+func hammingShortlist(allRows []rowEntry, querySig []byte, limit int) []rowEntry {
+	hammingSize := limit * binarySignatureCandidateMultiplier
+	if hammingSize > len(allRows) {
+		hammingSize = len(allRows)
+	}
+
+	hammingEffective := false
+	if querySig != nil && len(allRows) > 1 && hammingSize < len(allRows) {
+		sort.SliceStable(allRows, func(i, j int) bool {
+			return hammingDistFallback(querySig, allRows[i].sigBytes) < hammingDistFallback(querySig, allRows[j].sigBytes)
+		})
+		minDist := hammingDistFallback(querySig, allRows[0].sigBytes)
+		maxDist := hammingDistFallback(querySig, allRows[hammingSize-1].sigBytes)
+		hammingEffective = (minDist != maxDist)
+	}
+
+	if hammingEffective {
+		return allRows[:hammingSize]
+	}
+	return allRows
+}
+
+// searchVectorFiltered scores the given candidate chunk IDs using a two-stage
+// Hamming pre-filter followed by exact cosine rescoring on a shortlist.
 func (db *DB) searchVectorFiltered(queryVec []float32, queryNorm float32, candidateIDs []int64, limit int) ([]*SearchResult, error) {
 	placeholders := make([]string, len(candidateIDs))
 	args := make([]interface{}, len(candidateIDs))
@@ -96,7 +145,7 @@ func (db *DB) searchVectorFiltered(queryVec []float32, queryNorm float32, candid
 	}
 
 	query := fmt.Sprintf(
-		"SELECT id, uuid, document_path, chunk_index, embedding, hash, norm FROM chunks WHERE id IN (%s)",
+		"SELECT id, uuid, document_path, chunk_index, embedding, hash, norm, binary_signature FROM chunks WHERE id IN (%s)",
 		strings.Join(placeholders, ","),
 	)
 
@@ -106,38 +155,50 @@ func (db *DB) searchVectorFiltered(queryVec []float32, queryNorm float32, candid
 	}
 	defer rows.Close()
 
-	results := make([]*SearchResult, 0, limit)
+	var allRows []rowEntry
 	for rows.Next() {
-		var c Chunk
-		var embBytes []byte
-		var norm float32
-		if err := rows.Scan(&c.ID, &c.UUID, &c.DocumentPath, &c.ChunkIndex, &embBytes, &c.Hash, &norm); err != nil {
+		var e rowEntry
+		var sigPtr *[]byte
+		if err := rows.Scan(&e.chunk.ID, &e.chunk.UUID, &e.chunk.DocumentPath, &e.chunk.ChunkIndex, &e.embBytes, &e.chunk.Hash, &e.norm, &sigPtr); err != nil {
 			return nil, err
 		}
-		c.Norm = norm
+		if sigPtr != nil {
+			e.sigBytes = *sigPtr
+		}
+		e.chunk.Norm = e.norm
+		allRows = append(allRows, e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	querySig := SignBinarySignature(queryVec)
+	shortlist := hammingShortlist(allRows, querySig, limit)
+
+	results := make([]*SearchResult, 0, limit)
+	for i := range shortlist {
+		e := &shortlist[i]
+		c := &e.chunk
 
 		var score float32
-		if queryNorm > 0 && norm > 0 {
-			score = CosineSimilarityWithStoredNorm(queryVec, embBytes, queryNorm, norm)
+		if queryNorm > 0 && e.norm > 0 {
+			score = CosineSimilarityWithStoredNorm(queryVec, e.embBytes, queryNorm, e.norm)
 		} else {
-			c.Embedding = BytesToFloat32Slice(embBytes)
+			c.Embedding = BytesToFloat32Slice(e.embBytes)
 			score = CosineSimilarity(queryVec, c.Embedding)
 		}
 
 		if len(results) < limit {
 			results = appendSortedByScoreDesc(results, &SearchResult{
-				Chunk:       &c,
+				Chunk:       c,
 				CosineScore: score,
 			})
 		} else if score > results[limit-1].CosineScore {
 			results = appendSortedByScoreDesc(results[:limit-1], &SearchResult{
-				Chunk:       &c,
+				Chunk:       c,
 				CosineScore: score,
 			})
 		}
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
 	}
 
 	for i, r := range results {
@@ -150,8 +211,9 @@ func (db *DB) searchVectorFiltered(queryVec []float32, queryNorm float32, candid
 	return results, nil
 }
 
-// searchVectorFullScan scans every chunk, scores it, and builds the IVF
-// index on the first call so that subsequent queries use the prefilter.
+// searchVectorFullScan scans every chunk, applies a Hamming pre-filter to
+// shortlist rows for exact cosine rescoring, and builds the IVF index on the
+// first call so that subsequent queries use the prefilter.
 func (db *DB) searchVectorFullScan(queryVec []float32, queryNorm float32, limit int) ([]*SearchResult, error) {
 	rows, err := db.conn.Query(searchVectorScanSelect)
 	if err != nil {
@@ -162,12 +224,95 @@ func (db *DB) searchVectorFullScan(queryVec []float32, queryNorm float32, limit 
 	needIndex := db.vectorIndex == nil || !db.vectorIndex.IsReady()
 	var indexChunks []*Chunk
 
+	var allRows []rowEntry
+	for rows.Next() {
+		var e rowEntry
+		var sigPtr *[]byte
+		if err := rows.Scan(&e.chunk.ID, &e.chunk.UUID, &e.chunk.DocumentPath, &e.chunk.ChunkIndex, &e.embBytes, &e.chunk.Hash, &e.norm, &sigPtr); err != nil {
+			return nil, err
+		}
+		if sigPtr != nil {
+			e.sigBytes = *sigPtr
+		}
+		e.chunk.Norm = e.norm
+
+		if needIndex {
+			e.chunk.Embedding = BytesToFloat32Slice(e.embBytes)
+			indexChunks = append(indexChunks, &Chunk{ID: e.chunk.ID, Embedding: e.chunk.Embedding})
+		}
+
+		allRows = append(allRows, e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	if needIndex && len(indexChunks) >= indexBuildThreshold {
+		if db.vectorIndex == nil {
+			db.vectorIndex = NewVectorIndex()
+		}
+		db.vectorIndex.Build(indexChunks)
+		db.saveVectorIndex()
+	}
+
+	querySig := SignBinarySignature(queryVec)
+	shortlist := hammingShortlist(allRows, querySig, limit)
+
+	results := make([]*SearchResult, 0, limit)
+	for i := range shortlist {
+		e := &shortlist[i]
+		c := &e.chunk
+
+		var score float32
+		if queryNorm > 0 && e.norm > 0 {
+			score = CosineSimilarityWithStoredNorm(queryVec, e.embBytes, queryNorm, e.norm)
+		} else {
+			if c.Embedding == nil {
+				c.Embedding = BytesToFloat32Slice(e.embBytes)
+			}
+			score = CosineSimilarity(queryVec, c.Embedding)
+		}
+
+		if len(results) < limit {
+			results = appendSortedByScoreDesc(results, &SearchResult{
+				Chunk:       c,
+				CosineScore: score,
+			})
+		} else if score > results[limit-1].CosineScore {
+			results = appendSortedByScoreDesc(results[:limit-1], &SearchResult{
+				Chunk:       c,
+				CosineScore: score,
+			})
+		}
+	}
+
+	for i, r := range results {
+		r.VectorRank = i + 1
+	}
+
+	if err := db.hydrateContent(results); err != nil {
+		return nil, err
+	}
+	return results, nil
+}
+
+// searchVectorFullScanCosine scores every chunk with exact cosine similarity
+// without binary pre-filtering. Used as a baseline for benchmarks and recall
+// tests.
+func (db *DB) searchVectorFullScanCosine(queryVec []float32, queryNorm float32, limit int) ([]*SearchResult, error) {
+	rows, err := db.conn.Query(searchVectorScanSelect)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
 	results := make([]*SearchResult, 0, limit)
 	for rows.Next() {
 		var c Chunk
 		var embBytes []byte
 		var norm float32
-		if err := rows.Scan(&c.ID, &c.UUID, &c.DocumentPath, &c.ChunkIndex, &embBytes, &c.Hash, &norm); err != nil {
+		var sigPtr *[]byte // ignore binary_signature
+		if err := rows.Scan(&c.ID, &c.UUID, &c.DocumentPath, &c.ChunkIndex, &embBytes, &c.Hash, &norm, &sigPtr); err != nil {
 			return nil, err
 		}
 		c.Norm = norm
@@ -191,24 +336,9 @@ func (db *DB) searchVectorFullScan(queryVec []float32, queryNorm float32, limit 
 				CosineScore: score,
 			})
 		}
-
-		if needIndex {
-			if c.Embedding == nil {
-				c.Embedding = BytesToFloat32Slice(embBytes)
-			}
-			indexChunks = append(indexChunks, &Chunk{ID: c.ID, Embedding: c.Embedding})
-		}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
-	}
-
-	if needIndex && len(indexChunks) >= indexBuildThreshold {
-		if db.vectorIndex == nil {
-			db.vectorIndex = NewVectorIndex()
-		}
-		db.vectorIndex.Build(indexChunks)
-		db.saveVectorIndex()
 	}
 
 	for i, r := range results {

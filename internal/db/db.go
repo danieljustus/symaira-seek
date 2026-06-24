@@ -303,8 +303,8 @@ func (db *DB) SaveChunks(chunks []*Chunk) error {
 	}
 	defer tx.Rollback()
 
-	query := `INSERT INTO chunks (uuid, document_path, chunk_index, content, embedding, hash, norm)
-		VALUES (?, ?, ?, ?, ?, ?, ?)`
+	query := `INSERT INTO chunks (uuid, document_path, chunk_index, content, embedding, hash, norm, binary_signature)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
 
 	stmt, err := tx.Prepare(query)
 	if err != nil {
@@ -315,7 +315,8 @@ func (db *DB) SaveChunks(chunks []*Chunk) error {
 	for _, c := range chunks {
 		c.Norm = l2Norm(c.Embedding)
 		embBytes := Float32SliceToBytes(c.Embedding)
-		res, err := stmt.Exec(c.UUID, c.DocumentPath, c.ChunkIndex, c.Content, embBytes, c.Hash, c.Norm)
+		sigBytes := SignBinarySignature(c.Embedding)
+		res, err := stmt.Exec(c.UUID, c.DocumentPath, c.ChunkIndex, c.Content, embBytes, c.Hash, c.Norm, sigBytes)
 		if err != nil {
 			return fmt.Errorf("failed to insert chunk: %w", err)
 		}
