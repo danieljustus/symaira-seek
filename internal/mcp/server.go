@@ -38,6 +38,7 @@ func StartServer(cfg engine.OllamaConfig, quantCfg *db.QuantConfig) error {
 	registerGetContext(server, dbClient, dbClient, embedder)
 	registerIndexDocument(server, dbClient, embedder)
 	registerIndexURL(server, dbClient, embedder)
+	registerMultiGet(server, dbClient, embedder)
 
 	return server.ServeStdio(context.Background())
 }
@@ -324,4 +325,157 @@ func registerIndexURL(server *mcpserver.Server, dbClient db.Store, embedder engi
 			return fmt.Sprintf("Successfully indexed URL: %s", params.URL), nil
 		},
 	})
+}
+
+func registerMultiGet(server *mcpserver.Server, dbClient db.Store, _ engine.Embedder) {
+	server.RegisterTool(&mcpserver.Tool{
+		Name:        "multi_get",
+		Description: "Retrieve multiple indexed documents at once using a glob pattern. Returns each file's content with a path header. Files exceeding limits are skipped.",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"pattern":{"type":"string","description":"Glob pattern to match indexed document paths (e.g., \"docs/**/*.md\")"},"maxBytes":{"type":"integer","description":"Per-file byte limit in bytes (default 10485760, i.e. 10 MB)"},"maxLines":{"type":"integer","description":"Per-file line limit (default: no limit)"}},"required":["pattern"]}`),
+		Handler: func(ctx context.Context, input json.RawMessage) (any, error) {
+			var params struct {
+				Pattern  string `json:"pattern"`
+				MaxBytes int    `json:"maxBytes"`
+				MaxLines int    `json:"maxLines"`
+			}
+			if err := json.Unmarshal(input, &params); err != nil {
+				return nil, &symerrors.ValidationError{Field: "params", Message: err.Error()}
+			}
+			if params.Pattern == "" {
+				return nil, &symerrors.ValidationError{Field: "pattern", Message: "missing or invalid pattern argument"}
+			}
+
+			const defaultMaxBytes = 10 << 20
+			if params.MaxBytes <= 0 {
+				params.MaxBytes = defaultMaxBytes
+			}
+
+			home, err := os.UserHomeDir()
+			if err != nil {
+				return nil, fmt.Errorf("cannot determine home directory: %w", err)
+			}
+			homeResolved, err := filepath.EvalSymlinks(home)
+			if err != nil {
+				return nil, fmt.Errorf("cannot resolve home directory: %w", err)
+			}
+
+			absPattern := params.Pattern
+			if !filepath.IsAbs(absPattern) {
+				absPattern = filepath.Join(homeResolved, absPattern)
+			} else {
+				dir := filepath.Dir(absPattern)
+				base := filepath.Base(absPattern)
+				if dirResolved, err := filepath.EvalSymlinks(dir); err == nil {
+					absPattern = filepath.Join(dirResolved, base)
+				}
+			}
+			absPattern = filepath.Clean(absPattern)
+
+			if !strings.HasPrefix(absPattern, homeResolved+string(os.PathSeparator)) && absPattern != homeResolved {
+				return nil, &pathutil.PathRestrictionError{Path: absPattern, Root: homeResolved}
+			}
+
+			docs, err := dbClient.ListDocuments()
+			if err != nil {
+				return nil, &symerrors.DatabaseError{Op: "list documents", Err: err}
+			}
+
+			var textBuilder strings.Builder
+			matchCount := 0
+			skipCount := 0
+
+			for _, doc := range docs {
+				if !matchGlob(absPattern, doc.Path) {
+					continue
+				}
+				matchCount++
+
+				f, err := os.Open(doc.Path)
+				if err != nil {
+					textBuilder.WriteString(fmt.Sprintf("--- SKIPPED: %s (cannot open: %v) ---\n\n", doc.Path, err))
+					skipCount++
+					continue
+				}
+
+				limitedReader := io.LimitReader(f, int64(params.MaxBytes)+1)
+				data, err := io.ReadAll(limitedReader)
+				f.Close()
+				if err != nil {
+					textBuilder.WriteString(fmt.Sprintf("--- SKIPPED: %s (read error: %v) ---\n\n", doc.Path, err))
+					skipCount++
+					continue
+				}
+
+				exceedsBytes := int64(len(data)) > int64(params.MaxBytes)
+				content := string(data)
+				if exceedsBytes {
+					content = content[:params.MaxBytes]
+				}
+
+				if params.MaxLines > 0 {
+					lines := strings.Split(content, "\n")
+					if len(lines) > params.MaxLines {
+						content = strings.Join(lines[:params.MaxLines], "\n")
+						exceedsBytes = true // treat as skipped due to limit
+					}
+				}
+
+				if exceedsBytes || int64(len(data)) > int64(params.MaxBytes) {
+					textBuilder.WriteString(fmt.Sprintf("--- SKIPPED: %s (exceeds maxBytes or maxLines) ---\n\n", doc.Path))
+					skipCount++
+					continue
+				}
+
+				textBuilder.WriteString(fmt.Sprintf("=== %s ===\n", doc.Path))
+				textBuilder.WriteString(content)
+				textBuilder.WriteString("\n\n")
+			}
+
+			if matchCount == 0 {
+				textBuilder.WriteString(fmt.Sprintf("No indexed documents matched pattern: %s\n", params.Pattern))
+			} else if skipCount > 0 {
+				textBuilder.WriteString(fmt.Sprintf("\n%d file(s) matched, %d skipped due to limits.\n", matchCount, skipCount))
+			} else {
+				textBuilder.WriteString(fmt.Sprintf("\n%d file(s) matched.\n", matchCount))
+			}
+
+			return textBuilder.String(), nil
+		},
+	})
+}
+
+// matchGlob checks whether path matches the glob pattern, supporting ** for
+// matching across directory boundaries. Pattern and path should both be
+// absolute, slash-separated paths.
+func matchGlob(pattern, path string) bool {
+	patParts := strings.Split(filepath.ToSlash(pattern), "/")
+	pathParts := strings.Split(filepath.ToSlash(path), "/")
+	return matchGlobSegments(patParts, pathParts)
+}
+
+func matchGlobSegments(patParts, pathParts []string) bool {
+	if len(patParts) == 0 {
+		return len(pathParts) == 0
+	}
+
+	if patParts[0] == "**" {
+		// ** matches zero or more path segments.
+		for i := 0; i <= len(pathParts); i++ {
+			if matchGlobSegments(patParts[1:], pathParts[i:]) {
+				return true
+			}
+		}
+		return false
+	}
+
+	if len(pathParts) == 0 {
+		return false
+	}
+
+	matched, _ := filepath.Match(patParts[0], pathParts[0])
+	if !matched {
+		return false
+	}
+
+	return matchGlobSegments(patParts[1:], pathParts[1:])
 }

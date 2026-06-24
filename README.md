@@ -216,6 +216,7 @@ To use Symaira-Seek as an MCP tool for AI clients (like Claude Desktop or Cursor
 4. `get_context(topic, max_chars)`: Aggregates relevant context blocks from multiple documents.
 5. `index_document(path)`: Manually indexes a local file or directory.
 6. `index_url(url)`: Indexes content from a URL.
+7. `multi_get(pattern, maxBytes, maxLines)`: Retrieves multiple indexed documents matching a glob pattern.
 
 ### Tool Examples
 
@@ -274,6 +275,17 @@ Indexes a local file or directory immediately.
 ```
 
 Fetches and indexes content from a URL.
+
+#### multi_get
+```json
+{
+  "pattern": "docs/**/*.md",
+  "maxBytes": 10485760,
+  "maxLines": 500
+}
+```
+
+Retrieves all indexed documents matching the glob pattern. Files exceeding `maxBytes` or `maxLines` are skipped with an info message.
 
 ### Environment Variables
 

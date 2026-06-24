@@ -103,6 +103,7 @@ func newTestServer(store db.Store, vectorStore db.VectorStore, embedder engine.E
 	registerGetContext(s, store, vectorStore, embedder)
 	registerIndexDocument(s, store, embedder)
 	registerIndexURL(s, store, embedder)
+	registerMultiGet(s, store, embedder)
 	return s
 }
 
@@ -221,7 +222,7 @@ func TestServerToolsList(t *testing.T) {
 		toolMap := tool.(map[string]interface{})
 		names[toolMap["name"].(string)] = true
 	}
-	expected := []string{"search_documents", "read_document", "list_documents", "get_context", "index_document", "index_url"}
+	expected := []string{"search_documents", "read_document", "list_documents", "get_context", "index_document", "index_url", "multi_get"}
 	for _, n := range expected {
 		if !names[n] {
 			t.Errorf("missing tool: %s", n)
@@ -1258,5 +1259,211 @@ func TestReadDocument_MaxLinesExceedsRemaining(t *testing.T) {
 	want := "line2\nline3"
 	if got != want {
 		t.Errorf("line range mismatch:\ngot:  %q\nwant: %q", got, want)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// multi_get tests
+// ---------------------------------------------------------------------------
+
+func callMultiGet(t *testing.T, server *mcpserver.Server, args map[string]interface{}) (string, bool) {
+	t.Helper()
+	params, _ := json.Marshal(map[string]interface{}{
+		"name":      "multi_get",
+		"arguments": args,
+	})
+	resp := pipeRequest(t, server, jsonRPCRequest{
+		JSONRPC: "2.0",
+		ID:      float64(1),
+		Method:  "tools/call",
+		Params:  params,
+	})
+	if resp.Error != nil {
+		t.Fatalf("unexpected JSON-RPC error: %v", resp.Error)
+	}
+	result, ok := resp.Result.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected result map, got %T", resp.Result)
+	}
+	isError := result["isError"] == true
+	content := result["content"].([]interface{})
+	text := content[0].(map[string]interface{})["text"].(string)
+	return text, isError
+}
+
+func newMultiGetStore(t *testing.T, files map[string]string) (*fakeStore, string) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	docs := make([]*db.Document, 0, len(files))
+	for name, content := range files {
+		p := filepath.Join(home, name)
+		dir := filepath.Dir(p)
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+		resolved, _ := filepath.EvalSymlinks(p)
+		docs = append(docs, &db.Document{Path: resolved})
+	}
+
+	store := &fakeStore{
+		listDocsFunc: func() ([]*db.Document, error) {
+			return docs, nil
+		},
+	}
+	return store, home
+}
+
+func TestMultiGet_MultipleFiles(t *testing.T) {
+	store, _ := newMultiGetStore(t, map[string]string{
+		"docs/a.md": "content A",
+		"docs/b.md": "content B",
+		"other/c.md": "content C",
+	})
+	embed := &fakeEmbedder{}
+	server := newTestServer(store, store, embed)
+
+	got, isError := callMultiGet(t, server, map[string]interface{}{
+		"pattern": "docs/*.md",
+	})
+	if isError {
+		t.Fatalf("expected success, got error: %s", got)
+	}
+	if !strings.Contains(got, "content A") {
+		t.Error("expected content A in output")
+	}
+	if !strings.Contains(got, "content B") {
+		t.Error("expected content B in output")
+	}
+	if strings.Contains(got, "content C") {
+		t.Error("should not contain content C (different directory)")
+	}
+	if !strings.Contains(got, "2 file(s) matched") {
+		t.Errorf("expected 2 file(s) matched message, got: %s", got)
+	}
+}
+
+func TestMultiGet_NoMatches(t *testing.T) {
+	store, _ := newMultiGetStore(t, map[string]string{
+		"docs/a.md": "content A",
+	})
+	embed := &fakeEmbedder{}
+	server := newTestServer(store, store, embed)
+
+	got, isError := callMultiGet(t, server, map[string]interface{}{
+		"pattern": "nonexistent/**/*.txt",
+	})
+	if isError {
+		t.Fatalf("expected success, got error: %s", got)
+	}
+	if !strings.Contains(got, "No indexed documents matched pattern") {
+		t.Errorf("expected no-match message, got: %s", got)
+	}
+}
+
+func TestMultiGet_MaxBytesSkip(t *testing.T) {
+	store, home := newMultiGetStore(t, map[string]string{
+		"docs/big.md":   strings.Repeat("X", 200),
+		"docs/small.md": "small content",
+	})
+	embed := &fakeEmbedder{}
+	server := newTestServer(store, store, embed)
+
+	got, isError := callMultiGet(t, server, map[string]interface{}{
+		"pattern":  "docs/*.md",
+		"maxBytes": float64(100),
+	})
+	if isError {
+		t.Fatalf("expected success, got error: %s", got)
+	}
+	if !strings.Contains(got, "small content") {
+		t.Error("expected small content in output")
+	}
+	if !strings.Contains(got, "SKIPPED") {
+		t.Errorf("expected SKIPPED message for big file, got: %s", got)
+	}
+	_ = home
+}
+
+func TestMultiGet_MaxLinesSkip(t *testing.T) {
+	store, _ := newMultiGetStore(t, map[string]string{
+		"docs/many.md": "line1\nline2\nline3\nline4\nline5",
+		"docs/few.md":  "only one line",
+	})
+	embed := &fakeEmbedder{}
+	server := newTestServer(store, store, embed)
+
+	got, isError := callMultiGet(t, server, map[string]interface{}{
+		"pattern":  "docs/*.md",
+		"maxLines": float64(2),
+	})
+	if isError {
+		t.Fatalf("expected success, got error: %s", got)
+	}
+	if !strings.Contains(got, "only one line") {
+		t.Error("expected few.md content in output")
+	}
+	if !strings.Contains(got, "SKIPPED") {
+		t.Errorf("expected SKIPPED message for many.md, got: %s", got)
+	}
+}
+
+func TestMultiGet_MissingPattern(t *testing.T) {
+	store := &fakeStore{}
+	embed := &fakeEmbedder{}
+	server := newTestServer(store, store, embed)
+
+	_, isError := callMultiGet(t, server, map[string]interface{}{})
+	if !isError {
+		t.Fatal("expected error for missing pattern")
+	}
+}
+
+func TestMultiGet_RestrictsToHome(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	store := &fakeStore{
+		listDocsFunc: func() ([]*db.Document, error) {
+			return []*db.Document{}, nil
+		},
+	}
+	embed := &fakeEmbedder{}
+	server := newTestServer(store, store, embed)
+
+	_, isError := callMultiGet(t, server, map[string]interface{}{
+		"pattern": "/etc/**/*.conf",
+	})
+	if !isError {
+		t.Fatal("expected error for pattern outside home")
+	}
+}
+
+func TestMultiGet_DeepGlob(t *testing.T) {
+	store, _ := newMultiGetStore(t, map[string]string{
+		"a/b/c/d.md": "deep content",
+		"a/x.md":     "shallow content",
+		"z.md":        "root content",
+	})
+	embed := &fakeEmbedder{}
+	server := newTestServer(store, store, embed)
+
+	got, isError := callMultiGet(t, server, map[string]interface{}{
+		"pattern": "a/**/*.md",
+	})
+	if isError {
+		t.Fatalf("expected success, got error: %s", got)
+	}
+	if !strings.Contains(got, "deep content") {
+		t.Error("expected deep content in output")
+	}
+	if !strings.Contains(got, "shallow content") {
+		t.Error("expected shallow content in output")
+	}
+	if strings.Contains(got, "root content") {
+		t.Error("should not contain root content")
 	}
 }
