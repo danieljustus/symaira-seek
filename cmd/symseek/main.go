@@ -271,6 +271,33 @@ func newRootCmd() *cobra.Command {
 	}
 	rootCmd.AddCommand(migrateCmd)
 
+	// 5c. Quantize Command
+	var quantBitsFlag int
+	var quantSeedFlag int
+	quantizeCmd := &cobra.Command{
+		Use:   "quantize",
+		Short: "Backfill quantized vector sidecars for approximate search",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			dbClient, err := db.Open()
+			if err != nil {
+				return err
+			}
+			defer dbClient.Close()
+
+			count, err := engine.BackfillQuantSidecars(dbClient, quantBitsFlag, quantSeedFlag, func(processed, total int) {
+				fmt.Fprintf(os.Stderr, "\rBackfilling sidecars: %d/%d", processed, total)
+			})
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(os.Stderr, "\nDone: %d chunks backfilled\n", count)
+			return nil
+		},
+	}
+	quantizeCmd.Flags().IntVar(&quantBitsFlag, "bits", 4, "Quantization bit width (2, 3, or 4)")
+	quantizeCmd.Flags().IntVar(&quantSeedFlag, "seed", 42, "Random rotation seed")
+	rootCmd.AddCommand(quantizeCmd)
+
 	// 6. Version Command
 	var checkUpdate bool
 	versionCmd := &cobra.Command{
@@ -336,12 +363,12 @@ func startHTTPServer(port int) error {
 	if cooldown <= 0 {
 		cooldown = 5 * time.Second
 	}
-	return server.StartHTTPServer(port, cfg.OllamaConfig(), cooldown)
+	return server.StartHTTPServer(port, cfg.OllamaConfig(), cooldown, cfg.QuantDBConfig())
 }
 
 func startMCPServer() error {
 	mcp.ServerVersion = version
-	return mcp.StartServer(cfg.OllamaConfig())
+	return mcp.StartServer(cfg.OllamaConfig(), cfg.QuantDBConfig())
 }
 
 func writeSearchHuman(w io.Writer, results []*db.SearchResult) {

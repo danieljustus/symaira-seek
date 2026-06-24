@@ -151,6 +151,46 @@ The file is rewritten with mode `0600` on every write. Supported keys:
 | `retry_count` | Number of Ollama retries on failure | `2` |
 | `retry_backoff_ms` | Initial retry backoff (milliseconds) | `500` |
 | `index_cooldown_seconds` | Cooldown between `/index` requests on the HTTP daemon | `5` |
+| `vector_quantization` | Quantized search mode: `"off"` or `"turbo-prod"` | `"off"` |
+| `vector_quant_bits` | Quantization bit width (2, 3, or 4) | `4` |
+| `vector_quantized_shortlist` | Approximate shortlist size for quantized search | `200` |
+| `vector_exact_rerank` | Exact cosine rerank on quantized shortlist (recommended) | `true` |
+
+### Quantized Vector Search (Opt-In)
+
+TurboQuant quantized search trades a small amount of recall for significantly faster vector search on large indexes. It compresses float32 embeddings to 2-4 bit codes, uses those codes to produce an approximate shortlist, then re-scores only the shortlist with exact cosine similarity.
+
+**Enable:**
+```toml
+# ~/.config/symseek/config.toml
+vector_quantization = "turbo-prod"
+vector_quant_bits = 4
+vector_quantized_shortlist = 200
+vector_exact_rerank = true
+```
+
+Or via CLI:
+```bash
+./symseek config --set-key vector_quantization --set-value turbo-prod
+./symseek config --set-key vector_quant_bits --set-value 4
+```
+
+**Build sidecars** (required after enabling or re-indexing):
+```bash
+./symseek quantize --bits 4 --seed 42
+```
+
+**Disable** (reverts to exact search):
+```toml
+vector_quantization = "off"
+```
+
+**Benchmarks:**
+```bash
+go test -bench=. -benchmem ./internal/db/ -run='^$' -bench=BenchmarkSearch
+```
+
+The shortlist size controls speed/quality trade-off: lower = faster, higher = better recall. The `vector_exact_rerank = true` setting (default) ensures final results use exact cosine similarity on the shortlisted candidates.
 
 ---
 

@@ -28,7 +28,8 @@ func (db *DB) Delete(ctx context.Context, docPath string) error {
 	return db.DeleteDocument(docPath)
 }
 
-// Search delegates to SearchVector, satisfying VectorStore.
+// Search delegates to SearchVectorQuantized (which falls back to SearchVector
+// when quantization is not configured or sidecars are missing).
 func (db *DB) Search(ctx context.Context, queryVec []float32, limit int) ([]*SearchResult, error) {
-	return db.SearchVector(queryVec, limit)
+	return db.SearchVectorQuantized(queryVec, limit)
 }
