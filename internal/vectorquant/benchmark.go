@@ -296,7 +296,7 @@ func GenerateRealisticFixture(dim, numVectors, numQueries int, seed int64) (dbVe
 func FormatBenchmarkReport(cfg BenchmarkConfig, results []BenchmarkResult) string {
 	float32Bytes := cfg.Dim * 4
 	out := ""
-	out += fmt.Sprintf("=== TurboQuant Benchmark Report ===\n")
+	out += "=== TurboQuant Benchmark Report ===\n"
 	out += fmt.Sprintf("Dimension: %d  |  Vectors: %d  |  Queries: %d  |  Top-K: %d\n\n", cfg.Dim, cfg.NumVectors, cfg.NumQueries, cfg.K)
 	out += fmt.Sprintf("%-12s %8s %8s %12s %12s %10s %12s\n",
 		"Mode", "Bytes/V", "Ratio", "Encode", "Query", "Recall@K", "MSE")
@@ -315,7 +315,7 @@ func FormatBenchmarkReport(cfg BenchmarkConfig, results []BenchmarkResult) strin
 	}
 
 	if cfg.UseRerank && len(results) > 0 && results[0].RerankQueryTime > 0 {
-		out += fmt.Sprintf("\n--- Exact Rerank (fetch float32 for quantized shortlist) ---\n")
+		out += "\n--- Exact Rerank (fetch float32 for quantized shortlist) ---\n"
 		out += fmt.Sprintf("%-12s %12s %10s\n", "Mode", "Rerank Q", "Rerank@K")
 		out += fmt.Sprintf("%-12s %12s %10s\n", "--------", "------------", "----------")
 		for _, r := range results {
@@ -325,7 +325,7 @@ func FormatBenchmarkReport(cfg BenchmarkConfig, results []BenchmarkResult) strin
 	}
 
 	// Recommendation
-	out += fmt.Sprintf("\n--- Recommendation ---\n")
+	out += "\n--- Recommendation ---\n"
 	best := bestBitWidth(results)
 	if best != nil {
 		out += fmt.Sprintf("Best trade-off: %s (%.1fx compression, %.1f%% recall@%d)\n",
