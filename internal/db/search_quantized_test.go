@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"math"
 	"strconv"
 	"testing"
@@ -284,7 +285,7 @@ func TestQuantizedSearch_VectorStoreInterface(t *testing.T) {
 	})
 
 	queryVec := makeQueryVec()
-	results, err := d.Search(nil, queryVec, 5)
+	results, err := d.Search(context.TODO(), queryVec, 5)
 	if err != nil {
 		t.Fatalf("VectorStore.Search: %v", err)
 	}
