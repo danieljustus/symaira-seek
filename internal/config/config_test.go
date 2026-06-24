@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -418,5 +419,145 @@ func TestSetValue_RejectsInvalidVectorExactRerank(t *testing.T) {
 
 	if err := SetValue(cfgFile, "vector_exact_rerank", "maybe", cfg); err == nil {
 		t.Error("expected error for invalid vector_exact_rerank")
+	}
+}
+
+func TestDefaultConfig_RerankDefaults(t *testing.T) {
+	cfg := DefaultConfig()
+	if cfg.RerankQuery {
+		t.Error("expected default RerankQuery=false")
+	}
+	if cfg.RerankModel != "" {
+		t.Errorf("expected default RerankModel empty, got %q", cfg.RerankModel)
+	}
+	if cfg.RerankTimeoutSeconds != 120 {
+		t.Errorf("expected default RerankTimeoutSeconds=120, got %d", cfg.RerankTimeoutSeconds)
+	}
+}
+
+func TestSetValue_AcceptsRerankQuery(t *testing.T) {
+	dir := t.TempDir()
+	cfgFile := filepath.Join(dir, "config.toml")
+	cfg := DefaultConfig()
+
+	if err := SetValue(cfgFile, "rerank_query", "true", cfg); err != nil {
+		t.Fatalf("SetValue(rerank_query): %v", err)
+	}
+	if !cfg.RerankQuery {
+		t.Error("expected RerankQuery=true")
+	}
+}
+
+func TestSetValue_RejectsInvalidRerankQuery(t *testing.T) {
+	dir := t.TempDir()
+	cfgFile := filepath.Join(dir, "config.toml")
+	cfg := DefaultConfig()
+
+	if err := SetValue(cfgFile, "rerank_query", "maybe", cfg); err == nil {
+		t.Error("expected error for invalid rerank_query")
+	}
+}
+
+func TestSetValue_AcceptsRerankModel(t *testing.T) {
+	dir := t.TempDir()
+	cfgFile := filepath.Join(dir, "config.toml")
+	cfg := DefaultConfig()
+
+	if err := SetValue(cfgFile, "rerank_model", "qwen2.5", cfg); err != nil {
+		t.Fatalf("SetValue(rerank_model): %v", err)
+	}
+	if cfg.RerankModel != "qwen2.5" {
+		t.Errorf("expected RerankModel=qwen2.5, got %q", cfg.RerankModel)
+	}
+}
+
+func TestSetValue_AcceptsEmptyRerankModel(t *testing.T) {
+	dir := t.TempDir()
+	cfgFile := filepath.Join(dir, "config.toml")
+	cfg := DefaultConfig()
+
+	if err := SetValue(cfgFile, "rerank_model", "", cfg); err != nil {
+		t.Fatalf("SetValue(rerank_model empty): %v", err)
+	}
+	if cfg.RerankModel != "" {
+		t.Errorf("expected RerankModel empty, got %q", cfg.RerankModel)
+	}
+}
+
+func TestSetValue_AcceptsRerankTimeoutSeconds(t *testing.T) {
+	dir := t.TempDir()
+	cfgFile := filepath.Join(dir, "config.toml")
+	cfg := DefaultConfig()
+
+	if err := SetValue(cfgFile, "rerank_timeout_seconds", "60", cfg); err != nil {
+		t.Fatalf("SetValue(rerank_timeout_seconds): %v", err)
+	}
+	if cfg.RerankTimeoutSeconds != 60 {
+		t.Errorf("expected RerankTimeoutSeconds=60, got %d", cfg.RerankTimeoutSeconds)
+	}
+}
+
+func TestSetValue_RejectsInvalidRerankTimeoutSeconds(t *testing.T) {
+	dir := t.TempDir()
+	cfgFile := filepath.Join(dir, "config.toml")
+	cfg := DefaultConfig()
+
+	if err := SetValue(cfgFile, "rerank_timeout_seconds", "zero", cfg); err == nil {
+		t.Error("expected error for non-numeric rerank_timeout_seconds")
+	}
+}
+
+func TestRerankConfig_UsesEmbeddingModelWhenEmpty(t *testing.T) {
+	cfg := &Config{
+		OllamaURL:            "http://x.test/api",
+		Model:                "nomic-embed-text",
+		RerankQuery:          true,
+		RerankModel:          "",
+		RerankTimeoutSeconds: 60,
+	}
+	rc := cfg.RerankConfig()
+	if !rc.Enabled {
+		t.Error("expected Enabled=true")
+	}
+	if rc.Model != "nomic-embed-text" {
+		t.Errorf("expected Model to fall back to embedding model, got %q", rc.Model)
+	}
+	if rc.Timeout.Seconds() != 60 {
+		t.Errorf("expected Timeout=60s, got %v", rc.Timeout)
+	}
+}
+
+func TestRerankConfig_UsesExplicitModel(t *testing.T) {
+	cfg := &Config{
+		OllamaURL:            "http://x.test/api",
+		Model:                "nomic-embed-text",
+		RerankQuery:          true,
+		RerankModel:          "qwen2.5",
+		RerankTimeoutSeconds: 90,
+	}
+	rc := cfg.RerankConfig()
+	if rc.Model != "qwen2.5" {
+		t.Errorf("expected explicit model qwen2.5, got %q", rc.Model)
+	}
+	if rc.Timeout.Seconds() != 90 {
+		t.Errorf("expected Timeout=90s, got %v", rc.Timeout)
+	}
+}
+
+func TestSetValue_PersistsRerankConfig(t *testing.T) {
+	dir := t.TempDir()
+	cfgFile := filepath.Join(dir, "config.toml")
+	cfg := DefaultConfig()
+
+	if err := SetValue(cfgFile, "rerank_query", "true", cfg); err != nil {
+		t.Fatalf("SetValue: %v", err)
+	}
+
+	data, err := os.ReadFile(cfgFile)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if !strings.Contains(string(data), "rerank_query") {
+		t.Error("expected rerank_query in config file")
 	}
 }

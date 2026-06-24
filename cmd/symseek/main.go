@@ -363,12 +363,12 @@ func startHTTPServer(port int) error {
 	if cooldown <= 0 {
 		cooldown = 5 * time.Second
 	}
-	return server.StartHTTPServer(port, cfg.OllamaConfig(), cooldown, cfg.QuantDBConfig())
+	return server.StartHTTPServer(port, cfg.OllamaConfig(), cooldown, cfg.QuantDBConfig(), cfg.RerankConfig())
 }
 
 func startMCPServer() error {
 	mcp.ServerVersion = version
-	return mcp.StartServer(cfg.OllamaConfig(), cfg.QuantDBConfig())
+	return mcp.StartServer(cfg.OllamaConfig(), cfg.QuantDBConfig(), cfg.RerankConfig())
 }
 
 func writeSearchHuman(w io.Writer, results []*db.SearchResult) {

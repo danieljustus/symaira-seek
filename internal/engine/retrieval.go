@@ -11,11 +11,22 @@ import (
 	"github.com/danieljustus/symaira-seek/internal/db"
 )
 
+// SearchOptions configures optional behaviour for SearchHybridWithOptions.
+type SearchOptions struct {
+	RerankCfg RerankConfig
+}
+
 // SearchHybrid combines BM25 keyword search and semantic vector search using Reciprocal Rank Fusion (RRF).
 // The BM25 leg uses db.Store while the vector leg uses the pluggable
 // db.VectorStore interface so callers can substitute alternate vector
 // backends without changing the engine layer.
 func SearchHybrid(dbClient db.Store, vectorStore db.VectorStore, embedder Embedder, query string, limit int) ([]*db.SearchResult, error) {
+	return SearchHybridWithOptions(dbClient, vectorStore, embedder, query, limit, SearchOptions{})
+}
+
+// SearchHybridWithOptions is like SearchHybrid but accepts SearchOptions for
+// optional LLM re-ranking. Existing callers that use SearchHybrid are unchanged.
+func SearchHybridWithOptions(dbClient db.Store, vectorStore db.VectorStore, embedder Embedder, query string, limit int, opts SearchOptions) ([]*db.SearchResult, error) {
 	if query == "" {
 		return nil, nil
 	}
@@ -123,6 +134,12 @@ func SearchHybrid(dbClient db.Store, vectorStore db.VectorStore, embedder Embedd
 	// Truncate to limit
 	if len(combined) > limit {
 		combined = combined[:limit]
+	}
+
+	// 5. Optional LLM re-ranking
+	if opts.RerankCfg.Enabled {
+		reranker := NewReranker(opts.RerankCfg)
+		combined = reranker.RerankResults(query, combined)
 	}
 
 	return combined, nil

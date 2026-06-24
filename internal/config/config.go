@@ -31,6 +31,11 @@ type Config struct {
 	VectorQuantBits          int    `json:"vector_quant_bits" toml:"vector_quant_bits"`                 // 2, 3, or 4
 	VectorQuantizedShortlist int    `json:"vector_quantized_shortlist" toml:"vector_quantized_shortlist"` // approximate shortlist size
 	VectorExactRerank        bool   `json:"vector_exact_rerank" toml:"vector_exact_rerank"`             // exact cosine rerank on shortlist
+
+	// LLM re-ranking (opt-in, off by default).
+	RerankQuery          bool   `json:"rerank_query" toml:"rerank_query"`                       // enable Ollama re-ranking of search results
+	RerankModel          string `json:"rerank_model" toml:"rerank_model"`                       // chat model for re-ranking; empty = reuse embedding model
+	RerankTimeoutSeconds int    `json:"rerank_timeout_seconds" toml:"rerank_timeout_seconds"`   // per-request timeout for reranking
 }
 
 // DefaultConfig returns the default configuration values.
@@ -47,6 +52,9 @@ func DefaultConfig() *Config {
 		VectorQuantBits:           4,
 		VectorQuantizedShortlist:  200,
 		VectorExactRerank:         true,
+		RerankQuery:               false,
+		RerankModel:               "",
+		RerankTimeoutSeconds:      120,
 	}
 }
 
@@ -88,6 +96,24 @@ func (c *Config) OllamaConfig() engine.OllamaConfig {
 		Timeout:      time.Duration(c.TimeoutSeconds) * time.Second,
 		RetryCount:   c.RetryCount,
 		RetryBackoff: time.Duration(c.RetryBackoffMS) * time.Millisecond,
+	}
+}
+
+// RerankConfig converts the config's rerank fields to an engine.RerankConfig.
+func (c *Config) RerankConfig() engine.RerankConfig {
+	model := c.RerankModel
+	if model == "" {
+		model = c.Model
+	}
+	timeout := time.Duration(c.RerankTimeoutSeconds) * time.Second
+	if timeout <= 0 {
+		timeout = 120 * time.Second
+	}
+	return engine.RerankConfig{
+		Enabled: c.RerankQuery,
+		URL:     c.OllamaURL,
+		Model:   model,
+		Timeout: timeout,
 	}
 }
 
@@ -235,8 +261,22 @@ func SetValue(cfgFile string, key, value string, cfg *Config) error {
 			return fmt.Errorf("invalid %s value %q (must be true or false)", key, value)
 		}
 		cfg.VectorExactRerank = b
+	case "rerank_query":
+		b, err := strconv.ParseBool(value)
+		if err != nil {
+			return fmt.Errorf("invalid %s value %q (must be true or false)", key, value)
+		}
+		cfg.RerankQuery = b
+	case "rerank_model":
+		cfg.RerankModel = value
+	case "rerank_timeout_seconds":
+		n, err := strconv.Atoi(value)
+		if err != nil || n <= 0 {
+			return fmt.Errorf("invalid %s value %q (must be a positive integer)", key, value)
+		}
+		cfg.RerankTimeoutSeconds = n
 	default:
-		return fmt.Errorf("unknown config key %q (supported: ollama_url, model, embedding_dim, timeout_seconds, retry_count, retry_backoff_ms, index_cooldown_seconds, vector_backend, vector_quantization, vector_quant_bits, vector_quantized_shortlist, vector_exact_rerank)", key)
+		return fmt.Errorf("unknown config key %q (supported: ollama_url, model, embedding_dim, timeout_seconds, retry_count, retry_backoff_ms, index_cooldown_seconds, vector_backend, vector_quantization, vector_quant_bits, vector_quantized_shortlist, vector_exact_rerank, rerank_query, rerank_model, rerank_timeout_seconds)", key)
 	}
 	return Save(cfgFile, cfg)
 }

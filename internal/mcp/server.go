@@ -21,7 +21,7 @@ import (
 
 var ServerVersion = "dev"
 
-func StartServer(cfg engine.OllamaConfig, quantCfg *db.QuantConfig) error {
+func StartServer(cfg engine.OllamaConfig, quantCfg *db.QuantConfig, rerankCfg engine.RerankConfig) error {
 	dbClient, err := db.Open()
 	if err != nil {
 		return fmt.Errorf("failed to open database: %w", err)
@@ -30,12 +30,13 @@ func StartServer(cfg engine.OllamaConfig, quantCfg *db.QuantConfig) error {
 	dbClient.SetQuantConfig(quantCfg)
 
 	embedder := engine.NewEmbeddingsGeneratorWithOllamaConfig(cfg)
+	searchOpts := engine.SearchOptions{RerankCfg: rerankCfg}
 	server := mcpserver.New("symseek", ServerVersion)
 
-	registerSearchDocuments(server, dbClient, dbClient, embedder)
+	registerSearchDocuments(server, dbClient, dbClient, embedder, searchOpts)
 	registerReadDocument(server, dbClient, embedder)
 	registerListDocuments(server, dbClient, embedder)
-	registerGetContext(server, dbClient, dbClient, embedder)
+	registerGetContext(server, dbClient, dbClient, embedder, searchOpts)
 	registerIndexDocument(server, dbClient, embedder)
 	registerIndexURL(server, dbClient, embedder)
 	registerMultiGet(server, dbClient, embedder)
@@ -45,7 +46,7 @@ func StartServer(cfg engine.OllamaConfig, quantCfg *db.QuantConfig) error {
 	return server.ServeStdio(context.Background())
 }
 
-func registerSearchDocuments(server *mcpserver.Server, dbClient db.Store, vectorStore db.VectorStore, embedder engine.Embedder) {
+func registerSearchDocuments(server *mcpserver.Server, dbClient db.Store, vectorStore db.VectorStore, embedder engine.Embedder, searchOpts engine.SearchOptions) {
 	server.RegisterTool(&mcpserver.Tool{
 		Name:        "search_documents",
 		Description: "Search the local document index for relevant content using hybrid keyword (BM25) and vector search. Use when the user asks about specific topics, files, or information that might be indexed.",
@@ -65,7 +66,7 @@ func registerSearchDocuments(server *mcpserver.Server, dbClient db.Store, vector
 				params.Limit = 5
 			}
 
-			results, err := engine.SearchHybrid(dbClient, vectorStore, embedder, params.Query, params.Limit)
+			results, err := engine.SearchHybridWithOptions(dbClient, vectorStore, embedder, params.Query, params.Limit, searchOpts)
 			if err != nil {
 				return nil, &symerrors.SearchError{Query: params.Query, Err: err}
 			}
@@ -220,7 +221,7 @@ func registerListDocuments(server *mcpserver.Server, dbClient db.Store, _ engine
 	})
 }
 
-func registerGetContext(server *mcpserver.Server, dbClient db.Store, vectorStore db.VectorStore, embedder engine.Embedder) {
+func registerGetContext(server *mcpserver.Server, dbClient db.Store, vectorStore db.VectorStore, embedder engine.Embedder, searchOpts engine.SearchOptions) {
 	server.RegisterTool(&mcpserver.Tool{
 		Name:        "get_context",
 		Description: "Compile a consolidated context block from multiple matching documents on a given topic. This combines search and read tools.",
@@ -242,7 +243,7 @@ func registerGetContext(server *mcpserver.Server, dbClient db.Store, vectorStore
 				maxChars = 4000
 			}
 
-			results, err := engine.SearchHybrid(dbClient, vectorStore, embedder, params.Topic, 10)
+			results, err := engine.SearchHybridWithOptions(dbClient, vectorStore, embedder, params.Topic, 10, searchOpts)
 			if err != nil {
 				return nil, &symerrors.SearchError{Query: params.Topic, Err: err}
 			}

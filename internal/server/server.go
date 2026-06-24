@@ -171,7 +171,7 @@ func warnIfNoAuthToken(w io.Writer) {
 // It is extracted from StartHTTPServer so that tests can exercise the full
 // handler chain via a mock db.Store and engine.Embedder without starting a
 // real server or database.
-func newServeMux(dbClient db.Store, vectorStore db.VectorStore, embedder engine.Embedder, indexCooldown time.Duration) *http.ServeMux {
+func newServeMux(dbClient db.Store, vectorStore db.VectorStore, embedder engine.Embedder, indexCooldown time.Duration, searchOpts engine.SearchOptions) *http.ServeMux {
 	mux := http.NewServeMux()
 
 	// 1. Health check endpoint
@@ -207,7 +207,7 @@ func newServeMux(dbClient db.Store, vectorStore db.VectorStore, embedder engine.
 			}
 		}
 
-		results, err := engine.SearchHybrid(dbClient, vectorStore, embedder, query, limit)
+		results, err := engine.SearchHybridWithOptions(dbClient, vectorStore, embedder, query, limit, searchOpts)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -241,7 +241,7 @@ func newServeMux(dbClient db.Store, vectorStore db.VectorStore, embedder engine.
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("Connection", "keep-alive")
 
-		results, err := engine.SearchHybrid(dbClient, vectorStore, embedder, query, limit)
+		results, err := engine.SearchHybridWithOptions(dbClient, vectorStore, embedder, query, limit, searchOpts)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -320,7 +320,7 @@ func newServeMux(dbClient db.Store, vectorStore db.VectorStore, embedder engine.
 }
 
 // StartHTTPServer runs the local HTTP REST daemon.
-func StartHTTPServer(port int, ollamaCfg engine.OllamaConfig, indexCooldown time.Duration, quantCfg *db.QuantConfig) error {
+func StartHTTPServer(port int, ollamaCfg engine.OllamaConfig, indexCooldown time.Duration, quantCfg *db.QuantConfig, rerankCfg engine.RerankConfig) error {
 	dbClient, err := db.Open()
 	if err != nil {
 		return fmt.Errorf("failed to open database: %w", err)
@@ -329,7 +329,8 @@ func StartHTTPServer(port int, ollamaCfg engine.OllamaConfig, indexCooldown time
 	dbClient.SetQuantConfig(quantCfg)
 
 	embedder := engine.NewEmbeddingsGeneratorWithOllamaConfig(ollamaCfg)
-	mux := newServeMux(dbClient, dbClient, embedder, indexCooldown)
+	searchOpts := engine.SearchOptions{RerankCfg: rerankCfg}
+	mux := newServeMux(dbClient, dbClient, embedder, indexCooldown, searchOpts)
 
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	warnIfNoAuthToken(os.Stderr)
