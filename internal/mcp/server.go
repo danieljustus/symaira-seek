@@ -39,6 +39,8 @@ func StartServer(cfg engine.OllamaConfig, quantCfg *db.QuantConfig) error {
 	registerIndexDocument(server, dbClient, embedder)
 	registerIndexURL(server, dbClient, embedder)
 	registerMultiGet(server, dbClient, embedder)
+	registerSetContext(server, dbClient)
+	registerGetContexts(server, dbClient)
 
 	return server.ServeStdio(context.Background())
 }
@@ -68,9 +70,22 @@ func registerSearchDocuments(server *mcpserver.Server, dbClient db.Store, vector
 				return nil, &symerrors.SearchError{Query: params.Query, Err: err}
 			}
 
+			type contextMatcher interface {
+				GetMatchingContext(path string) (*db.FolderContext, error)
+			}
+			var matcher contextMatcher
+			if cm, ok := dbClient.(contextMatcher); ok {
+				matcher = cm
+			}
+
 			var textBuilder strings.Builder
 			for idx, r := range results {
 				textBuilder.WriteString(fmt.Sprintf("[%d] File: %s (Chunk %d, RRF Score: %.4f)\n", idx+1, r.Chunk.DocumentPath, r.Chunk.ChunkIndex, r.RRFScore))
+				if matcher != nil {
+					if fc, err := matcher.GetMatchingContext(r.Chunk.DocumentPath); err == nil && fc != nil {
+						textBuilder.WriteString(fmt.Sprintf("Context: %s — %s\n", fc.PathPrefix, fc.ContextText))
+					}
+				}
 				textBuilder.WriteString(r.Chunk.Content)
 				textBuilder.WriteString("\n\n")
 			}
@@ -439,6 +454,70 @@ func registerMultiGet(server *mcpserver.Server, dbClient db.Store, _ engine.Embe
 				textBuilder.WriteString(fmt.Sprintf("\n%d file(s) matched.\n", matchCount))
 			}
 
+			return textBuilder.String(), nil
+		},
+	})
+}
+
+func registerSetContext(server *mcpserver.Server, dbClient db.Store) {
+	server.RegisterTool(&mcpserver.Tool{
+		Name:        "set_context",
+		Description: "Store descriptive context text for a filesystem path prefix. Later searches will display the matching context for each result. Use to annotate folder trees with QMD-style metadata.",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"path":{"type":"string","description":"Path prefix to associate with context (e.g. \"/home/user/docs/api\")"},"text":{"type":"string","description":"Descriptive context text for this path prefix"}},"required":["path","text"]}`),
+		Handler: func(ctx context.Context, input json.RawMessage) (any, error) {
+			var params struct {
+				Path string `json:"path"`
+				Text string `json:"text"`
+			}
+			if err := json.Unmarshal(input, &params); err != nil {
+				return nil, &symerrors.ValidationError{Field: "params", Message: err.Error()}
+			}
+			if params.Path == "" {
+				return nil, &symerrors.ValidationError{Field: "path", Message: "missing or invalid path argument"}
+			}
+			if params.Text == "" {
+				return nil, &symerrors.ValidationError{Field: "text", Message: "missing or invalid text argument"}
+			}
+
+			type contextSetter interface {
+				SetFolderContext(path, text string) error
+			}
+			cs, ok := dbClient.(contextSetter)
+			if !ok {
+				return nil, fmt.Errorf("database does not support folder contexts")
+			}
+			if err := cs.SetFolderContext(params.Path, params.Text); err != nil {
+				return nil, &symerrors.DatabaseError{Op: "set folder context", Err: err}
+			}
+			return fmt.Sprintf("Context set for %s", params.Path), nil
+		},
+	})
+}
+
+func registerGetContexts(server *mcpserver.Server, dbClient db.Store) {
+	server.RegisterTool(&mcpserver.Tool{
+		Name:        "get_contexts",
+		Description: "List all stored folder context entries. Shows each path prefix and its associated context text.",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{}}`),
+		Handler: func(ctx context.Context, input json.RawMessage) (any, error) {
+			type contextLister interface {
+				GetFolderContexts() ([]db.FolderContext, error)
+			}
+			cl, ok := dbClient.(contextLister)
+			if !ok {
+				return nil, fmt.Errorf("database does not support folder contexts")
+			}
+			contexts, err := cl.GetFolderContexts()
+			if err != nil {
+				return nil, &symerrors.DatabaseError{Op: "list folder contexts", Err: err}
+			}
+			if len(contexts) == 0 {
+				return "No folder contexts configured.", nil
+			}
+			var textBuilder strings.Builder
+			for _, fc := range contexts {
+				textBuilder.WriteString(fmt.Sprintf("%s — %s\n", fc.PathPrefix, fc.ContextText))
+			}
 			return textBuilder.String(), nil
 		},
 	})

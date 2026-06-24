@@ -63,6 +63,14 @@ func (m *mockStore) DetectMixedEmbeddingSpaces() (map[string]int, error) {
 	return nil, nil
 }
 
+func (m *mockStore) SetFolderContext(path, text string) error { return nil }
+func (m *mockStore) GetFolderContexts() ([]db.FolderContext, error) {
+	return nil, nil
+}
+func (m *mockStore) GetMatchingContext(path string) (*db.FolderContext, error) {
+	return nil, nil
+}
+
 func (m *mockStore) ListDocuments() ([]*db.Document, error) {
 	if m.listDocumentsFn != nil {
 		return m.listDocumentsFn()

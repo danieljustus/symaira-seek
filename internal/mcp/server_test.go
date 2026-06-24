@@ -24,6 +24,8 @@ type fakeStore struct {
 	searchFunc   func(query string, limit int) ([]*db.SearchResult, error)
 	getDocFunc   func(path string) (*db.Document, error)
 	listDocsFunc func() ([]*db.Document, error)
+
+	folderContexts map[string]string
 }
 
 func (f *fakeStore) Close() error                                             { return nil }
@@ -60,6 +62,37 @@ func (f *fakeStore) SearchVector(queryVec []float32, limit int) ([]*db.SearchRes
 
 func (f *fakeStore) DetectMixedEmbeddingSpaces() (map[string]int, error) {
 	return nil, nil
+}
+
+func (f *fakeStore) SetFolderContext(path, text string) error {
+	if f.folderContexts == nil {
+		f.folderContexts = make(map[string]string)
+	}
+	f.folderContexts[path] = text
+	return nil
+}
+
+func (f *fakeStore) GetFolderContexts() ([]db.FolderContext, error) {
+	var contexts []db.FolderContext
+	for p, t := range f.folderContexts {
+		contexts = append(contexts, db.FolderContext{PathPrefix: p, ContextText: t})
+	}
+	return contexts, nil
+}
+
+func (f *fakeStore) GetMatchingContext(path string) (*db.FolderContext, error) {
+	if f.folderContexts == nil {
+		return nil, nil
+	}
+	var best *db.FolderContext
+	bestLen := 0
+	for prefix, text := range f.folderContexts {
+		if strings.HasPrefix(path, prefix) && len(prefix) > bestLen {
+			best = &db.FolderContext{PathPrefix: prefix, ContextText: text}
+			bestLen = len(prefix)
+		}
+	}
+	return best, nil
 }
 
 func (f *fakeStore) Upsert(_ context.Context, _ []*db.Chunk) error { return nil }
@@ -104,6 +137,8 @@ func newTestServer(store db.Store, vectorStore db.VectorStore, embedder engine.E
 	registerIndexDocument(s, store, embedder)
 	registerIndexURL(s, store, embedder)
 	registerMultiGet(s, store, embedder)
+	registerSetContext(s, store)
+	registerGetContexts(s, store)
 	return s
 }
 
@@ -222,7 +257,7 @@ func TestServerToolsList(t *testing.T) {
 		toolMap := tool.(map[string]interface{})
 		names[toolMap["name"].(string)] = true
 	}
-	expected := []string{"search_documents", "read_document", "list_documents", "get_context", "index_document", "index_url", "multi_get"}
+	expected := []string{"search_documents", "read_document", "list_documents", "get_context", "index_document", "index_url", "multi_get", "set_context", "get_contexts"}
 	for _, n := range expected {
 		if !names[n] {
 			t.Errorf("missing tool: %s", n)
@@ -1465,5 +1500,169 @@ func TestMultiGet_DeepGlob(t *testing.T) {
 	}
 	if strings.Contains(got, "root content") {
 		t.Error("should not contain root content")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// set_context / get_contexts tests
+// ---------------------------------------------------------------------------
+
+func callTool(t *testing.T, server *mcpserver.Server, name string, args map[string]interface{}) (string, bool) {
+	t.Helper()
+	params, _ := json.Marshal(map[string]interface{}{
+		"name":      name,
+		"arguments": args,
+	})
+	resp := pipeRequest(t, server, jsonRPCRequest{
+		JSONRPC: "2.0",
+		ID:      float64(1),
+		Method:  "tools/call",
+		Params:  params,
+	})
+	if resp.Error != nil {
+		t.Fatalf("unexpected JSON-RPC error: %v", resp.Error)
+	}
+	result, ok := resp.Result.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected result map, got %T", resp.Result)
+	}
+	isError := result["isError"] == true
+	content := result["content"].([]interface{})
+	text := content[0].(map[string]interface{})["text"].(string)
+	return text, isError
+}
+
+func TestSetContext_Roundtrip(t *testing.T) {
+	store := &fakeStore{}
+	embed := &fakeEmbedder{}
+	server := newTestServer(store, store, embed)
+
+	got, isError := callTool(t, server, "set_context", map[string]interface{}{
+		"path": "/home/user/docs/api",
+		"text": "API documentation for the project",
+	})
+	if isError {
+		t.Fatalf("set_context failed: %s", got)
+	}
+	if !strings.Contains(got, "Context set for /home/user/docs/api") {
+		t.Errorf("unexpected set_context response: %s", got)
+	}
+
+	got2, isError2 := callTool(t, server, "get_contexts", map[string]interface{}{})
+	if isError2 {
+		t.Fatalf("get_contexts failed: %s", got2)
+	}
+	if !strings.Contains(got2, "/home/user/docs/api") {
+		t.Errorf("expected path in get_contexts output, got: %s", got2)
+	}
+	if !strings.Contains(got2, "API documentation for the project") {
+		t.Errorf("expected context text in get_contexts output, got: %s", got2)
+	}
+}
+
+func TestGetContexts_Empty(t *testing.T) {
+	store := &fakeStore{}
+	embed := &fakeEmbedder{}
+	server := newTestServer(store, store, embed)
+
+	got, isError := callTool(t, server, "get_contexts", map[string]interface{}{})
+	if isError {
+		t.Fatalf("get_contexts failed: %s", got)
+	}
+	if !strings.Contains(got, "No folder contexts configured") {
+		t.Errorf("expected empty message, got: %s", got)
+	}
+}
+
+func TestSetContext_MissingPath(t *testing.T) {
+	store := &fakeStore{}
+	embed := &fakeEmbedder{}
+	server := newTestServer(store, store, embed)
+
+	_, isError := callTool(t, server, "set_context", map[string]interface{}{
+		"text": "some text",
+	})
+	if !isError {
+		t.Fatal("expected error for missing path")
+	}
+}
+
+func TestSetContext_MissingText(t *testing.T) {
+	store := &fakeStore{}
+	embed := &fakeEmbedder{}
+	server := newTestServer(store, store, embed)
+
+	_, isError := callTool(t, server, "set_context", map[string]interface{}{
+		"path": "/some/path",
+	})
+	if !isError {
+		t.Fatal("expected error for missing text")
+	}
+}
+
+func TestSearchDocuments_LongestPrefixMatch(t *testing.T) {
+	store := &fakeStore{
+		searchFunc: func(query string, limit int) ([]*db.SearchResult, error) {
+			return []*db.SearchResult{
+				{
+					Chunk: &db.Chunk{
+						DocumentPath: "/home/user/docs/api/auth.md",
+						ChunkIndex:   0,
+						Content:      "Auth content",
+					},
+					RRFScore: 0.75,
+				},
+			}, nil
+		},
+		folderContexts: map[string]string{
+			"/home/user/docs":      "General docs",
+			"/home/user/docs/api":  "API documentation",
+		},
+	}
+	embed := &fakeEmbedder{}
+	server := newTestServer(store, store, embed)
+
+	got, isError := callTool(t, server, "search_documents", map[string]interface{}{
+		"query": "auth",
+		"limit": float64(5),
+	})
+	if isError {
+		t.Fatalf("search_documents failed: %s", got)
+	}
+	if !strings.Contains(got, "Context: /home/user/docs/api — API documentation") {
+		t.Errorf("expected longest prefix context in output, got:\n%s", got)
+	}
+}
+
+func TestSearchDocuments_NoContextMatch(t *testing.T) {
+	store := &fakeStore{
+		searchFunc: func(query string, limit int) ([]*db.SearchResult, error) {
+			return []*db.SearchResult{
+				{
+					Chunk: &db.Chunk{
+						DocumentPath: "/home/user/projects/app.go",
+						ChunkIndex:   0,
+						Content:      "Go code",
+					},
+					RRFScore: 0.6,
+				},
+			}, nil
+		},
+		folderContexts: map[string]string{
+			"/home/user/docs": "Docs context",
+		},
+	}
+	embed := &fakeEmbedder{}
+	server := newTestServer(store, store, embed)
+
+	got, isError := callTool(t, server, "search_documents", map[string]interface{}{
+		"query": "app",
+		"limit": float64(5),
+	})
+	if isError {
+		t.Fatalf("search_documents failed: %s", got)
+	}
+	if strings.Contains(got, "Context:") {
+		t.Errorf("expected no context line when no prefix matches, got:\n%s", got)
 	}
 }
