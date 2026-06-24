@@ -320,7 +320,7 @@ func newServeMux(dbClient db.Store, vectorStore db.VectorStore, embedder engine.
 }
 
 // StartHTTPServer runs the local HTTP REST daemon.
-func StartHTTPServer(port int, ollamaCfg engine.OllamaConfig, indexCooldown time.Duration, quantCfg *db.QuantConfig, rerankCfg engine.RerankConfig) error {
+func StartHTTPServer(port int, ollamaCfg engine.OllamaConfig, indexCooldown time.Duration, quantCfg *db.QuantConfig, rerankCfg engine.RerankConfig, expandCfg engine.ExpandConfig) error {
 	dbClient, err := db.Open()
 	if err != nil {
 		return fmt.Errorf("failed to open database: %w", err)
@@ -329,7 +329,7 @@ func StartHTTPServer(port int, ollamaCfg engine.OllamaConfig, indexCooldown time
 	dbClient.SetQuantConfig(quantCfg)
 
 	embedder := engine.NewEmbeddingsGeneratorWithOllamaConfig(ollamaCfg)
-	searchOpts := engine.SearchOptions{RerankCfg: rerankCfg}
+	searchOpts := engine.SearchOptions{RerankCfg: rerankCfg, ExpandCfg: expandCfg}
 	mux := newServeMux(dbClient, dbClient, embedder, indexCooldown, searchOpts)
 
 	addr := fmt.Sprintf("127.0.0.1:%d", port)

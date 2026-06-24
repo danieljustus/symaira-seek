@@ -1398,7 +1398,7 @@ func TestStartHTTPServer_ListensAndServe(t *testing.T) {
 
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- StartHTTPServer(0, engine.OllamaConfig{}, 5*time.Second, nil, engine.RerankConfig{})
+		errCh <- StartHTTPServer(0, engine.OllamaConfig{}, 5*time.Second, nil, engine.RerankConfig{}, engine.ExpandConfig{})
 	}()
 
 	time.Sleep(200 * time.Millisecond)

@@ -90,8 +90,9 @@ func newRootCmd() *cobra.Command {
 			defer dbClient.Close()
 
 			embedder := engine.NewEmbeddingsGeneratorWithOllamaConfig(cfg.OllamaConfig())
+			searchOpts := engine.SearchOptions{ExpandCfg: cfg.ExpandConfig()}
 
-			results, err := engine.SearchHybrid(dbClient, dbClient, embedder, query, limitFlag)
+			results, err := engine.SearchHybridWithOptions(dbClient, dbClient, embedder, query, limitFlag, searchOpts)
 			if err != nil {
 				return err
 			}
@@ -363,12 +364,12 @@ func startHTTPServer(port int) error {
 	if cooldown <= 0 {
 		cooldown = 5 * time.Second
 	}
-	return server.StartHTTPServer(port, cfg.OllamaConfig(), cooldown, cfg.QuantDBConfig(), cfg.RerankConfig())
+	return server.StartHTTPServer(port, cfg.OllamaConfig(), cooldown, cfg.QuantDBConfig(), cfg.RerankConfig(), cfg.ExpandConfig())
 }
 
 func startMCPServer() error {
 	mcp.ServerVersion = version
-	return mcp.StartServer(cfg.OllamaConfig(), cfg.QuantDBConfig(), cfg.RerankConfig())
+	return mcp.StartServer(cfg.OllamaConfig(), cfg.QuantDBConfig(), cfg.RerankConfig(), cfg.ExpandConfig())
 }
 
 func writeSearchHuman(w io.Writer, results []*db.SearchResult) {

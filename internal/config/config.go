@@ -36,6 +36,11 @@ type Config struct {
 	RerankQuery          bool   `json:"rerank_query" toml:"rerank_query"`                       // enable Ollama re-ranking of search results
 	RerankModel          string `json:"rerank_model" toml:"rerank_model"`                       // chat model for re-ranking; empty = reuse embedding model
 	RerankTimeoutSeconds int    `json:"rerank_timeout_seconds" toml:"rerank_timeout_seconds"`   // per-request timeout for reranking
+
+	// HyDE query expansion (opt-in, off by default).
+	ExpandQuery          bool   `json:"expand_query" toml:"expand_query"`                       // enable HyDE query expansion via Ollama chat
+	ExpandModel          string `json:"expand_model" toml:"expand_model"`                       // chat model for expansion; empty = reuse embedding model
+	ExpandTimeoutSeconds int    `json:"expand_timeout_seconds" toml:"expand_timeout_seconds"`   // per-request timeout for expansion
 }
 
 // DefaultConfig returns the default configuration values.
@@ -55,6 +60,9 @@ func DefaultConfig() *Config {
 		RerankQuery:               false,
 		RerankModel:               "",
 		RerankTimeoutSeconds:      120,
+		ExpandQuery:               false,
+		ExpandModel:               "",
+		ExpandTimeoutSeconds:      120,
 	}
 }
 
@@ -111,6 +119,24 @@ func (c *Config) RerankConfig() engine.RerankConfig {
 	}
 	return engine.RerankConfig{
 		Enabled: c.RerankQuery,
+		URL:     c.OllamaURL,
+		Model:   model,
+		Timeout: timeout,
+	}
+}
+
+// ExpandConfig converts the config's expansion fields to an engine.ExpandConfig.
+func (c *Config) ExpandConfig() engine.ExpandConfig {
+	model := c.ExpandModel
+	if model == "" {
+		model = c.Model
+	}
+	timeout := time.Duration(c.ExpandTimeoutSeconds) * time.Second
+	if timeout <= 0 {
+		timeout = 120 * time.Second
+	}
+	return engine.ExpandConfig{
+		Enabled: c.ExpandQuery,
 		URL:     c.OllamaURL,
 		Model:   model,
 		Timeout: timeout,
@@ -275,8 +301,22 @@ func SetValue(cfgFile string, key, value string, cfg *Config) error {
 			return fmt.Errorf("invalid %s value %q (must be a positive integer)", key, value)
 		}
 		cfg.RerankTimeoutSeconds = n
+	case "expand_query":
+		b, err := strconv.ParseBool(value)
+		if err != nil {
+			return fmt.Errorf("invalid %s value %q (must be true or false)", key, value)
+		}
+		cfg.ExpandQuery = b
+	case "expand_model":
+		cfg.ExpandModel = value
+	case "expand_timeout_seconds":
+		n, err := strconv.Atoi(value)
+		if err != nil || n <= 0 {
+			return fmt.Errorf("invalid %s value %q (must be a positive integer)", key, value)
+		}
+		cfg.ExpandTimeoutSeconds = n
 	default:
-		return fmt.Errorf("unknown config key %q (supported: ollama_url, model, embedding_dim, timeout_seconds, retry_count, retry_backoff_ms, index_cooldown_seconds, vector_backend, vector_quantization, vector_quant_bits, vector_quantized_shortlist, vector_exact_rerank, rerank_query, rerank_model, rerank_timeout_seconds)", key)
+		return fmt.Errorf("unknown config key %q (supported: ollama_url, model, embedding_dim, timeout_seconds, retry_count, retry_backoff_ms, index_cooldown_seconds, vector_backend, vector_quantization, vector_quant_bits, vector_quantized_shortlist, vector_exact_rerank, rerank_query, rerank_model, rerank_timeout_seconds, expand_query, expand_model, expand_timeout_seconds)", key)
 	}
 	return Save(cfgFile, cfg)
 }

@@ -14,6 +14,7 @@ import (
 // SearchOptions configures optional behaviour for SearchHybridWithOptions.
 type SearchOptions struct {
 	RerankCfg RerankConfig
+	ExpandCfg ExpandConfig
 }
 
 // SearchHybrid combines BM25 keyword search and semantic vector search using Reciprocal Rank Fusion (RRF).
@@ -48,6 +49,18 @@ func SearchHybridWithOptions(dbClient db.Store, vectorStore db.VectorStore, embe
 	// 1. Generate query vector (no retry — fast fallback when Ollama is offline, issue #162)
 	queryVec := embedder.GenerateVectorNoRetry(query)
 
+	// 1a. Optional HyDE query expansion: generate a hypothetical document
+	// passage via Ollama chat and average it with the original query vector.
+	searchVec := queryVec
+	if opts.ExpandCfg.Enabled {
+		expander := NewExpander(opts.ExpandCfg)
+		if expandedText, err := expander.Expand(query); err == nil {
+			searchVec = computeExpandedVec(embedder, queryVec, expandedText)
+		} else {
+			fmt.Fprintf(os.Stderr, "engine: HyDE expansion failed (%v), using original query vector\n", err)
+		}
+	}
+
 	// We fetch a bit more than limit to ensure good fusion overlap
 	fetchLimit := limit * 3
 	if fetchLimit < 50 {
@@ -75,7 +88,7 @@ func SearchHybridWithOptions(dbClient db.Store, vectorStore db.VectorStore, embe
 	}()
 	go func() {
 		defer wg.Done()
-		vectorResults, vectorErr = vectorStore.Search(context.Background(), queryVec, fetchLimit)
+		vectorResults, vectorErr = vectorStore.Search(context.Background(), searchVec, fetchLimit)
 	}()
 	wg.Wait()
 

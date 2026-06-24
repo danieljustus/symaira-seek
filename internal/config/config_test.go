@@ -561,3 +561,143 @@ func TestSetValue_PersistsRerankConfig(t *testing.T) {
 		t.Error("expected rerank_query in config file")
 	}
 }
+
+func TestDefaultConfig_ExpandDefaults(t *testing.T) {
+	cfg := DefaultConfig()
+	if cfg.ExpandQuery {
+		t.Error("expected default ExpandQuery=false")
+	}
+	if cfg.ExpandModel != "" {
+		t.Errorf("expected default ExpandModel empty, got %q", cfg.ExpandModel)
+	}
+	if cfg.ExpandTimeoutSeconds != 120 {
+		t.Errorf("expected default ExpandTimeoutSeconds=120, got %d", cfg.ExpandTimeoutSeconds)
+	}
+}
+
+func TestSetValue_AcceptsExpandQuery(t *testing.T) {
+	dir := t.TempDir()
+	cfgFile := filepath.Join(dir, "config.toml")
+	cfg := DefaultConfig()
+
+	if err := SetValue(cfgFile, "expand_query", "true", cfg); err != nil {
+		t.Fatalf("SetValue(expand_query): %v", err)
+	}
+	if !cfg.ExpandQuery {
+		t.Error("expected ExpandQuery=true")
+	}
+}
+
+func TestSetValue_RejectsInvalidExpandQuery(t *testing.T) {
+	dir := t.TempDir()
+	cfgFile := filepath.Join(dir, "config.toml")
+	cfg := DefaultConfig()
+
+	if err := SetValue(cfgFile, "expand_query", "maybe", cfg); err == nil {
+		t.Error("expected error for invalid expand_query")
+	}
+}
+
+func TestSetValue_AcceptsExpandModel(t *testing.T) {
+	dir := t.TempDir()
+	cfgFile := filepath.Join(dir, "config.toml")
+	cfg := DefaultConfig()
+
+	if err := SetValue(cfgFile, "expand_model", "qwen2.5", cfg); err != nil {
+		t.Fatalf("SetValue(expand_model): %v", err)
+	}
+	if cfg.ExpandModel != "qwen2.5" {
+		t.Errorf("expected ExpandModel=qwen2.5, got %q", cfg.ExpandModel)
+	}
+}
+
+func TestSetValue_AcceptsEmptyExpandModel(t *testing.T) {
+	dir := t.TempDir()
+	cfgFile := filepath.Join(dir, "config.toml")
+	cfg := DefaultConfig()
+
+	if err := SetValue(cfgFile, "expand_model", "", cfg); err != nil {
+		t.Fatalf("SetValue(expand_model empty): %v", err)
+	}
+	if cfg.ExpandModel != "" {
+		t.Errorf("expected ExpandModel empty, got %q", cfg.ExpandModel)
+	}
+}
+
+func TestSetValue_AcceptsExpandTimeoutSeconds(t *testing.T) {
+	dir := t.TempDir()
+	cfgFile := filepath.Join(dir, "config.toml")
+	cfg := DefaultConfig()
+
+	if err := SetValue(cfgFile, "expand_timeout_seconds", "60", cfg); err != nil {
+		t.Fatalf("SetValue(expand_timeout_seconds): %v", err)
+	}
+	if cfg.ExpandTimeoutSeconds != 60 {
+		t.Errorf("expected ExpandTimeoutSeconds=60, got %d", cfg.ExpandTimeoutSeconds)
+	}
+}
+
+func TestSetValue_RejectsInvalidExpandTimeoutSeconds(t *testing.T) {
+	dir := t.TempDir()
+	cfgFile := filepath.Join(dir, "config.toml")
+	cfg := DefaultConfig()
+
+	if err := SetValue(cfgFile, "expand_timeout_seconds", "zero", cfg); err == nil {
+		t.Error("expected error for non-numeric expand_timeout_seconds")
+	}
+}
+
+func TestExpandConfig_UsesEmbeddingModelWhenEmpty(t *testing.T) {
+	cfg := &Config{
+		OllamaURL:            "http://x.test/api",
+		Model:                "nomic-embed-text",
+		ExpandQuery:          true,
+		ExpandModel:          "",
+		ExpandTimeoutSeconds: 60,
+	}
+	ec := cfg.ExpandConfig()
+	if !ec.Enabled {
+		t.Error("expected Enabled=true")
+	}
+	if ec.Model != "nomic-embed-text" {
+		t.Errorf("expected Model to fall back to embedding model, got %q", ec.Model)
+	}
+	if ec.Timeout.Seconds() != 60 {
+		t.Errorf("expected Timeout=60s, got %v", ec.Timeout)
+	}
+}
+
+func TestExpandConfig_UsesExplicitModel(t *testing.T) {
+	cfg := &Config{
+		OllamaURL:            "http://x.test/api",
+		Model:                "nomic-embed-text",
+		ExpandQuery:          true,
+		ExpandModel:          "qwen2.5",
+		ExpandTimeoutSeconds: 90,
+	}
+	ec := cfg.ExpandConfig()
+	if ec.Model != "qwen2.5" {
+		t.Errorf("expected explicit model qwen2.5, got %q", ec.Model)
+	}
+	if ec.Timeout.Seconds() != 90 {
+		t.Errorf("expected Timeout=90s, got %v", ec.Timeout)
+	}
+}
+
+func TestSetValue_PersistsExpandConfig(t *testing.T) {
+	dir := t.TempDir()
+	cfgFile := filepath.Join(dir, "config.toml")
+	cfg := DefaultConfig()
+
+	if err := SetValue(cfgFile, "expand_query", "true", cfg); err != nil {
+		t.Fatalf("SetValue: %v", err)
+	}
+
+	data, err := os.ReadFile(cfgFile)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if !strings.Contains(string(data), "expand_query") {
+		t.Error("expected expand_query in config file")
+	}
+}

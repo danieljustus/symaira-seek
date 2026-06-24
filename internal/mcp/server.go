@@ -21,7 +21,7 @@ import (
 
 var ServerVersion = "dev"
 
-func StartServer(cfg engine.OllamaConfig, quantCfg *db.QuantConfig, rerankCfg engine.RerankConfig) error {
+func StartServer(cfg engine.OllamaConfig, quantCfg *db.QuantConfig, rerankCfg engine.RerankConfig, expandCfg engine.ExpandConfig) error {
 	dbClient, err := db.Open()
 	if err != nil {
 		return fmt.Errorf("failed to open database: %w", err)
@@ -30,7 +30,7 @@ func StartServer(cfg engine.OllamaConfig, quantCfg *db.QuantConfig, rerankCfg en
 	dbClient.SetQuantConfig(quantCfg)
 
 	embedder := engine.NewEmbeddingsGeneratorWithOllamaConfig(cfg)
-	searchOpts := engine.SearchOptions{RerankCfg: rerankCfg}
+	searchOpts := engine.SearchOptions{RerankCfg: rerankCfg, ExpandCfg: expandCfg}
 	server := mcpserver.New("symseek", ServerVersion)
 
 	registerSearchDocuments(server, dbClient, dbClient, embedder, searchOpts)

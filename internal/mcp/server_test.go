@@ -800,7 +800,7 @@ func TestStartServer_StdinEOF(t *testing.T) {
 		devNull.Close()
 	}()
 
-	if err := StartServer(engine.OllamaConfig{}, nil, engine.RerankConfig{}); err != nil {
+	if err := StartServer(engine.OllamaConfig{}, nil, engine.RerankConfig{}, engine.ExpandConfig{}); err != nil {
 		t.Fatalf("StartServer returned error: %v", err)
 	}
 }
