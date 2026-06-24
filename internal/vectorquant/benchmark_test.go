@@ -26,25 +26,20 @@ func TestBenchmarkReport(t *testing.T) {
 	}
 }
 
-// TestBenchmark768Dim runs the benchmark at the target 768 dimension.
-// Skipped by default; run with -run TestBenchmark768Dim.
-func TestBenchmark768Dim(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping 768-dim benchmark in short mode")
-	}
-
+// Benchmark768Dim runs the benchmark at the target 768 dimension.
+// Only runs with -bench; excluded from go test ./... by convention.
+func Benchmark768Dim(b *testing.B) {
 	cfg := DefaultBenchmarkConfig()
 	cfg.NumVectors = 500
 	cfg.NumQueries = 20
 
-	results := RunBenchmark(cfg)
-	report := FormatBenchmarkReport(cfg, results)
-	fmt.Fprint(os.Stderr, report)
-
-	for _, r := range results {
-		t.Logf("768-dim %s: recall@%d=%.4f, compression=%.1fx, bytes=%d",
-			r.BitWidth, cfg.K, r.TopKRecall, r.CompressionRatio, r.BytesPerVector)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		results := RunBenchmark(cfg)
+		_ = results
 	}
+	report := FormatBenchmarkReport(cfg, RunBenchmark(cfg))
+	fmt.Fprint(os.Stderr, report)
 }
 
 // TestBenchmarkRealistic runs the benchmark with cluster-structured vectors.
