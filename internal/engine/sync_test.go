@@ -575,7 +575,7 @@ func TestIndexDirectory(t *testing.T) {
 	}
 
 	// Verify update content by searching
-	res, err := SearchHybrid(dbClient, embedder, "extra information", 10)
+	res, err := SearchHybrid(dbClient, dbClient, embedder, "extra information", 10)
 	if err != nil {
 		t.Fatalf("hybrid search failed: %v", err)
 	}

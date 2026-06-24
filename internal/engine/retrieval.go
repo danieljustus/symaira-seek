@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"sort"
@@ -11,10 +12,10 @@ import (
 )
 
 // SearchHybrid combines BM25 keyword search and semantic vector search using Reciprocal Rank Fusion (RRF).
-// Both the persistence layer and the embedder are consumed through their
-// respective interfaces so callers can pass mocks or alternate
-// implementations in tests.
-func SearchHybrid(dbClient db.Store, embedder Embedder, query string, limit int) ([]*db.SearchResult, error) {
+// The BM25 leg uses db.Store while the vector leg uses the pluggable
+// db.VectorStore interface so callers can substitute alternate vector
+// backends without changing the engine layer.
+func SearchHybrid(dbClient db.Store, vectorStore db.VectorStore, embedder Embedder, query string, limit int) ([]*db.SearchResult, error) {
 	if query == "" {
 		return nil, nil
 	}
@@ -63,7 +64,7 @@ func SearchHybrid(dbClient db.Store, embedder Embedder, query string, limit int)
 	}()
 	go func() {
 		defer wg.Done()
-		vectorResults, vectorErr = dbClient.SearchVector(queryVec, fetchLimit)
+		vectorResults, vectorErr = vectorStore.Search(context.Background(), queryVec, fetchLimit)
 	}()
 	wg.Wait()
 

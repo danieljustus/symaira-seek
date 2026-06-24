@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -104,6 +105,15 @@ func (m *mockStore) GetChunksForDocument(docPath string) ([]*db.Chunk, error) {
 	return nil, nil
 }
 
+func (m *mockStore) Upsert(_ context.Context, _ []*db.Chunk) error { return nil }
+func (m *mockStore) Delete(_ context.Context, _ string) error     { return nil }
+func (m *mockStore) Search(_ context.Context, queryVec []float32, limit int) ([]*db.SearchResult, error) {
+	if m.searchVectorFn != nil {
+		return m.searchVectorFn(queryVec, limit)
+	}
+	return nil, nil
+}
+
 // ---------------------------------------------------------------------------
 // Mock engine.Embedder
 // ---------------------------------------------------------------------------
@@ -152,17 +162,17 @@ func (m *mockEmbedder) ModelName() string {
 // ---------------------------------------------------------------------------
 
 // testHandler returns the full middleware-wrapped handler for the mux.
-func testHandler(t *testing.T, store db.Store, embedder engine.Embedder, indexCooldown time.Duration) http.Handler {
+func testHandler(t *testing.T, store db.Store, vectorStore db.VectorStore, embedder engine.Embedder, indexCooldown time.Duration) http.Handler {
 	t.Helper()
-	mux := newServeMux(store, embedder, indexCooldown)
+	mux := newServeMux(store, vectorStore, embedder, indexCooldown)
 	return hostValidation(originValidation(contentTypeEnforcement(bearerTokenAuth(mux))))
 }
 
 // newTestServer starts an httptest.Server with the full handler chain.
 // The server is automatically closed when the test finishes.
-func newTestServer(t *testing.T, store db.Store, embedder engine.Embedder) *httptest.Server {
+func newTestServer(t *testing.T, store db.Store, vectorStore db.VectorStore, embedder engine.Embedder) *httptest.Server {
 	t.Helper()
-	handler := testHandler(t, store, embedder, 5*time.Second)
+	handler := testHandler(t, store, vectorStore, embedder, 5*time.Second)
 	srv := httptest.NewServer(handler)
 	t.Cleanup(srv.Close)
 	return srv
@@ -687,7 +697,7 @@ func TestWarnIfNoAuthToken_Set(t *testing.T) {
 func TestMux_HealthEndpoint(t *testing.T) {
 	store := &mockStore{}
 	embedder := &mockEmbedder{}
-	srv := newTestServer(t, store, embedder)
+	srv := newTestServer(t, store, store, embedder)
 
 	resp := doRequest(t, "GET", srv.URL+"/health", "", nil)
 	defer resp.Body.Close()
@@ -717,7 +727,7 @@ func TestMux_StatusEndpoint_Success(t *testing.T) {
 		},
 	}
 	embedder := &mockEmbedder{}
-	srv := newTestServer(t, store, embedder)
+	srv := newTestServer(t, store, store, embedder)
 
 	resp := doRequest(t, "GET", srv.URL+"/status", "", nil)
 	defer resp.Body.Close()
@@ -748,7 +758,7 @@ func TestMux_StatusEndpoint_DBError(t *testing.T) {
 		},
 	}
 	embedder := &mockEmbedder{}
-	srv := newTestServer(t, store, embedder)
+	srv := newTestServer(t, store, store, embedder)
 
 	resp := doRequest(t, "GET", srv.URL+"/status", "", nil)
 	defer resp.Body.Close()
@@ -761,7 +771,7 @@ func TestMux_StatusEndpoint_DBError(t *testing.T) {
 func TestMux_SearchEndpoint_MissingQuery(t *testing.T) {
 	store := &mockStore{}
 	embedder := &mockEmbedder{}
-	srv := newTestServer(t, store, embedder)
+	srv := newTestServer(t, store, store, embedder)
 
 	resp := doRequest(t, "GET", srv.URL+"/search", "", nil)
 	defer resp.Body.Close()
@@ -779,7 +789,7 @@ func TestMux_SearchEndpoint_MissingQuery(t *testing.T) {
 func TestMux_SearchEndpoint_EmptyQuery(t *testing.T) {
 	store := &mockStore{}
 	embedder := &mockEmbedder{}
-	srv := newTestServer(t, store, embedder)
+	srv := newTestServer(t, store, store, embedder)
 
 	resp := doRequest(t, "GET", srv.URL+"/search?q=", "", nil)
 	defer resp.Body.Close()
@@ -805,7 +815,7 @@ func TestMux_SearchEndpoint_Success(t *testing.T) {
 		},
 	}
 	embedder := &mockEmbedder{}
-	srv := newTestServer(t, store, embedder)
+	srv := newTestServer(t, store, store, embedder)
 
 	resp := doRequest(t, "GET", srv.URL+"/search?q=test+query", "", nil)
 	defer resp.Body.Close()
@@ -841,7 +851,7 @@ func TestMux_SearchEndpoint_CustomLimit(t *testing.T) {
 		},
 	}
 	embedder := &mockEmbedder{}
-	srv := newTestServer(t, store, embedder)
+	srv := newTestServer(t, store, store, embedder)
 
 	resp := doRequest(t, "GET", srv.URL+"/search?q=test&limit=10", "", nil)
 	defer resp.Body.Close()
@@ -866,7 +876,7 @@ func TestMux_SearchEndpoint_InvalidLimitFallback(t *testing.T) {
 		},
 	}
 	embedder := &mockEmbedder{}
-	srv := newTestServer(t, store, embedder)
+	srv := newTestServer(t, store, store, embedder)
 
 	resp := doRequest(t, "GET", srv.URL+"/search?q=test&limit=abc", "", nil)
 	defer resp.Body.Close()
@@ -886,7 +896,7 @@ func TestMux_SearchEndpoint_NegativeLimitFallback(t *testing.T) {
 		},
 	}
 	embedder := &mockEmbedder{}
-	srv := newTestServer(t, store, embedder)
+	srv := newTestServer(t, store, store, embedder)
 
 	resp := doRequest(t, "GET", srv.URL+"/search?q=test&limit=-3", "", nil)
 	defer resp.Body.Close()
@@ -906,7 +916,7 @@ func TestMux_SearchEndpoint_SearchError(t *testing.T) {
 		},
 	}
 	embedder := &mockEmbedder{}
-	srv := newTestServer(t, store, embedder)
+	srv := newTestServer(t, store, store, embedder)
 
 	resp := doRequest(t, "GET", srv.URL+"/search?q=test", "", nil)
 	defer resp.Body.Close()
@@ -919,7 +929,7 @@ func TestMux_SearchEndpoint_SearchError(t *testing.T) {
 func TestMux_SearchStreamEndpoint_MissingQuery(t *testing.T) {
 	store := &mockStore{}
 	embedder := &mockEmbedder{}
-	srv := newTestServer(t, store, embedder)
+	srv := newTestServer(t, store, store, embedder)
 
 	resp := doRequest(t, "GET", srv.URL+"/search/stream", "", nil)
 	defer resp.Body.Close()
@@ -950,7 +960,7 @@ func TestMux_SearchStreamEndpoint_Success(t *testing.T) {
 		},
 	}
 	embedder := &mockEmbedder{}
-	srv := newTestServer(t, store, embedder)
+	srv := newTestServer(t, store, store, embedder)
 
 	resp := doRequest(t, "GET", srv.URL+"/search/stream?q=test+stream", "", nil)
 	defer resp.Body.Close()
@@ -1000,7 +1010,7 @@ func TestMux_SearchStreamEndpoint_SearchError(t *testing.T) {
 		},
 	}
 	embedder := &mockEmbedder{}
-	srv := newTestServer(t, store, embedder)
+	srv := newTestServer(t, store, store, embedder)
 
 	resp := doRequest(t, "GET", srv.URL+"/search/stream?q=fail", "", nil)
 	defer resp.Body.Close()
@@ -1013,7 +1023,7 @@ func TestMux_SearchStreamEndpoint_SearchError(t *testing.T) {
 func TestMux_IndexEndpoint_MethodNotAllowed(t *testing.T) {
 	store := &mockStore{}
 	embedder := &mockEmbedder{}
-	srv := newTestServer(t, store, embedder)
+	srv := newTestServer(t, store, store, embedder)
 
 	resp := doRequest(t, "GET", srv.URL+"/index", "", nil)
 	defer resp.Body.Close()
@@ -1026,7 +1036,7 @@ func TestMux_IndexEndpoint_MethodNotAllowed(t *testing.T) {
 func TestMux_IndexEndpoint_BadContentType(t *testing.T) {
 	store := &mockStore{}
 	embedder := &mockEmbedder{}
-	srv := newTestServer(t, store, embedder)
+	srv := newTestServer(t, store, store, embedder)
 
 	resp := doRequest(t, "POST", srv.URL+"/index", `{"path":"/tmp"}`,
 		map[string]string{"Content-Type": "text/plain"})
@@ -1040,7 +1050,7 @@ func TestMux_IndexEndpoint_BadContentType(t *testing.T) {
 func TestMux_IndexEndpoint_BadJSON(t *testing.T) {
 	store := &mockStore{}
 	embedder := &mockEmbedder{}
-	srv := newTestServer(t, store, embedder)
+	srv := newTestServer(t, store, store, embedder)
 
 	resp := doRequest(t, "POST", srv.URL+"/index", `not-json`,
 		map[string]string{"Content-Type": "application/json"})
@@ -1054,7 +1064,7 @@ func TestMux_IndexEndpoint_BadJSON(t *testing.T) {
 func TestMux_IndexEndpoint_EmptyJSONBody(t *testing.T) {
 	store := &mockStore{}
 	embedder := &mockEmbedder{}
-	srv := newTestServer(t, store, embedder)
+	srv := newTestServer(t, store, store, embedder)
 
 	resp := doRequest(t, "POST", srv.URL+"/index", `{}`,
 		map[string]string{"Content-Type": "application/json"})
@@ -1074,7 +1084,7 @@ func TestMux_IndexEndpoint_PathOutsideHome(t *testing.T) {
 	withTempHome(t)
 	store := &mockStore{}
 	embedder := &mockEmbedder{}
-	srv := newTestServer(t, store, embedder)
+	srv := newTestServer(t, store, store, embedder)
 
 	resp := doRequest(t, "POST", srv.URL+"/index",
 		`{"path":"/etc"}`,
@@ -1090,7 +1100,7 @@ func TestMux_IndexEndpoint_PathNotFound(t *testing.T) {
 	withTempHome(t)
 	store := &mockStore{}
 	embedder := &mockEmbedder{}
-	srv := newTestServer(t, store, embedder)
+	srv := newTestServer(t, store, store, embedder)
 
 	resp := doRequest(t, "POST", srv.URL+"/index",
 		`{"path":"/nonexistent/path/that/does/not/exist"}`,
@@ -1114,7 +1124,7 @@ func TestMux_IndexEndpoint_RateLimit(t *testing.T) {
 	}
 	embedder := &mockEmbedder{}
 	// Very long cooldown to guarantee rate limiting on second request
-	handler := testHandler(t, store, embedder, 24*time.Hour)
+	handler := testHandler(t, store, store, embedder, 24*time.Hour)
 	srv := httptest.NewServer(handler)
 	t.Cleanup(srv.Close)
 
@@ -1164,7 +1174,7 @@ func TestMux_IndexEndpoint_Success(t *testing.T) {
 			return vecs
 		},
 	}
-	srv := newTestServer(t, store, embedder)
+	srv := newTestServer(t, store, store, embedder)
 
 	payload := fmt.Sprintf(`{"path":%q}`, subdir)
 	resp := doRequest(t, "POST", srv.URL+"/index", payload,
@@ -1205,7 +1215,7 @@ func TestMux_IndexEndpoint_IndexDirectoryError(t *testing.T) {
 		},
 	}
 	embedder := &mockEmbedder{}
-	srv := newTestServer(t, store, embedder)
+	srv := newTestServer(t, store, store, embedder)
 
 	payload := fmt.Sprintf(`{"path":%q}`, subdir)
 	resp := doRequest(t, "POST", srv.URL+"/index", payload,
@@ -1224,7 +1234,7 @@ func TestMux_IndexEndpoint_IndexDirectoryError(t *testing.T) {
 func TestFullChain_HostValidationRejects(t *testing.T) {
 	store := &mockStore{}
 	embedder := &mockEmbedder{}
-	handler := testHandler(t, store, embedder, 5*time.Second)
+	handler := testHandler(t, store, store, embedder, 5*time.Second)
 
 	req := httptest.NewRequest("GET", "/health", nil)
 	req.Host = "evil.example.com"
@@ -1239,7 +1249,7 @@ func TestFullChain_HostValidationRejects(t *testing.T) {
 func TestFullChain_OriginValidationRejects(t *testing.T) {
 	store := &mockStore{}
 	embedder := &mockEmbedder{}
-	handler := testHandler(t, store, embedder, 5*time.Second)
+	handler := testHandler(t, store, store, embedder, 5*time.Second)
 
 	req := httptest.NewRequest("GET", "/health", nil)
 	req.Host = "127.0.0.1:8788"
@@ -1258,7 +1268,7 @@ func TestFullChain_BearerTokenRejects(t *testing.T) {
 
 	store := &mockStore{}
 	embedder := &mockEmbedder{}
-	handler := testHandler(t, store, embedder, 5*time.Second)
+	handler := testHandler(t, store, store, embedder, 5*time.Second)
 
 	req := httptest.NewRequest("GET", "/health", nil)
 	req.Host = "127.0.0.1:8788"
@@ -1276,7 +1286,7 @@ func TestFullChain_BearerTokenAccepts(t *testing.T) {
 
 	store := &mockStore{}
 	embedder := &mockEmbedder{}
-	handler := testHandler(t, store, embedder, 5*time.Second)
+	handler := testHandler(t, store, store, embedder, 5*time.Second)
 
 	req := httptest.NewRequest("GET", "/health", nil)
 	req.Host = "127.0.0.1:8788"
@@ -1292,7 +1302,7 @@ func TestFullChain_BearerTokenAccepts(t *testing.T) {
 func TestFullChain_ContentTypeRejectsOnIndex(t *testing.T) {
 	store := &mockStore{}
 	embedder := &mockEmbedder{}
-	handler := testHandler(t, store, embedder, 5*time.Second)
+	handler := testHandler(t, store, store, embedder, 5*time.Second)
 
 	req := httptest.NewRequest("POST", "/index", strings.NewReader(`{"path":"/tmp"}`))
 	req.Host = "127.0.0.1:8788"
@@ -1308,7 +1318,7 @@ func TestFullChain_ContentTypeRejectsOnIndex(t *testing.T) {
 func TestFullChain_AllowsGETOnNonIndexWithoutContentType(t *testing.T) {
 	store := &mockStore{}
 	embedder := &mockEmbedder{}
-	handler := testHandler(t, store, embedder, 5*time.Second)
+	handler := testHandler(t, store, store, embedder, 5*time.Second)
 
 	req := httptest.NewRequest("GET", "/search?q=test", nil)
 	req.Host = "127.0.0.1:8788"
@@ -1326,7 +1336,7 @@ func TestFullChain_AllOptionsOnHealthEndpoint(t *testing.T) {
 
 	store := &mockStore{}
 	embedder := &mockEmbedder{}
-	handler := testHandler(t, store, embedder, 5*time.Second)
+	handler := testHandler(t, store, store, embedder, 5*time.Second)
 
 	req := httptest.NewRequest("GET", "/health", nil)
 	req.Host = "127.0.0.1:8788"
@@ -1343,7 +1353,7 @@ func TestFullChain_AllOptionsOnHealthEndpoint(t *testing.T) {
 func TestFullChain_IndexMethodNotAllowed(t *testing.T) {
 	store := &mockStore{}
 	embedder := &mockEmbedder{}
-	handler := testHandler(t, store, embedder, 5*time.Second)
+	handler := testHandler(t, store, store, embedder, 5*time.Second)
 
 	req := httptest.NewRequest("DELETE", "/index", nil)
 	req.Host = "127.0.0.1:8788"
@@ -1358,7 +1368,7 @@ func TestFullChain_IndexMethodNotAllowed(t *testing.T) {
 func TestFullChain_IndexBadContentTypeOverwrites(t *testing.T) {
 	store := &mockStore{}
 	embedder := &mockEmbedder{}
-	handler := testHandler(t, store, embedder, 5*time.Second)
+	handler := testHandler(t, store, store, embedder, 5*time.Second)
 
 	req := httptest.NewRequest("POST", "/index", strings.NewReader(`{"path":"/tmp"}`))
 	req.Host = "127.0.0.1:8788"

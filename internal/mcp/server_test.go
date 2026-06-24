@@ -62,6 +62,12 @@ func (f *fakeStore) DetectMixedEmbeddingSpaces() (map[string]int, error) {
 	return nil, nil
 }
 
+func (f *fakeStore) Upsert(_ context.Context, _ []*db.Chunk) error { return nil }
+func (f *fakeStore) Delete(_ context.Context, _ string) error     { return nil }
+func (f *fakeStore) Search(_ context.Context, _ []float32, _ int) ([]*db.SearchResult, error) {
+	return []*db.SearchResult{}, nil
+}
+
 type fakeEmbedder struct{}
 
 func (f *fakeEmbedder) GenerateVector(text string) []float32 {
@@ -88,13 +94,13 @@ func (f *fakeEmbedder) ModelName() string {
 	return "fake-model"
 }
 
-func newTestServer(store db.Store, embedder engine.Embedder) *mcpserver.Server {
+func newTestServer(store db.Store, vectorStore db.VectorStore, embedder engine.Embedder) *mcpserver.Server {
 	ServerVersion = "test-version"
 	s := mcpserver.New("symseek", ServerVersion)
-	registerSearchDocuments(s, store, embedder)
+	registerSearchDocuments(s, store, vectorStore, embedder)
 	registerReadDocument(s, store, embedder)
 	registerListDocuments(s, store, embedder)
-	registerGetContext(s, store, embedder)
+	registerGetContext(s, store, vectorStore, embedder)
 	registerIndexDocument(s, store, embedder)
 	registerIndexURL(s, store, embedder)
 	return s
@@ -166,7 +172,7 @@ func pipeRequest(t *testing.T, server *mcpserver.Server, req jsonRPCRequest) jso
 func TestServerInitialize(t *testing.T) {
 	store := &fakeStore{}
 	embed := &fakeEmbedder{}
-	server := newTestServer(store, embed)
+	server := newTestServer(store, store, embed)
 
 	resp := pipeRequest(t, server, jsonRPCRequest{
 		JSONRPC: "2.0",
@@ -196,7 +202,7 @@ func TestServerInitialize(t *testing.T) {
 func TestServerToolsList(t *testing.T) {
 	store := &fakeStore{}
 	embed := &fakeEmbedder{}
-	server := newTestServer(store, embed)
+	server := newTestServer(store, store, embed)
 
 	resp := pipeRequest(t, server, jsonRPCRequest{
 		JSONRPC: "2.0",
@@ -226,7 +232,7 @@ func TestServerToolsList(t *testing.T) {
 func TestServerMethodNotFound(t *testing.T) {
 	store := &fakeStore{}
 	embed := &fakeEmbedder{}
-	server := newTestServer(store, embed)
+	server := newTestServer(store, store, embed)
 
 	resp := pipeRequest(t, server, jsonRPCRequest{
 		JSONRPC: "2.0",
@@ -246,7 +252,7 @@ func TestServerMethodNotFound(t *testing.T) {
 func TestServerUnknownTool(t *testing.T) {
 	store := &fakeStore{}
 	embed := &fakeEmbedder{}
-	server := newTestServer(store, embed)
+	server := newTestServer(store, store, embed)
 
 	params, _ := json.Marshal(map[string]interface{}{
 		"name":      "unknown_tool",
@@ -271,7 +277,7 @@ func TestServerUnknownTool(t *testing.T) {
 func TestServerInvalidParams(t *testing.T) {
 	store := &fakeStore{}
 	embed := &fakeEmbedder{}
-	server := newTestServer(store, embed)
+	server := newTestServer(store, store, embed)
 
 	resp := pipeRequest(t, server, jsonRPCRequest{
 		JSONRPC: "2.0",
@@ -292,7 +298,7 @@ func TestServerInvalidParams(t *testing.T) {
 func TestServerNotificationsInitialized(t *testing.T) {
 	store := &fakeStore{}
 	embed := &fakeEmbedder{}
-	server := newTestServer(store, embed)
+	server := newTestServer(store, store, embed)
 
 	var stdout bytes.Buffer
 	reqData, _ := json.Marshal(jsonRPCRequest{
@@ -318,7 +324,7 @@ func TestServerSearchDocuments(t *testing.T) {
 		},
 	}
 	embed := &fakeEmbedder{}
-	server := newTestServer(store, embed)
+	server := newTestServer(store, store, embed)
 
 	params, _ := json.Marshal(map[string]interface{}{
 		"name": "search_documents",
@@ -342,7 +348,7 @@ func TestServerSearchDocuments(t *testing.T) {
 func TestServerSearchDocumentsMissingQuery(t *testing.T) {
 	store := &fakeStore{}
 	embed := &fakeEmbedder{}
-	server := newTestServer(store, embed)
+	server := newTestServer(store, store, embed)
 
 	params, _ := json.Marshal(map[string]interface{}{
 		"name":      "search_documents",
@@ -377,7 +383,7 @@ func TestServerListDocuments(t *testing.T) {
 		},
 	}
 	embed := &fakeEmbedder{}
-	server := newTestServer(store, embed)
+	server := newTestServer(store, store, embed)
 
 	params, _ := json.Marshal(map[string]interface{}{
 		"name":      "list_documents",
@@ -405,7 +411,7 @@ func TestServerListDocumentsWithFilter(t *testing.T) {
 		},
 	}
 	embed := &fakeEmbedder{}
-	server := newTestServer(store, embed)
+	server := newTestServer(store, store, embed)
 
 	params, _ := json.Marshal(map[string]interface{}{
 		"name": "list_documents",
@@ -432,7 +438,7 @@ func TestServerGetContext(t *testing.T) {
 		},
 	}
 	embed := &fakeEmbedder{}
-	server := newTestServer(store, embed)
+	server := newTestServer(store, store, embed)
 
 	t.Run("with max_chars", func(t *testing.T) {
 		params, _ := json.Marshal(map[string]interface{}{
@@ -528,7 +534,7 @@ func TestServerReadDocument_SymlinkSwapRejected(t *testing.T) {
 	}
 
 	embed := &fakeEmbedder{}
-	server := newTestServer(store, embed)
+	server := newTestServer(store, store, embed)
 
 	params, _ := json.Marshal(map[string]interface{}{
 		"name": "read_document",
@@ -588,7 +594,7 @@ func TestServerReadDocument_LargeFileTruncated(t *testing.T) {
 	}
 
 	embed := &fakeEmbedder{}
-	server := newTestServer(store, embed)
+	server := newTestServer(store, store, embed)
 
 	params, _ := json.Marshal(map[string]interface{}{
 		"name": "read_document",
@@ -645,7 +651,7 @@ func TestServerSearchDocumentsWithResults(t *testing.T) {
 		},
 	}
 	embed := &fakeEmbedder{}
-	server := newTestServer(store, embed)
+	server := newTestServer(store, store, embed)
 
 	params, _ := json.Marshal(map[string]interface{}{
 		"name": "search_documents",
@@ -673,7 +679,7 @@ func TestServerListDocumentsEmpty(t *testing.T) {
 		},
 	}
 	embed := &fakeEmbedder{}
-	server := newTestServer(store, embed)
+	server := newTestServer(store, store, embed)
 
 	params, _ := json.Marshal(map[string]interface{}{
 		"name":      "list_documents",
@@ -707,7 +713,7 @@ func TestServerGetContextWithResults(t *testing.T) {
 		},
 	}
 	embed := &fakeEmbedder{}
-	server := newTestServer(store, embed)
+	server := newTestServer(store, store, embed)
 
 	params, _ := json.Marshal(map[string]interface{}{
 		"name": "get_context",
@@ -772,7 +778,7 @@ func TestStartServer_StdinEOF(t *testing.T) {
 func TestRegisterIndexDocument_MissingPath(t *testing.T) {
 	store := &fakeStore{}
 	embed := &fakeEmbedder{}
-	server := newTestServer(store, embed)
+	server := newTestServer(store, store, embed)
 
 	params, _ := json.Marshal(map[string]interface{}{
 		"name":      "index_document",
@@ -804,7 +810,7 @@ func TestRegisterIndexDocument_PathOutsideHome(t *testing.T) {
 
 	store := &fakeStore{}
 	embed := &fakeEmbedder{}
-	server := newTestServer(store, embed)
+	server := newTestServer(store, store, embed)
 
 	params, _ := json.Marshal(map[string]interface{}{
 		"name": "index_document",
@@ -839,7 +845,7 @@ func TestRegisterIndexDocument_NonexistentPath(t *testing.T) {
 
 	store := &fakeStore{}
 	embed := &fakeEmbedder{}
-	server := newTestServer(store, embed)
+	server := newTestServer(store, store, embed)
 
 	params, _ := json.Marshal(map[string]interface{}{
 		"name": "index_document",
@@ -881,7 +887,7 @@ func TestRegisterIndexDocument_ValidFile(t *testing.T) {
 
 	store := &fakeStore{}
 	embed := &fakeEmbedder{}
-	server := newTestServer(store, embed)
+	server := newTestServer(store, store, embed)
 
 	params, _ := json.Marshal(map[string]interface{}{
 		"name": "index_document",
@@ -932,7 +938,7 @@ func TestRegisterIndexDocument_ValidDirectory(t *testing.T) {
 
 	store := &fakeStore{}
 	embed := &fakeEmbedder{}
-	server := newTestServer(store, embed)
+	server := newTestServer(store, store, embed)
 
 	params, _ := json.Marshal(map[string]interface{}{
 		"name": "index_document",
@@ -974,7 +980,7 @@ func TestRegisterIndexDocument_ValidDirectory(t *testing.T) {
 func TestRegisterIndexURL_MissingURL(t *testing.T) {
 	store := &fakeStore{}
 	embed := &fakeEmbedder{}
-	server := newTestServer(store, embed)
+	server := newTestServer(store, store, embed)
 
 	params, _ := json.Marshal(map[string]interface{}{
 		"name":      "index_url",
@@ -1007,7 +1013,7 @@ func TestRegisterIndexURL_FetchFailure(t *testing.T) {
 
 	store := &fakeStore{}
 	embed := &fakeEmbedder{}
-	server := newTestServer(store, embed)
+	server := newTestServer(store, store, embed)
 
 	params, _ := json.Marshal(map[string]interface{}{
 		"name": "index_url",
@@ -1050,7 +1056,7 @@ func TestRegisterIndexURL_Success(t *testing.T) {
 
 	store := &fakeStore{}
 	embed := &fakeEmbedder{}
-	server := newTestServer(store, embed)
+	server := newTestServer(store, store, embed)
 
 	params, _ := json.Marshal(map[string]interface{}{
 		"name": "index_url",

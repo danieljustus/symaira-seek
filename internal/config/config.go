@@ -23,6 +23,7 @@ type Config struct {
 	RetryCount           int    `json:"retry_count" toml:"retry_count"`
 	RetryBackoffMS       int    `json:"retry_backoff_ms" toml:"retry_backoff_ms"`
 	IndexCooldownSeconds int    `json:"index_cooldown_seconds" toml:"index_cooldown_seconds"`
+	VectorBackend        string `json:"vector_backend" toml:"vector_backend"`
 }
 
 // DefaultConfig returns the default configuration values.
@@ -34,6 +35,7 @@ func DefaultConfig() *Config {
 		RetryCount:           2,
 		RetryBackoffMS:       500,
 		IndexCooldownSeconds: 5,
+		VectorBackend:        "sqlite",
 	}
 }
 
@@ -173,8 +175,16 @@ func SetValue(cfgFile string, key, value string, cfg *Config) error {
 			return fmt.Errorf("invalid %s value %q (must be a positive integer)", key, value)
 		}
 		cfg.IndexCooldownSeconds = n
+	case "vector_backend":
+		if value == "" {
+			return fmt.Errorf("--set-value is required for key %q", key)
+		}
+		if value != "sqlite" {
+			return fmt.Errorf("invalid vector_backend %q (only \"sqlite\" is currently supported)", value)
+		}
+		cfg.VectorBackend = value
 	default:
-		return fmt.Errorf("unknown config key %q (supported: ollama_url, model, embedding_dim, timeout_seconds, retry_count, retry_backoff_ms, index_cooldown_seconds)", key)
+		return fmt.Errorf("unknown config key %q (supported: ollama_url, model, embedding_dim, timeout_seconds, retry_count, retry_backoff_ms, index_cooldown_seconds, vector_backend)", key)
 	}
 	return Save(cfgFile, cfg)
 }
