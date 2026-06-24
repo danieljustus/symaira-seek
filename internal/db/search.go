@@ -208,6 +208,7 @@ func (db *DB) searchVectorFullScan(queryVec []float32, queryNorm float32, limit 
 			db.vectorIndex = NewVectorIndex()
 		}
 		db.vectorIndex.Build(indexChunks)
+		db.saveVectorIndex()
 	}
 
 	for i, r := range results {

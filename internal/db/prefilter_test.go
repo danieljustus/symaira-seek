@@ -548,6 +548,192 @@ func TestSearchVectorIncrementallyDeletesChunks(t *testing.T) {
 	}
 }
 
+func TestPersistedVectorIndexLoad(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "seek-persist-load-test")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+	t.Setenv("HOME", tempDir)
+
+	db1, err := Open()
+	if err != nil {
+		t.Fatalf("failed to open db1: %v", err)
+	}
+
+	docPath := filepath.Join(t.TempDir(), "persist.md")
+	if err := db1.SaveDocument(&Document{Path: docPath, Hash: "p", UpdatedAt: time.Now()}); err != nil {
+		t.Fatalf("SaveDocument: %v", err)
+	}
+
+	const nChunks = 300
+	chunks := make([]*Chunk, nChunks)
+	for i := 0; i < nChunks; i++ {
+		emb := make([]float32, 768)
+		for j := range emb {
+			emb[j] = float32(i*768+j) / float32(nChunks*768)
+		}
+		var sumSquares float64
+		for _, v := range emb {
+			sumSquares += float64(v * v)
+		}
+		norm := float32(math.Sqrt(sumSquares))
+		if norm > 0 {
+			for j := range emb {
+				emb[j] /= norm
+			}
+		}
+		chunks[i] = &Chunk{
+			UUID:         "persist-" + strconv.Itoa(i),
+			DocumentPath: docPath,
+			ChunkIndex:   i,
+			Content:      "content " + strconv.Itoa(i),
+			Embedding:    emb,
+			Hash:         "persist-hash-" + strconv.Itoa(i),
+		}
+	}
+	if err := db1.SaveChunks(chunks); err != nil {
+		t.Fatalf("SaveChunks: %v", err)
+	}
+
+	query := make([]float32, 768)
+	for i := range query {
+		query[i] = 0.5
+	}
+	if _, err := db1.SearchVector(query, 5); err != nil {
+		t.Fatalf("SearchVector: %v", err)
+	}
+	if db1.vectorIndex == nil || !db1.vectorIndex.IsReady() {
+		t.Fatal("expected index to be built and persisted")
+	}
+	bucketCount := db1.vectorIndex.BucketCount()
+	db1.Close()
+
+	db2, err := Open()
+	if err != nil {
+		t.Fatalf("failed to open db2: %v", err)
+	}
+	defer db2.Close()
+
+	if db2.vectorIndex == nil || !db2.vectorIndex.IsReady() {
+		t.Fatal("expected persisted index to be loaded on open")
+	}
+	if db2.vectorIndex.BucketCount() != bucketCount {
+		t.Fatalf("loaded index bucket count mismatch: got %d, want %d", db2.vectorIndex.BucketCount(), bucketCount)
+	}
+
+	results, err := db2.SearchVector(query, 5)
+	if err != nil {
+		t.Fatalf("SearchVector after reload: %v", err)
+	}
+	if len(results) != 5 {
+		t.Fatalf("expected 5 results after reload, got %d", len(results))
+	}
+}
+
+func TestPersistedVectorIndexStaleDetection(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "seek-persist-stale-test")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+	t.Setenv("HOME", tempDir)
+
+	db1, err := Open()
+	if err != nil {
+		t.Fatalf("failed to open db1: %v", err)
+	}
+
+	docPath := filepath.Join(t.TempDir(), "stale.md")
+	if err := db1.SaveDocument(&Document{Path: docPath, Hash: "s", UpdatedAt: time.Now()}); err != nil {
+		t.Fatalf("SaveDocument: %v", err)
+	}
+
+	const nChunks = 300
+	chunks := make([]*Chunk, nChunks)
+	for i := 0; i < nChunks; i++ {
+		emb := make([]float32, 768)
+		for j := range emb {
+			emb[j] = float32(i*768+j) / float32(nChunks*768)
+		}
+		var sumSquares float64
+		for _, v := range emb {
+			sumSquares += float64(v * v)
+		}
+		norm := float32(math.Sqrt(sumSquares))
+		if norm > 0 {
+			for j := range emb {
+				emb[j] /= norm
+			}
+		}
+		chunks[i] = &Chunk{
+			UUID:         "stale-" + strconv.Itoa(i),
+			DocumentPath: docPath,
+			ChunkIndex:   i,
+			Content:      "content " + strconv.Itoa(i),
+			Embedding:    emb,
+			Hash:         "stale-hash-" + strconv.Itoa(i),
+		}
+	}
+	if err := db1.SaveChunks(chunks); err != nil {
+		t.Fatalf("SaveChunks: %v", err)
+	}
+
+	query := make([]float32, 768)
+	for i := range query {
+		query[i] = 0.5
+	}
+	if _, err := db1.SearchVector(query, 5); err != nil {
+		t.Fatalf("SearchVector: %v", err)
+	}
+	db1.Close()
+
+	db2, err := Open()
+	if err != nil {
+		t.Fatalf("failed to open db2: %v", err)
+	}
+
+	extra := []*Chunk{
+		{
+			UUID:         "stale-extra",
+			DocumentPath: docPath,
+			ChunkIndex:   nChunks,
+			Content:      "extra content",
+			Embedding:    make([]float32, 768),
+			Hash:         "stale-extra-hash",
+		},
+	}
+	if err := db2.SaveChunks(extra); err != nil {
+		t.Fatalf("SaveChunks extra: %v", err)
+	}
+	db2.Close()
+
+	db3, err := Open()
+	if err != nil {
+		t.Fatalf("failed to open db3: %v", err)
+	}
+	defer db3.Close()
+
+	if db3.vectorIndex != nil && db3.vectorIndex.IsReady() {
+		t.Fatal("expected persisted index to be discarded because generation changed")
+	}
+
+	results, err := db3.SearchVector(query, nChunks+10)
+	if err != nil {
+		t.Fatalf("SearchVector after stale load: %v", err)
+	}
+	found := false
+	for _, r := range results {
+		if r.Chunk.UUID == "stale-extra" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("db3 did not find the extra chunk written by db2")
+	}
+}
+
 func TestSearchVectorDetectsExternalWrites(t *testing.T) {
 	tempDir, err := os.MkdirTemp("", "seek-external-write-test")
 	if err != nil {

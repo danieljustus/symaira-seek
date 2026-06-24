@@ -86,6 +86,7 @@ func Open() (*DB, error) {
 
 	db := &DB{conn: conn}
 	db.generation = db.loadGeneration()
+	db.vectorIndex = db.loadVectorIndex()
 	return db, nil
 }
 
@@ -121,8 +122,7 @@ func (db *DB) checkGeneration() {
 }
 
 // rebuildVectorIndex reconstructs the in-memory IVF index from the current
-// chunks table.  It is used after incremental churn crosses the rebuild
-// threshold.
+// chunks table and persists the result.
 func (db *DB) rebuildVectorIndex() {
 	rows, err := db.conn.Query("SELECT id, embedding FROM chunks")
 	if err != nil {
@@ -151,6 +151,54 @@ func (db *DB) rebuildVectorIndex() {
 		db.vectorIndex = NewVectorIndex()
 	}
 	db.vectorIndex.Rebuild(chunks)
+	db.saveVectorIndex()
+}
+
+// saveVectorIndex serializes the current index into index_storage keyed by
+// the current generation.
+func (db *DB) saveVectorIndex() {
+	if db.vectorIndex == nil || !db.vectorIndex.IsReady() {
+		_, _ = db.conn.Exec("DELETE FROM index_storage WHERE key = 'ivf'")
+		return
+	}
+	data, err := db.vectorIndex.Serialize(db.generation)
+	if err != nil {
+		return
+	}
+	_, _ = db.conn.Exec("INSERT INTO index_storage (key, data) VALUES ('ivf', ?) ON CONFLICT(key) DO UPDATE SET data = excluded.data", data)
+}
+
+// loadVectorIndex attempts to restore a persisted IVF index.  It returns nil
+// when no snapshot exists or the snapshot is stale (generation/chunk-count
+// mismatch).
+func (db *DB) loadVectorIndex() *VectorIndex {
+	var data []byte
+	err := db.conn.QueryRow("SELECT data FROM index_storage WHERE key = 'ivf'").Scan(&data)
+	if err != nil {
+		return nil
+	}
+
+	idx, storedGen, err := DeserializeIndex(data)
+	if err != nil {
+		_, _ = db.conn.Exec("DELETE FROM index_storage WHERE key = 'ivf'")
+		return nil
+	}
+
+	if storedGen != db.generation {
+		_, _ = db.conn.Exec("DELETE FROM index_storage WHERE key = 'ivf'")
+		return nil
+	}
+
+	var chunkCount int
+	if err := db.conn.QueryRow("SELECT COUNT(*) FROM chunks").Scan(&chunkCount); err != nil {
+		return nil
+	}
+	if idx.TotalChunks() != chunkCount {
+		_, _ = db.conn.Exec("DELETE FROM index_storage WHERE key = 'ivf'")
+		return nil
+	}
+
+	return idx
 }
 
 func (db *DB) SaveDocument(doc *Document) error {
