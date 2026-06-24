@@ -1,9 +1,11 @@
 package engine
 
 import (
+	"context"
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -152,6 +154,14 @@ func (f *fakeEmbedder) GenerateVectorNoRetry(text string) []float32 {
 	return f.GenerateVector(text)
 }
 
+func (f *fakeEmbedder) Dim() int {
+	return f.dim
+}
+
+func (f *fakeEmbedder) ModelName() string {
+	return "fake-model"
+}
+
 // TestSearchHybridAcceptsEmbedderInterface guards the contract from #35:
 // the indexer must depend on the Embedder interface, not the concrete
 // *EmbeddingsGenerator, so callers can substitute behavior in tests.
@@ -190,7 +200,7 @@ func TestSearchHybridAcceptsEmbedderInterface(t *testing.T) {
 		},
 	})
 
-	res, err := SearchHybrid(dbClient, ie, "interface", 5)
+	res, err := SearchHybrid(dbClient, dbClient, ie, "interface", 5)
 	if err != nil {
 		t.Fatalf("SearchHybrid with interface embedder failed: %v", err)
 	}
@@ -274,7 +284,7 @@ func TestSearchHybridSemanticOnlyMatch(t *testing.T) {
 
 	// Search for "falcon" — BM25 will find chunk A but not chunk B.
 	// The fix ensures chunk B still appears via full vector scan.
-	res, err := SearchHybrid(dbClient, embedder, "falcon", 10)
+	res, err := SearchHybrid(dbClient, dbClient, embedder, "falcon", 10)
 	if err != nil {
 		t.Fatalf("SearchHybrid failed: %v", err)
 	}
@@ -343,7 +353,7 @@ func TestHybridSearch(t *testing.T) {
 	})
 
 	// Search for something related to text1
-	res, err := SearchHybrid(dbClient, embedder, "falcon soars", 2)
+	res, err := SearchHybrid(dbClient, dbClient, embedder, "falcon soars", 2)
 	if err != nil {
 		t.Fatalf("SearchHybrid failed: %v", err)
 	}
@@ -359,5 +369,104 @@ func TestHybridSearch(t *testing.T) {
 	// Verify rank fields are set
 	if res[0].BM25Rank == 0 && res[0].VectorRank == 0 {
 		t.Errorf("expected BM25Rank or VectorRank to be non-zero")
+	}
+}
+
+type mixedSpaceStore struct {
+	db.Store
+	spaces map[string]int
+}
+
+func (m *mixedSpaceStore) DetectMixedEmbeddingSpaces() (map[string]int, error) {
+	return m.spaces, nil
+}
+
+func (m *mixedSpaceStore) SearchVector(queryVec []float32, limit int) ([]*db.SearchResult, error) {
+	return nil, nil
+}
+
+func (m *mixedSpaceStore) SearchBM25(query string, limit int) ([]*db.SearchResult, error) {
+	return nil, nil
+}
+
+func (m *mixedSpaceStore) Upsert(_ context.Context, _ []*db.Chunk) error { return nil }
+func (m *mixedSpaceStore) Delete(_ context.Context, _ string) error     { return nil }
+func (m *mixedSpaceStore) Search(_ context.Context, _ []float32, _ int) ([]*db.SearchResult, error) {
+	return nil, nil
+}
+
+func TestSearchHybrid_MixedSpaceReturnsError(t *testing.T) {
+	store := &mixedSpaceStore{
+		spaces: map[string]int{
+			"768/model-a": 100,
+			"384/model-b": 50,
+		},
+	}
+	embedder := &fakeEmbedder{dim: 768}
+
+	_, err := SearchHybrid(store, store, embedder, "test query", 5)
+	if err == nil {
+		t.Fatal("expected error for mixed embedding spaces, got nil")
+	}
+	if !strings.Contains(err.Error(), "mixed embedding spaces") {
+		t.Errorf("expected error about mixed embedding spaces, got: %v", err)
+	}
+}
+
+func TestSearchHybrid_EmptyDBNoError(t *testing.T) {
+	store := &mixedSpaceStore{
+		spaces: map[string]int{},
+	}
+	embedder := &fakeEmbedder{dim: 768}
+
+	_, err := SearchHybrid(store, store, embedder, "test query", 5)
+	if err != nil {
+		t.Fatalf("expected no error for empty DB, got: %v", err)
+	}
+}
+
+type fakeVectorStore struct {
+	searchFn func(queryVec []float32, limit int) ([]*db.SearchResult, error)
+}
+
+func (f *fakeVectorStore) Upsert(_ context.Context, _ []*db.Chunk) error { return nil }
+func (f *fakeVectorStore) Delete(_ context.Context, _ string) error     { return nil }
+func (f *fakeVectorStore) Search(_ context.Context, queryVec []float32, limit int) ([]*db.SearchResult, error) {
+	if f.searchFn != nil {
+		return f.searchFn(queryVec, limit)
+	}
+	return nil, nil
+}
+
+func TestSearchHybridUsesVectorStore(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "seek-hybrid-vs-test")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+	t.Setenv("HOME", tempDir)
+
+	dbClient, err := db.Open()
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer dbClient.Close()
+
+	embedder := &fakeEmbedder{dim: 768}
+
+	called := false
+	vs := &fakeVectorStore{
+		searchFn: func(queryVec []float32, limit int) ([]*db.SearchResult, error) {
+			called = true
+			return nil, nil
+		},
+	}
+
+	_, err = SearchHybrid(dbClient, vs, embedder, "test query", 5)
+	if err != nil {
+		t.Fatalf("SearchHybrid failed: %v", err)
+	}
+	if !called {
+		t.Error("expected VectorStore.Search to be called")
 	}
 }

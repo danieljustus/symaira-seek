@@ -192,6 +192,14 @@ func (c *countingEmbedder) GenerateVectorNoRetry(text string) []float32 {
 	return (&fakeEmbedder{dim: c.dim}).GenerateVectorNoRetry(text)
 }
 
+func (c *countingEmbedder) Dim() int {
+	return c.dim
+}
+
+func (c *countingEmbedder) ModelName() string {
+	return "counting-model"
+}
+
 // TestIndexDirectorySiblingPrefix is a regression test for issue #66.
 // Re-indexing a directory must never delete documents that live in a
 // sibling directory whose name shares a string prefix (e.g. /docs vs /docs2).
@@ -567,7 +575,7 @@ func TestIndexDirectory(t *testing.T) {
 	}
 
 	// Verify update content by searching
-	res, err := SearchHybrid(dbClient, embedder, "extra information", 10)
+	res, err := SearchHybrid(dbClient, dbClient, embedder, "extra information", 10)
 	if err != nil {
 		t.Fatalf("hybrid search failed: %v", err)
 	}

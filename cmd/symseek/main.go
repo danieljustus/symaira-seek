@@ -91,7 +91,7 @@ func newRootCmd() *cobra.Command {
 
 			embedder := engine.NewEmbeddingsGeneratorWithOllamaConfig(cfg.OllamaConfig())
 
-			results, err := engine.SearchHybrid(dbClient, embedder, query, limitFlag)
+			results, err := engine.SearchHybrid(dbClient, dbClient, embedder, query, limitFlag)
 			if err != nil {
 				return err
 			}

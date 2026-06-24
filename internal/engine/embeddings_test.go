@@ -542,3 +542,96 @@ func TestDoOllamaRequestWithRetries_ZeroRetriesMakesSingleAttempt(t *testing.T) 
 		t.Errorf("expected 0 sleeps, got %d", got)
 	}
 }
+
+func TestDim_CachesFirstOllamaResponse(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"embedding": make([]float32, 384),
+		})
+	}))
+	defer srv.Close()
+
+	eg := NewEmbeddingsGeneratorWithOllamaConfig(OllamaConfig{
+		URL:          srv.URL,
+		Model:        "test",
+		RetryCount:   0,
+		RetryBackoff: time.Millisecond,
+	})
+
+	vec := eg.GenerateVector("hello")
+	if len(vec) != 384 {
+		t.Fatalf("expected 384-dim vector, got %d", len(vec))
+	}
+	if got := eg.Dim(); got != 384 {
+		t.Errorf("expected Dim() = 384 after caching, got %d", got)
+	}
+
+	vec2 := eg.GenerateVector("world")
+	if len(vec2) != 384 {
+		t.Fatalf("expected 384-dim vector for second call, got %d", len(vec2))
+	}
+}
+
+func TestDim_DifferentDimensionTriggersFallback(t *testing.T) {
+	var callCount int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&callCount, 1)
+		w.Header().Set("Content-Type", "application/json")
+		if n <= 2 {
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"embedding": make([]float32, 384),
+			})
+		} else {
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"embedding": make([]float32, 512),
+			})
+		}
+	}))
+	defer srv.Close()
+
+	eg := NewEmbeddingsGeneratorWithOllamaConfig(OllamaConfig{
+		URL:          srv.URL,
+		Model:        "test",
+		RetryCount:   0,
+		RetryBackoff: time.Millisecond,
+	})
+
+	vec1 := eg.GenerateVector("first")
+	if len(vec1) != 384 {
+		t.Fatalf("expected 384-dim vector, got %d", len(vec1))
+	}
+	if got := eg.Dim(); got != 384 {
+		t.Errorf("expected Dim() = 384 after first response, got %d", got)
+	}
+
+	vec3 := eg.GenerateVector("third")
+	if len(vec3) != 384 {
+		t.Fatalf("expected fallback to 384-dim hash vector, got %d", len(vec3))
+	}
+}
+
+func TestDim_ConfigDimOverridesAutoDetect(t *testing.T) {
+	eg := NewEmbeddingsGeneratorWithOllamaConfig(OllamaConfig{
+		URL:   "http://localhost:99999/api/embeddings",
+		Model: "test",
+		Dim:   512,
+	})
+	if got := eg.Dim(); got != 512 {
+		t.Errorf("expected Dim() = 512 from config, got %d", got)
+	}
+}
+
+func TestDim_DefaultFallbackWhenNoResponse(t *testing.T) {
+	eg := NewEmbeddingsGeneratorWithOllamaConfig(OllamaConfig{})
+	if got := eg.Dim(); got != defaultEmbeddingDim {
+		t.Errorf("expected Dim() = %d (default), got %d", defaultEmbeddingDim, got)
+	}
+}
+
+func TestModelName_ReturnsConfiguredModel(t *testing.T) {
+	eg := NewEmbeddingsGeneratorWithOllamaConfig(OllamaConfig{Model: "mxbai-embed-large"})
+	if got := eg.ModelName(); got != "mxbai-embed-large" {
+		t.Errorf("expected ModelName() = %q, got %q", "mxbai-embed-large", got)
+	}
+}
