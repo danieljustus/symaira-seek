@@ -81,17 +81,25 @@ func registerSearchDocuments(server *mcpserver.Server, dbClient db.Store, vector
 func registerReadDocument(server *mcpserver.Server, dbClient db.Store, _ engine.Embedder) {
 	server.RegisterTool(&mcpserver.Tool{
 		Name:        "read_document",
-		Description: "Retrieve the full text content of an indexed document. Use when the user needs to inspect the detailed content of a specific file.",
-		InputSchema: json.RawMessage(`{"type":"object","properties":{"path":{"type":"string","description":"Absolute path to the document file"}},"required":["path"]}`),
+		Description: "Retrieve the text content of an indexed document, optionally limited to a specific line range. Use when the user needs to inspect the detailed content of a specific file.",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"path":{"type":"string","description":"Absolute path to the document file"},"fromLine":{"type":"integer","description":"First line to return (1-based, default 1)"},"maxLines":{"type":"integer","description":"Maximum number of lines to return from fromLine (default: all remaining lines)"}},"required":["path"]}`),
 		Handler: func(ctx context.Context, input json.RawMessage) (any, error) {
 			var params struct {
-				Path string `json:"path"`
+				Path     string `json:"path"`
+				FromLine int    `json:"fromLine"`
+				MaxLines int    `json:"maxLines"`
 			}
 			if err := json.Unmarshal(input, &params); err != nil {
 				return nil, &symerrors.ValidationError{Field: "params", Message: err.Error()}
 			}
 			if params.Path == "" {
 				return nil, &symerrors.ValidationError{Field: "path", Message: "missing or invalid path argument"}
+			}
+			if params.FromLine < 0 {
+				return nil, &symerrors.ValidationError{Field: "fromLine", Message: "fromLine must be >= 1"}
+			}
+			if params.FromLine == 0 {
+				params.FromLine = 1
 			}
 
 			absPath, err := pathutil.RestrictToHome(params.Path)
@@ -133,6 +141,29 @@ func registerReadDocument(server *mcpserver.Server, dbClient db.Store, _ engine.
 				content = content[:maxReadBytes]
 				content += "\n\n[Truncated: file exceeds 10 MB read limit]"
 			}
+
+			// Apply line-range filtering when fromLine or maxLines are set.
+			if params.FromLine > 1 || params.MaxLines > 0 {
+				lines := strings.Split(content, "\n")
+				totalLines := len(lines)
+
+				// fromLine is 1-based; convert to 0-based index.
+				start := params.FromLine - 1
+				if start >= totalLines {
+					return "", nil
+				}
+
+				end := totalLines
+				if params.MaxLines > 0 {
+					end = start + params.MaxLines
+					if end > totalLines {
+						end = totalLines
+					}
+				}
+
+				return strings.Join(lines[start:end], "\n"), nil
+			}
+
 			return content, nil
 		},
 	})

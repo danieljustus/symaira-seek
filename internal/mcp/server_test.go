@@ -1088,3 +1088,175 @@ func TestRegisterIndexURL_Success(t *testing.T) {
 		t.Errorf("unexpected response text: %s", text)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// read_document line-range tests
+// ---------------------------------------------------------------------------
+
+func newReadDocStore(t *testing.T, content string) (*fakeStore, string) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	testFile := filepath.Join(home, "lines.txt")
+	if err := os.WriteFile(testFile, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	resolved, err := filepath.EvalSymlinks(testFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	store := &fakeStore{
+		getDocFunc: func(path string) (*db.Document, error) {
+			if path == resolved {
+				return &db.Document{Path: resolved}, nil
+			}
+			return nil, nil
+		},
+	}
+	return store, testFile
+}
+
+func callReadDoc(t *testing.T, server *mcpserver.Server, args map[string]interface{}) (string, bool) {
+	t.Helper()
+	params, _ := json.Marshal(map[string]interface{}{
+		"name":      "read_document",
+		"arguments": args,
+	})
+	resp := pipeRequest(t, server, jsonRPCRequest{
+		JSONRPC: "2.0",
+		ID:      float64(1),
+		Method:  "tools/call",
+		Params:  params,
+	})
+
+	if resp.Error != nil {
+		t.Fatalf("unexpected JSON-RPC error: %v", resp.Error)
+	}
+	result, ok := resp.Result.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected result map, got %T", resp.Result)
+	}
+	isError := result["isError"] == true
+	content := result["content"].([]interface{})
+	text := content[0].(map[string]interface{})["text"].(string)
+	return text, isError
+}
+
+func TestReadDocument_DefaultFullFile(t *testing.T) {
+	content := "line1\nline2\nline3\nline4\nline5"
+	store, testFile := newReadDocStore(t, content)
+	embed := &fakeEmbedder{}
+	server := newTestServer(store, store, embed)
+
+	got, isError := callReadDoc(t, server, map[string]interface{}{"path": testFile})
+	if isError {
+		t.Fatalf("expected success, got error: %s", got)
+	}
+	if got != content {
+		t.Errorf("full file content mismatch:\ngot:  %q\nwant: %q", got, content)
+	}
+}
+
+func TestReadDocument_FromLineAndMaxLines(t *testing.T) {
+	content := "line1\nline2\nline3\nline4\nline5"
+	store, testFile := newReadDocStore(t, content)
+	embed := &fakeEmbedder{}
+	server := newTestServer(store, store, embed)
+
+	got, isError := callReadDoc(t, server, map[string]interface{}{
+		"path":     testFile,
+		"fromLine": float64(2),
+		"maxLines": float64(3),
+	})
+	if isError {
+		t.Fatalf("expected success, got error: %s", got)
+	}
+	want := "line2\nline3\nline4"
+	if got != want {
+		t.Errorf("line range mismatch:\ngot:  %q\nwant: %q", got, want)
+	}
+}
+
+func TestReadDocument_FromLine1WithMaxLines(t *testing.T) {
+	content := "line1\nline2\nline3\nline4\nline5"
+	store, testFile := newReadDocStore(t, content)
+	embed := &fakeEmbedder{}
+	server := newTestServer(store, store, embed)
+
+	got, isError := callReadDoc(t, server, map[string]interface{}{
+		"path":     testFile,
+		"fromLine": float64(1),
+		"maxLines": float64(2),
+	})
+	if isError {
+		t.Fatalf("expected success, got error: %s", got)
+	}
+	want := "line1\nline2"
+	if got != want {
+		t.Errorf("line range mismatch:\ngot:  %q\nwant: %q", got, want)
+	}
+}
+
+func TestReadDocument_OutOfRangeFromLine(t *testing.T) {
+	content := "line1\nline2\nline3"
+	store, testFile := newReadDocStore(t, content)
+	embed := &fakeEmbedder{}
+	server := newTestServer(store, store, embed)
+
+	got, isError := callReadDoc(t, server, map[string]interface{}{
+		"path":     testFile,
+		"fromLine": float64(100),
+	})
+	if isError {
+		t.Fatalf("expected success, got error: %s", got)
+	}
+	if got != "" {
+		t.Errorf("expected empty string for out-of-range fromLine, got: %q", got)
+	}
+}
+
+func TestReadDocument_InvalidFromLine(t *testing.T) {
+	content := "line1\nline2\nline3"
+	store, testFile := newReadDocStore(t, content)
+	embed := &fakeEmbedder{}
+	server := newTestServer(store, store, embed)
+
+	_, isError := callReadDoc(t, server, map[string]interface{}{
+		"path":     testFile,
+		"fromLine": float64(-1),
+	})
+	if !isError {
+		t.Fatal("expected error for negative fromLine")
+	}
+
+	_, isError = callReadDoc(t, server, map[string]interface{}{
+		"path":     testFile,
+		"fromLine": float64(-5),
+	})
+	if !isError {
+		t.Fatal("expected error for negative fromLine")
+	}
+}
+
+func TestReadDocument_MaxLinesExceedsRemaining(t *testing.T) {
+	content := "line1\nline2\nline3"
+	store, testFile := newReadDocStore(t, content)
+	embed := &fakeEmbedder{}
+	server := newTestServer(store, store, embed)
+
+	got, isError := callReadDoc(t, server, map[string]interface{}{
+		"path":     testFile,
+		"fromLine": float64(2),
+		"maxLines": float64(100),
+	})
+	if isError {
+		t.Fatalf("expected success, got error: %s", got)
+	}
+	want := "line2\nline3"
+	if got != want {
+		t.Errorf("line range mismatch:\ngot:  %q\nwant: %q", got, want)
+	}
+}
