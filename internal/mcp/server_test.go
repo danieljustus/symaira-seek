@@ -24,6 +24,8 @@ type fakeStore struct {
 	searchFunc   func(query string, limit int) ([]*db.SearchResult, error)
 	getDocFunc   func(path string) (*db.Document, error)
 	listDocsFunc func() ([]*db.Document, error)
+
+	folderContexts map[string]string
 }
 
 func (f *fakeStore) Close() error                                             { return nil }
@@ -60,6 +62,37 @@ func (f *fakeStore) SearchVector(queryVec []float32, limit int) ([]*db.SearchRes
 
 func (f *fakeStore) DetectMixedEmbeddingSpaces() (map[string]int, error) {
 	return nil, nil
+}
+
+func (f *fakeStore) SetFolderContext(path, text string) error {
+	if f.folderContexts == nil {
+		f.folderContexts = make(map[string]string)
+	}
+	f.folderContexts[path] = text
+	return nil
+}
+
+func (f *fakeStore) GetFolderContexts() ([]db.FolderContext, error) {
+	var contexts []db.FolderContext
+	for p, t := range f.folderContexts {
+		contexts = append(contexts, db.FolderContext{PathPrefix: p, ContextText: t})
+	}
+	return contexts, nil
+}
+
+func (f *fakeStore) GetMatchingContext(path string) (*db.FolderContext, error) {
+	if f.folderContexts == nil {
+		return nil, nil
+	}
+	var best *db.FolderContext
+	bestLen := 0
+	for prefix, text := range f.folderContexts {
+		if strings.HasPrefix(path, prefix) && len(prefix) > bestLen {
+			best = &db.FolderContext{PathPrefix: prefix, ContextText: text}
+			bestLen = len(prefix)
+		}
+	}
+	return best, nil
 }
 
 func (f *fakeStore) Upsert(_ context.Context, _ []*db.Chunk) error { return nil }
@@ -103,6 +136,9 @@ func newTestServer(store db.Store, vectorStore db.VectorStore, embedder engine.E
 	registerGetContext(s, store, vectorStore, embedder)
 	registerIndexDocument(s, store, embedder)
 	registerIndexURL(s, store, embedder)
+	registerMultiGet(s, store, embedder)
+	registerSetContext(s, store)
+	registerGetContexts(s, store)
 	return s
 }
 
@@ -221,7 +257,7 @@ func TestServerToolsList(t *testing.T) {
 		toolMap := tool.(map[string]interface{})
 		names[toolMap["name"].(string)] = true
 	}
-	expected := []string{"search_documents", "read_document", "list_documents", "get_context", "index_document", "index_url"}
+	expected := []string{"search_documents", "read_document", "list_documents", "get_context", "index_document", "index_url", "multi_get", "set_context", "get_contexts"}
 	for _, n := range expected {
 		if !names[n] {
 			t.Errorf("missing tool: %s", n)
@@ -1086,5 +1122,547 @@ func TestRegisterIndexURL_Success(t *testing.T) {
 	text := content[0].(map[string]interface{})["text"].(string)
 	if !strings.Contains(text, "Successfully indexed URL") {
 		t.Errorf("unexpected response text: %s", text)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// read_document line-range tests
+// ---------------------------------------------------------------------------
+
+func newReadDocStore(t *testing.T, content string) (*fakeStore, string) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	testFile := filepath.Join(home, "lines.txt")
+	if err := os.WriteFile(testFile, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	resolved, err := filepath.EvalSymlinks(testFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	store := &fakeStore{
+		getDocFunc: func(path string) (*db.Document, error) {
+			if path == resolved {
+				return &db.Document{Path: resolved}, nil
+			}
+			return nil, nil
+		},
+	}
+	return store, testFile
+}
+
+func callReadDoc(t *testing.T, server *mcpserver.Server, args map[string]interface{}) (string, bool) {
+	t.Helper()
+	params, _ := json.Marshal(map[string]interface{}{
+		"name":      "read_document",
+		"arguments": args,
+	})
+	resp := pipeRequest(t, server, jsonRPCRequest{
+		JSONRPC: "2.0",
+		ID:      float64(1),
+		Method:  "tools/call",
+		Params:  params,
+	})
+
+	if resp.Error != nil {
+		t.Fatalf("unexpected JSON-RPC error: %v", resp.Error)
+	}
+	result, ok := resp.Result.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected result map, got %T", resp.Result)
+	}
+	isError := result["isError"] == true
+	content := result["content"].([]interface{})
+	text := content[0].(map[string]interface{})["text"].(string)
+	return text, isError
+}
+
+func TestReadDocument_DefaultFullFile(t *testing.T) {
+	content := "line1\nline2\nline3\nline4\nline5"
+	store, testFile := newReadDocStore(t, content)
+	embed := &fakeEmbedder{}
+	server := newTestServer(store, store, embed)
+
+	got, isError := callReadDoc(t, server, map[string]interface{}{"path": testFile})
+	if isError {
+		t.Fatalf("expected success, got error: %s", got)
+	}
+	if got != content {
+		t.Errorf("full file content mismatch:\ngot:  %q\nwant: %q", got, content)
+	}
+}
+
+func TestReadDocument_FromLineAndMaxLines(t *testing.T) {
+	content := "line1\nline2\nline3\nline4\nline5"
+	store, testFile := newReadDocStore(t, content)
+	embed := &fakeEmbedder{}
+	server := newTestServer(store, store, embed)
+
+	got, isError := callReadDoc(t, server, map[string]interface{}{
+		"path":     testFile,
+		"fromLine": float64(2),
+		"maxLines": float64(3),
+	})
+	if isError {
+		t.Fatalf("expected success, got error: %s", got)
+	}
+	want := "line2\nline3\nline4"
+	if got != want {
+		t.Errorf("line range mismatch:\ngot:  %q\nwant: %q", got, want)
+	}
+}
+
+func TestReadDocument_FromLine1WithMaxLines(t *testing.T) {
+	content := "line1\nline2\nline3\nline4\nline5"
+	store, testFile := newReadDocStore(t, content)
+	embed := &fakeEmbedder{}
+	server := newTestServer(store, store, embed)
+
+	got, isError := callReadDoc(t, server, map[string]interface{}{
+		"path":     testFile,
+		"fromLine": float64(1),
+		"maxLines": float64(2),
+	})
+	if isError {
+		t.Fatalf("expected success, got error: %s", got)
+	}
+	want := "line1\nline2"
+	if got != want {
+		t.Errorf("line range mismatch:\ngot:  %q\nwant: %q", got, want)
+	}
+}
+
+func TestReadDocument_OutOfRangeFromLine(t *testing.T) {
+	content := "line1\nline2\nline3"
+	store, testFile := newReadDocStore(t, content)
+	embed := &fakeEmbedder{}
+	server := newTestServer(store, store, embed)
+
+	got, isError := callReadDoc(t, server, map[string]interface{}{
+		"path":     testFile,
+		"fromLine": float64(100),
+	})
+	if isError {
+		t.Fatalf("expected success, got error: %s", got)
+	}
+	if got != "" {
+		t.Errorf("expected empty string for out-of-range fromLine, got: %q", got)
+	}
+}
+
+func TestReadDocument_InvalidFromLine(t *testing.T) {
+	content := "line1\nline2\nline3"
+	store, testFile := newReadDocStore(t, content)
+	embed := &fakeEmbedder{}
+	server := newTestServer(store, store, embed)
+
+	_, isError := callReadDoc(t, server, map[string]interface{}{
+		"path":     testFile,
+		"fromLine": float64(-1),
+	})
+	if !isError {
+		t.Fatal("expected error for negative fromLine")
+	}
+
+	_, isError = callReadDoc(t, server, map[string]interface{}{
+		"path":     testFile,
+		"fromLine": float64(-5),
+	})
+	if !isError {
+		t.Fatal("expected error for negative fromLine")
+	}
+}
+
+func TestReadDocument_MaxLinesExceedsRemaining(t *testing.T) {
+	content := "line1\nline2\nline3"
+	store, testFile := newReadDocStore(t, content)
+	embed := &fakeEmbedder{}
+	server := newTestServer(store, store, embed)
+
+	got, isError := callReadDoc(t, server, map[string]interface{}{
+		"path":     testFile,
+		"fromLine": float64(2),
+		"maxLines": float64(100),
+	})
+	if isError {
+		t.Fatalf("expected success, got error: %s", got)
+	}
+	want := "line2\nline3"
+	if got != want {
+		t.Errorf("line range mismatch:\ngot:  %q\nwant: %q", got, want)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// multi_get tests
+// ---------------------------------------------------------------------------
+
+func callMultiGet(t *testing.T, server *mcpserver.Server, args map[string]interface{}) (string, bool) {
+	t.Helper()
+	params, _ := json.Marshal(map[string]interface{}{
+		"name":      "multi_get",
+		"arguments": args,
+	})
+	resp := pipeRequest(t, server, jsonRPCRequest{
+		JSONRPC: "2.0",
+		ID:      float64(1),
+		Method:  "tools/call",
+		Params:  params,
+	})
+	if resp.Error != nil {
+		t.Fatalf("unexpected JSON-RPC error: %v", resp.Error)
+	}
+	result, ok := resp.Result.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected result map, got %T", resp.Result)
+	}
+	isError := result["isError"] == true
+	content := result["content"].([]interface{})
+	text := content[0].(map[string]interface{})["text"].(string)
+	return text, isError
+}
+
+func newMultiGetStore(t *testing.T, files map[string]string) (*fakeStore, string) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	docs := make([]*db.Document, 0, len(files))
+	for name, content := range files {
+		p := filepath.Join(home, name)
+		dir := filepath.Dir(p)
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+		resolved, _ := filepath.EvalSymlinks(p)
+		docs = append(docs, &db.Document{Path: resolved})
+	}
+
+	store := &fakeStore{
+		listDocsFunc: func() ([]*db.Document, error) {
+			return docs, nil
+		},
+	}
+	return store, home
+}
+
+func TestMultiGet_MultipleFiles(t *testing.T) {
+	store, _ := newMultiGetStore(t, map[string]string{
+		"docs/a.md": "content A",
+		"docs/b.md": "content B",
+		"other/c.md": "content C",
+	})
+	embed := &fakeEmbedder{}
+	server := newTestServer(store, store, embed)
+
+	got, isError := callMultiGet(t, server, map[string]interface{}{
+		"pattern": "docs/*.md",
+	})
+	if isError {
+		t.Fatalf("expected success, got error: %s", got)
+	}
+	if !strings.Contains(got, "content A") {
+		t.Error("expected content A in output")
+	}
+	if !strings.Contains(got, "content B") {
+		t.Error("expected content B in output")
+	}
+	if strings.Contains(got, "content C") {
+		t.Error("should not contain content C (different directory)")
+	}
+	if !strings.Contains(got, "2 file(s) matched") {
+		t.Errorf("expected 2 file(s) matched message, got: %s", got)
+	}
+}
+
+func TestMultiGet_NoMatches(t *testing.T) {
+	store, _ := newMultiGetStore(t, map[string]string{
+		"docs/a.md": "content A",
+	})
+	embed := &fakeEmbedder{}
+	server := newTestServer(store, store, embed)
+
+	got, isError := callMultiGet(t, server, map[string]interface{}{
+		"pattern": "nonexistent/**/*.txt",
+	})
+	if isError {
+		t.Fatalf("expected success, got error: %s", got)
+	}
+	if !strings.Contains(got, "No indexed documents matched pattern") {
+		t.Errorf("expected no-match message, got: %s", got)
+	}
+}
+
+func TestMultiGet_MaxBytesSkip(t *testing.T) {
+	store, home := newMultiGetStore(t, map[string]string{
+		"docs/big.md":   strings.Repeat("X", 200),
+		"docs/small.md": "small content",
+	})
+	embed := &fakeEmbedder{}
+	server := newTestServer(store, store, embed)
+
+	got, isError := callMultiGet(t, server, map[string]interface{}{
+		"pattern":  "docs/*.md",
+		"maxBytes": float64(100),
+	})
+	if isError {
+		t.Fatalf("expected success, got error: %s", got)
+	}
+	if !strings.Contains(got, "small content") {
+		t.Error("expected small content in output")
+	}
+	if !strings.Contains(got, "SKIPPED") {
+		t.Errorf("expected SKIPPED message for big file, got: %s", got)
+	}
+	_ = home
+}
+
+func TestMultiGet_MaxLinesSkip(t *testing.T) {
+	store, _ := newMultiGetStore(t, map[string]string{
+		"docs/many.md": "line1\nline2\nline3\nline4\nline5",
+		"docs/few.md":  "only one line",
+	})
+	embed := &fakeEmbedder{}
+	server := newTestServer(store, store, embed)
+
+	got, isError := callMultiGet(t, server, map[string]interface{}{
+		"pattern":  "docs/*.md",
+		"maxLines": float64(2),
+	})
+	if isError {
+		t.Fatalf("expected success, got error: %s", got)
+	}
+	if !strings.Contains(got, "only one line") {
+		t.Error("expected few.md content in output")
+	}
+	if !strings.Contains(got, "SKIPPED") {
+		t.Errorf("expected SKIPPED message for many.md, got: %s", got)
+	}
+}
+
+func TestMultiGet_MissingPattern(t *testing.T) {
+	store := &fakeStore{}
+	embed := &fakeEmbedder{}
+	server := newTestServer(store, store, embed)
+
+	_, isError := callMultiGet(t, server, map[string]interface{}{})
+	if !isError {
+		t.Fatal("expected error for missing pattern")
+	}
+}
+
+func TestMultiGet_RestrictsToHome(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	store := &fakeStore{
+		listDocsFunc: func() ([]*db.Document, error) {
+			return []*db.Document{}, nil
+		},
+	}
+	embed := &fakeEmbedder{}
+	server := newTestServer(store, store, embed)
+
+	_, isError := callMultiGet(t, server, map[string]interface{}{
+		"pattern": "/etc/**/*.conf",
+	})
+	if !isError {
+		t.Fatal("expected error for pattern outside home")
+	}
+}
+
+func TestMultiGet_DeepGlob(t *testing.T) {
+	store, _ := newMultiGetStore(t, map[string]string{
+		"a/b/c/d.md": "deep content",
+		"a/x.md":     "shallow content",
+		"z.md":        "root content",
+	})
+	embed := &fakeEmbedder{}
+	server := newTestServer(store, store, embed)
+
+	got, isError := callMultiGet(t, server, map[string]interface{}{
+		"pattern": "a/**/*.md",
+	})
+	if isError {
+		t.Fatalf("expected success, got error: %s", got)
+	}
+	if !strings.Contains(got, "deep content") {
+		t.Error("expected deep content in output")
+	}
+	if !strings.Contains(got, "shallow content") {
+		t.Error("expected shallow content in output")
+	}
+	if strings.Contains(got, "root content") {
+		t.Error("should not contain root content")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// set_context / get_contexts tests
+// ---------------------------------------------------------------------------
+
+func callTool(t *testing.T, server *mcpserver.Server, name string, args map[string]interface{}) (string, bool) {
+	t.Helper()
+	params, _ := json.Marshal(map[string]interface{}{
+		"name":      name,
+		"arguments": args,
+	})
+	resp := pipeRequest(t, server, jsonRPCRequest{
+		JSONRPC: "2.0",
+		ID:      float64(1),
+		Method:  "tools/call",
+		Params:  params,
+	})
+	if resp.Error != nil {
+		t.Fatalf("unexpected JSON-RPC error: %v", resp.Error)
+	}
+	result, ok := resp.Result.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected result map, got %T", resp.Result)
+	}
+	isError := result["isError"] == true
+	content := result["content"].([]interface{})
+	text := content[0].(map[string]interface{})["text"].(string)
+	return text, isError
+}
+
+func TestSetContext_Roundtrip(t *testing.T) {
+	store := &fakeStore{}
+	embed := &fakeEmbedder{}
+	server := newTestServer(store, store, embed)
+
+	got, isError := callTool(t, server, "set_context", map[string]interface{}{
+		"path": "/home/user/docs/api",
+		"text": "API documentation for the project",
+	})
+	if isError {
+		t.Fatalf("set_context failed: %s", got)
+	}
+	if !strings.Contains(got, "Context set for /home/user/docs/api") {
+		t.Errorf("unexpected set_context response: %s", got)
+	}
+
+	got2, isError2 := callTool(t, server, "get_contexts", map[string]interface{}{})
+	if isError2 {
+		t.Fatalf("get_contexts failed: %s", got2)
+	}
+	if !strings.Contains(got2, "/home/user/docs/api") {
+		t.Errorf("expected path in get_contexts output, got: %s", got2)
+	}
+	if !strings.Contains(got2, "API documentation for the project") {
+		t.Errorf("expected context text in get_contexts output, got: %s", got2)
+	}
+}
+
+func TestGetContexts_Empty(t *testing.T) {
+	store := &fakeStore{}
+	embed := &fakeEmbedder{}
+	server := newTestServer(store, store, embed)
+
+	got, isError := callTool(t, server, "get_contexts", map[string]interface{}{})
+	if isError {
+		t.Fatalf("get_contexts failed: %s", got)
+	}
+	if !strings.Contains(got, "No folder contexts configured") {
+		t.Errorf("expected empty message, got: %s", got)
+	}
+}
+
+func TestSetContext_MissingPath(t *testing.T) {
+	store := &fakeStore{}
+	embed := &fakeEmbedder{}
+	server := newTestServer(store, store, embed)
+
+	_, isError := callTool(t, server, "set_context", map[string]interface{}{
+		"text": "some text",
+	})
+	if !isError {
+		t.Fatal("expected error for missing path")
+	}
+}
+
+func TestSetContext_MissingText(t *testing.T) {
+	store := &fakeStore{}
+	embed := &fakeEmbedder{}
+	server := newTestServer(store, store, embed)
+
+	_, isError := callTool(t, server, "set_context", map[string]interface{}{
+		"path": "/some/path",
+	})
+	if !isError {
+		t.Fatal("expected error for missing text")
+	}
+}
+
+func TestSearchDocuments_LongestPrefixMatch(t *testing.T) {
+	store := &fakeStore{
+		searchFunc: func(query string, limit int) ([]*db.SearchResult, error) {
+			return []*db.SearchResult{
+				{
+					Chunk: &db.Chunk{
+						DocumentPath: "/home/user/docs/api/auth.md",
+						ChunkIndex:   0,
+						Content:      "Auth content",
+					},
+					RRFScore: 0.75,
+				},
+			}, nil
+		},
+		folderContexts: map[string]string{
+			"/home/user/docs":      "General docs",
+			"/home/user/docs/api":  "API documentation",
+		},
+	}
+	embed := &fakeEmbedder{}
+	server := newTestServer(store, store, embed)
+
+	got, isError := callTool(t, server, "search_documents", map[string]interface{}{
+		"query": "auth",
+		"limit": float64(5),
+	})
+	if isError {
+		t.Fatalf("search_documents failed: %s", got)
+	}
+	if !strings.Contains(got, "Context: /home/user/docs/api — API documentation") {
+		t.Errorf("expected longest prefix context in output, got:\n%s", got)
+	}
+}
+
+func TestSearchDocuments_NoContextMatch(t *testing.T) {
+	store := &fakeStore{
+		searchFunc: func(query string, limit int) ([]*db.SearchResult, error) {
+			return []*db.SearchResult{
+				{
+					Chunk: &db.Chunk{
+						DocumentPath: "/home/user/projects/app.go",
+						ChunkIndex:   0,
+						Content:      "Go code",
+					},
+					RRFScore: 0.6,
+				},
+			}, nil
+		},
+		folderContexts: map[string]string{
+			"/home/user/docs": "Docs context",
+		},
+	}
+	embed := &fakeEmbedder{}
+	server := newTestServer(store, store, embed)
+
+	got, isError := callTool(t, server, "search_documents", map[string]interface{}{
+		"query": "app",
+		"limit": float64(5),
+	})
+	if isError {
+		t.Fatalf("search_documents failed: %s", got)
+	}
+	if strings.Contains(got, "Context:") {
+		t.Errorf("expected no context line when no prefix matches, got:\n%s", got)
 	}
 }
