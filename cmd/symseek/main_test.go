@@ -736,14 +736,21 @@ func TestMigrateCmd(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // TestVersionCmd_Check covers lines 281-295: --check flag triggers an update
-// check.  The network call may fail, but the code path is exercised.
+// check.  The network call may fail, but the version string is always printed
+// before the check runs.
 func TestVersionCmd_Check(t *testing.T) {
 	setupTestEnv(t)
 	cmd := newRootCmd()
 	cmd.SetArgs([]string{"version", "--check"})
-	err := cmd.Execute()
-	// Network call may fail — we just need the code path covered.
-	_ = err
+	out := captureStdout(t, func() {
+		_ = cmd.Execute()
+	})
+	if !strings.Contains(out, "symseek version") {
+		t.Errorf("expected output to contain 'symseek version', got %q", out)
+	}
+	if !strings.Contains(out, version) {
+		t.Errorf("expected output to contain version %q, got %q", version, out)
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -751,7 +758,7 @@ func TestVersionCmd_Check(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // TestServeCmd_HTTP covers lines 306-308: --port > 0 starts the HTTP server.
-// The server blocks on signal, so we run it in a goroutine and return.
+// Verifies the server accepts TCP connections on the chosen port.
 func TestServeCmd_HTTP(t *testing.T) {
 	setupTestEnv(t)
 	port := freePort(t)
@@ -763,8 +770,20 @@ func TestServeCmd_HTTP(t *testing.T) {
 		done <- cmd.Execute()
 	}()
 
-	time.Sleep(300 * time.Millisecond)
-	_ = done
+	// Wait for the server to start listening.
+	var conn net.Conn
+	var err error
+	for i := 0; i < 20; i++ {
+		conn, err = net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 100*time.Millisecond)
+		if err == nil {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if err != nil {
+		t.Fatalf("server did not accept connection on port %d: %v", port, err)
+	}
+	conn.Close()
 }
 
 // TestServeCmd_MCP covers lines 310-311: no --port starts the MCP server.
@@ -791,36 +810,61 @@ func TestServeCmd_MCP(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // TestStartHTTPServer_DefaultCooldown covers lines 335-338: when
-// IndexCooldownSeconds <= 0, cooldown defaults to 5s.
+// IndexCooldownSeconds <= 0, cooldown defaults to 5s. Verifies the server
+// accepts TCP connections.
 func TestStartHTTPServer_DefaultCooldown(t *testing.T) {
 	setupTestEnv(t)
 	cfg = *config.DefaultConfig()
 	cfg.IndexCooldownSeconds = 0
 
+	port := freePort(t)
 	done := make(chan error, 1)
 	go func() {
-		done <- startHTTPServer(0) // port 0 → OS-assigned
+		done <- startHTTPServer(port)
 	}()
 
-	// Let the server start; it blocks on signal.
-	time.Sleep(200 * time.Millisecond)
-	_ = done // goroutine blocks on signal forever — coverage is measured
+	var conn net.Conn
+	var err error
+	for i := 0; i < 20; i++ {
+		conn, err = net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 100*time.Millisecond)
+		if err == nil {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if err != nil {
+		t.Fatalf("server did not accept connection on port %d: %v", port, err)
+	}
+	conn.Close()
 }
 
 // TestStartHTTPServer_CustomCooldown covers line 335: non-zero
-// IndexCooldownSeconds is used directly.
+// IndexCooldownSeconds is used directly. Verifies the server accepts TCP
+// connections.
 func TestStartHTTPServer_CustomCooldown(t *testing.T) {
 	setupTestEnv(t)
 	cfg = *config.DefaultConfig()
 	cfg.IndexCooldownSeconds = 10
 
+	port := freePort(t)
 	done := make(chan error, 1)
 	go func() {
-		done <- startHTTPServer(0)
+		done <- startHTTPServer(port)
 	}()
 
-	time.Sleep(200 * time.Millisecond)
-	_ = done
+	var conn net.Conn
+	var err error
+	for i := 0; i < 20; i++ {
+		conn, err = net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 100*time.Millisecond)
+		if err == nil {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if err != nil {
+		t.Fatalf("server did not accept connection on port %d: %v", port, err)
+	}
+	conn.Close()
 }
 
 // ---------------------------------------------------------------------------
