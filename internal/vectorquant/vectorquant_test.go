@@ -249,6 +249,25 @@ func TestInvalidBitWidthRejection(t *testing.T) {
 	}
 }
 
+func TestBitWidthLevels(t *testing.T) {
+	tests := []struct {
+		bw     BitWidth
+	 Levels int
+	}{
+		{BitWidth2, 4},
+		{BitWidth3, 8},
+		{BitWidth4, 16},
+		{BitWidthHalf2and3, 0},
+		{BitWidthHalf3and4, 0},
+		{BitWidth(99), 0},
+	}
+	for _, tt := range tests {
+		if got := tt.bw.Levels(); got != tt.Levels {
+			t.Errorf("BitWidth(%d).Levels() = %d, want %d", int(tt.bw), got, tt.Levels)
+		}
+	}
+}
+
 func TestEncodeDimMismatch(t *testing.T) {
 	codec, _ := NewCodec(128, BitWidth2, 42, 0)
 	_, err := codec.Encode(make([]float32, 64))
