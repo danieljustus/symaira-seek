@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/danieljustus/symaira-corekit/sqlitekit"
@@ -83,6 +84,9 @@ type Store interface {
 	SearchBM25(queryStr string, limit int) ([]*SearchResult, error)
 	SearchVector(queryVec []float32, limit int) ([]*SearchResult, error)
 	DetectMixedEmbeddingSpaces() (map[string]int, error)
+	SetFolderContext(path, text string) error
+	GetFolderContexts() ([]FolderContext, error)
+	GetMatchingContext(path string) (*FolderContext, error)
 }
 
 var _ Store = (*DB)(nil)
@@ -395,6 +399,12 @@ func (db *DB) GetChunksForDocument(docPath string) ([]*Chunk, error) {
 	return chunks, nil
 }
 
+// FolderContext stores a path prefix and its descriptive context text.
+type FolderContext struct {
+	PathPrefix  string `json:"path_prefix"`
+	ContextText string `json:"context_text"`
+}
+
 type Stats struct {
 	DocumentCount int   `json:"document_count"`
 	ChunkCount    int   `json:"chunk_count"`
@@ -453,4 +463,55 @@ func (db *DB) DetectMixedEmbeddingSpaces() (map[string]int, error) {
 		return nil, fmt.Errorf("detect mixed embedding spaces: %w", err)
 	}
 	return result, nil
+}
+
+func (db *DB) SetFolderContext(path, text string) error {
+	_, err := db.conn.Exec(
+		`INSERT INTO folder_contexts (path_prefix, context_text) VALUES (?, ?)
+		 ON CONFLICT(path_prefix) DO UPDATE SET context_text = excluded.context_text`,
+		path, text,
+	)
+	return err
+}
+
+func (db *DB) GetFolderContexts() ([]FolderContext, error) {
+	rows, err := db.conn.Query("SELECT path_prefix, context_text FROM folder_contexts ORDER BY path_prefix")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var contexts []FolderContext
+	for rows.Next() {
+		var fc FolderContext
+		if err := rows.Scan(&fc.PathPrefix, &fc.ContextText); err != nil {
+			return nil, err
+		}
+		contexts = append(contexts, fc)
+	}
+	return contexts, rows.Err()
+}
+
+// GetMatchingContext returns the context whose path_prefix is the longest
+// prefix of path. Returns nil when no prefix matches.
+func (db *DB) GetMatchingContext(path string) (*FolderContext, error) {
+	rows, err := db.conn.Query("SELECT path_prefix, context_text FROM folder_contexts")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var best *FolderContext
+	bestLen := 0
+	for rows.Next() {
+		var fc FolderContext
+		if err := rows.Scan(&fc.PathPrefix, &fc.ContextText); err != nil {
+			return nil, err
+		}
+		if strings.HasPrefix(path, fc.PathPrefix) && len(fc.PathPrefix) > bestLen {
+			best = &fc
+			bestLen = len(fc.PathPrefix)
+		}
+	}
+	return best, rows.Err()
 }
