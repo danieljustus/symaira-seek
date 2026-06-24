@@ -70,7 +70,7 @@ func (db *DB) SearchBM25(queryStr string, limit int) ([]*SearchResult, error) {
 // needs only the embedding and its precomputed norm. Streaming every chunk's
 // text on every query is the dominant cost on large indexes, so content is
 // fetched afterwards for just the surviving top-k rows (see hydrateContent).
-const searchVectorScanSelect = "SELECT id, uuid, document_path, chunk_index, embedding, hash, norm, binary_signature FROM chunks"
+const searchVectorScanSelect = "SELECT id, uuid, document_path, chunk_index, embedding, hash, norm, binary_signature, embedding_dim, embedding_model FROM chunks"
 
 func (db *DB) SearchVector(queryVec []float32, limit int) ([]*SearchResult, error) {
 	if limit <= 0 {
@@ -145,7 +145,7 @@ func (db *DB) searchVectorFiltered(queryVec []float32, queryNorm float32, candid
 	}
 
 	query := fmt.Sprintf(
-		"SELECT id, uuid, document_path, chunk_index, embedding, hash, norm, binary_signature FROM chunks WHERE id IN (%s)",
+		"SELECT id, uuid, document_path, chunk_index, embedding, hash, norm, binary_signature, embedding_dim, embedding_model FROM chunks WHERE id IN (%s)",
 		strings.Join(placeholders, ","),
 	)
 
@@ -159,7 +159,7 @@ func (db *DB) searchVectorFiltered(queryVec []float32, queryNorm float32, candid
 	for rows.Next() {
 		var e rowEntry
 		var sigPtr *[]byte
-		if err := rows.Scan(&e.chunk.ID, &e.chunk.UUID, &e.chunk.DocumentPath, &e.chunk.ChunkIndex, &e.embBytes, &e.chunk.Hash, &e.norm, &sigPtr); err != nil {
+		if err := rows.Scan(&e.chunk.ID, &e.chunk.UUID, &e.chunk.DocumentPath, &e.chunk.ChunkIndex, &e.embBytes, &e.chunk.Hash, &e.norm, &sigPtr, &e.chunk.Dim, &e.chunk.Model); err != nil {
 			return nil, err
 		}
 		if sigPtr != nil {
@@ -228,7 +228,7 @@ func (db *DB) searchVectorFullScan(queryVec []float32, queryNorm float32, limit 
 	for rows.Next() {
 		var e rowEntry
 		var sigPtr *[]byte
-		if err := rows.Scan(&e.chunk.ID, &e.chunk.UUID, &e.chunk.DocumentPath, &e.chunk.ChunkIndex, &e.embBytes, &e.chunk.Hash, &e.norm, &sigPtr); err != nil {
+		if err := rows.Scan(&e.chunk.ID, &e.chunk.UUID, &e.chunk.DocumentPath, &e.chunk.ChunkIndex, &e.embBytes, &e.chunk.Hash, &e.norm, &sigPtr, &e.chunk.Dim, &e.chunk.Model); err != nil {
 			return nil, err
 		}
 		if sigPtr != nil {
@@ -311,8 +311,8 @@ func (db *DB) searchVectorFullScanCosine(queryVec []float32, queryNorm float32, 
 		var c Chunk
 		var embBytes []byte
 		var norm float32
-		var sigPtr *[]byte // ignore binary_signature
-		if err := rows.Scan(&c.ID, &c.UUID, &c.DocumentPath, &c.ChunkIndex, &embBytes, &c.Hash, &norm, &sigPtr); err != nil {
+		var sigPtr *[]byte
+		if err := rows.Scan(&c.ID, &c.UUID, &c.DocumentPath, &c.ChunkIndex, &embBytes, &c.Hash, &norm, &sigPtr, &c.Dim, &c.Model); err != nil {
 			return nil, err
 		}
 		c.Norm = norm

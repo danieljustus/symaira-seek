@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strings"
 	"sync"
 
 	"github.com/danieljustus/symaira-seek/internal/db"
@@ -16,6 +17,20 @@ import (
 func SearchHybrid(dbClient db.Store, embedder Embedder, query string, limit int) ([]*db.SearchResult, error) {
 	if query == "" {
 		return nil, nil
+	}
+
+	// Check for mixed embedding spaces before vector search to prevent
+	// silently returning zero/wrong cosine scores (issue #151).
+	spaces, err := dbClient.DetectMixedEmbeddingSpaces()
+	if err != nil {
+		return nil, fmt.Errorf("failed to detect embedding spaces: %w", err)
+	}
+	if len(spaces) > 1 {
+		examples := make([]string, 0, len(spaces))
+		for key, count := range spaces {
+			examples = append(examples, fmt.Sprintf("%s (%d chunks)", key, count))
+		}
+		return nil, fmt.Errorf("index contains mixed embedding spaces (%s); re-index with a single model before searching", strings.Join(examples, ", "))
 	}
 
 	// 1. Generate query vector (no retry — fast fallback when Ollama is offline, issue #162)

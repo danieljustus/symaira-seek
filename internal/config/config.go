@@ -18,6 +18,7 @@ import (
 type Config struct {
 	OllamaURL            string `json:"ollama_url" toml:"ollama_url"`
 	Model                string `json:"model" toml:"model"`
+	EmbeddingDim         int    `json:"embedding_dim" toml:"embedding_dim"`
 	TimeoutSeconds       int    `json:"timeout_seconds" toml:"timeout_seconds"`
 	RetryCount           int    `json:"retry_count" toml:"retry_count"`
 	RetryBackoffMS       int    `json:"retry_backoff_ms" toml:"retry_backoff_ms"`
@@ -70,6 +71,7 @@ func (c *Config) OllamaConfig() engine.OllamaConfig {
 	return engine.OllamaConfig{
 		URL:          c.OllamaURL,
 		Model:        c.Model,
+		Dim:          c.EmbeddingDim,
 		Timeout:      time.Duration(c.TimeoutSeconds) * time.Second,
 		RetryCount:   c.RetryCount,
 		RetryBackoff: time.Duration(c.RetryBackoffMS) * time.Millisecond,
@@ -141,6 +143,12 @@ func SetValue(cfgFile string, key, value string, cfg *Config) error {
 			return fmt.Errorf("--set-value is required for key %q", key)
 		}
 		cfg.Model = value
+	case "embedding_dim":
+		n, err := strconv.Atoi(value)
+		if err != nil || n < 0 {
+			return fmt.Errorf("invalid %s value %q (must be a non-negative integer; 0 means auto-detect)", key, value)
+		}
+		cfg.EmbeddingDim = n
 	case "timeout_seconds":
 		n, err := strconv.Atoi(value)
 		if err != nil || n <= 0 {
@@ -166,7 +174,7 @@ func SetValue(cfgFile string, key, value string, cfg *Config) error {
 		}
 		cfg.IndexCooldownSeconds = n
 	default:
-		return fmt.Errorf("unknown config key %q (supported: ollama_url, model, timeout_seconds, retry_count, retry_backoff_ms, index_cooldown_seconds)", key)
+		return fmt.Errorf("unknown config key %q (supported: ollama_url, model, embedding_dim, timeout_seconds, retry_count, retry_backoff_ms, index_cooldown_seconds)", key)
 	}
 	return Save(cfgFile, cfg)
 }

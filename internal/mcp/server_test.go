@@ -58,6 +58,10 @@ func (f *fakeStore) SearchVector(queryVec []float32, limit int) ([]*db.SearchRes
 	return []*db.SearchResult{}, nil
 }
 
+func (f *fakeStore) DetectMixedEmbeddingSpaces() (map[string]int, error) {
+	return nil, nil
+}
+
 type fakeEmbedder struct{}
 
 func (f *fakeEmbedder) GenerateVector(text string) []float32 {
@@ -74,6 +78,14 @@ func (f *fakeEmbedder) GenerateVectors(texts []string) [][]float32 {
 
 func (f *fakeEmbedder) GenerateVectorNoRetry(text string) []float32 {
 	return f.GenerateVector(text)
+}
+
+func (f *fakeEmbedder) Dim() int {
+	return 768
+}
+
+func (f *fakeEmbedder) ModelName() string {
+	return "fake-model"
 }
 
 func newTestServer(store db.Store, embedder engine.Embedder) *mcpserver.Server {

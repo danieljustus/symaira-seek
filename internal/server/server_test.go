@@ -58,6 +58,10 @@ func (m *mockStore) SearchVector(queryVec []float32, limit int) ([]*db.SearchRes
 	return nil, nil
 }
 
+func (m *mockStore) DetectMixedEmbeddingSpaces() (map[string]int, error) {
+	return nil, nil
+}
+
 func (m *mockStore) ListDocuments() ([]*db.Document, error) {
 	if m.listDocumentsFn != nil {
 		return m.listDocumentsFn()
@@ -133,6 +137,14 @@ func (m *mockEmbedder) GenerateVectorNoRetry(text string) []float32 {
 		return m.generateVectorNoRetryFn(text)
 	}
 	return make([]float32, 768)
+}
+
+func (m *mockEmbedder) Dim() int {
+	return 768
+}
+
+func (m *mockEmbedder) ModelName() string {
+	return "mock-model"
 }
 
 // ---------------------------------------------------------------------------

@@ -4,6 +4,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -150,6 +151,14 @@ func (f *fakeEmbedder) GenerateVectors(texts []string) [][]float32 {
 
 func (f *fakeEmbedder) GenerateVectorNoRetry(text string) []float32 {
 	return f.GenerateVector(text)
+}
+
+func (f *fakeEmbedder) Dim() int {
+	return f.dim
+}
+
+func (f *fakeEmbedder) ModelName() string {
+	return "fake-model"
 }
 
 // TestSearchHybridAcceptsEmbedderInterface guards the contract from #35:
@@ -359,5 +368,52 @@ func TestHybridSearch(t *testing.T) {
 	// Verify rank fields are set
 	if res[0].BM25Rank == 0 && res[0].VectorRank == 0 {
 		t.Errorf("expected BM25Rank or VectorRank to be non-zero")
+	}
+}
+
+type mixedSpaceStore struct {
+	db.Store
+	spaces map[string]int
+}
+
+func (m *mixedSpaceStore) DetectMixedEmbeddingSpaces() (map[string]int, error) {
+	return m.spaces, nil
+}
+
+func (m *mixedSpaceStore) SearchVector(queryVec []float32, limit int) ([]*db.SearchResult, error) {
+	return nil, nil
+}
+
+func (m *mixedSpaceStore) SearchBM25(query string, limit int) ([]*db.SearchResult, error) {
+	return nil, nil
+}
+
+func TestSearchHybrid_MixedSpaceReturnsError(t *testing.T) {
+	store := &mixedSpaceStore{
+		spaces: map[string]int{
+			"768/model-a": 100,
+			"384/model-b": 50,
+		},
+	}
+	embedder := &fakeEmbedder{dim: 768}
+
+	_, err := SearchHybrid(store, embedder, "test query", 5)
+	if err == nil {
+		t.Fatal("expected error for mixed embedding spaces, got nil")
+	}
+	if !strings.Contains(err.Error(), "mixed embedding spaces") {
+		t.Errorf("expected error about mixed embedding spaces, got: %v", err)
+	}
+}
+
+func TestSearchHybrid_EmptyDBNoError(t *testing.T) {
+	store := &mixedSpaceStore{
+		spaces: map[string]int{},
+	}
+	embedder := &fakeEmbedder{dim: 768}
+
+	_, err := SearchHybrid(store, embedder, "test query", 5)
+	if err != nil {
+		t.Fatalf("expected no error for empty DB, got: %v", err)
 	}
 }
