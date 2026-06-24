@@ -11,6 +11,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 	"github.com/danieljustus/symaira-corekit/configkit"
+	"github.com/danieljustus/symaira-seek/internal/db"
 	"github.com/danieljustus/symaira-seek/internal/engine"
 )
 
@@ -24,18 +25,28 @@ type Config struct {
 	RetryBackoffMS       int    `json:"retry_backoff_ms" toml:"retry_backoff_ms"`
 	IndexCooldownSeconds int    `json:"index_cooldown_seconds" toml:"index_cooldown_seconds"`
 	VectorBackend        string `json:"vector_backend" toml:"vector_backend"`
+
+	// Quantized vector search (opt-in, off by default).
+	VectorQuantization       string `json:"vector_quantization" toml:"vector_quantization"`             // "off" | "turbo-prod"
+	VectorQuantBits          int    `json:"vector_quant_bits" toml:"vector_quant_bits"`                 // 2, 3, or 4
+	VectorQuantizedShortlist int    `json:"vector_quantized_shortlist" toml:"vector_quantized_shortlist"` // approximate shortlist size
+	VectorExactRerank        bool   `json:"vector_exact_rerank" toml:"vector_exact_rerank"`             // exact cosine rerank on shortlist
 }
 
 // DefaultConfig returns the default configuration values.
 func DefaultConfig() *Config {
 	return &Config{
-		OllamaURL:            "http://localhost:11434/api/embeddings",
-		Model:                "nomic-embed-text",
-		TimeoutSeconds:       120,
-		RetryCount:           2,
-		RetryBackoffMS:       500,
-		IndexCooldownSeconds: 5,
-		VectorBackend:        "sqlite",
+		OllamaURL:                 "http://localhost:11434/api/embeddings",
+		Model:                     "nomic-embed-text",
+		TimeoutSeconds:            120,
+		RetryCount:                2,
+		RetryBackoffMS:            500,
+		IndexCooldownSeconds:      5,
+		VectorBackend:             "sqlite",
+		VectorQuantization:        "off",
+		VectorQuantBits:           4,
+		VectorQuantizedShortlist:  200,
+		VectorExactRerank:         true,
 	}
 }
 
@@ -77,6 +88,21 @@ func (c *Config) OllamaConfig() engine.OllamaConfig {
 		Timeout:      time.Duration(c.TimeoutSeconds) * time.Second,
 		RetryCount:   c.RetryCount,
 		RetryBackoff: time.Duration(c.RetryBackoffMS) * time.Millisecond,
+	}
+}
+
+// QuantDBConfig returns the QuantConfig for db.DB, or nil when quantization
+// is disabled.
+func (c *Config) QuantDBConfig() *db.QuantConfig {
+	if c.VectorQuantization == "off" || c.VectorQuantization == "" {
+		return nil
+	}
+	return &db.QuantConfig{
+		Enabled:     true,
+		BitWidth:    c.VectorQuantBits,
+		Shortlist:   c.VectorQuantizedShortlist,
+		ExactRerank: c.VectorExactRerank,
+		Seed:        42,
 	}
 }
 
@@ -183,8 +209,34 @@ func SetValue(cfgFile string, key, value string, cfg *Config) error {
 			return fmt.Errorf("invalid vector_backend %q (only \"sqlite\" is currently supported)", value)
 		}
 		cfg.VectorBackend = value
+	case "vector_quantization":
+		if value == "" {
+			return fmt.Errorf("--set-value is required for key %q", key)
+		}
+		if value != "off" && value != "turbo-prod" {
+			return fmt.Errorf("invalid vector_quantization %q (supported: \"off\", \"turbo-prod\")", value)
+		}
+		cfg.VectorQuantization = value
+	case "vector_quant_bits":
+		n, err := strconv.Atoi(value)
+		if err != nil || (n != 2 && n != 3 && n != 4) {
+			return fmt.Errorf("invalid %s value %q (must be 2, 3, or 4)", key, value)
+		}
+		cfg.VectorQuantBits = n
+	case "vector_quantized_shortlist":
+		n, err := strconv.Atoi(value)
+		if err != nil || n <= 0 {
+			return fmt.Errorf("invalid %s value %q (must be a positive integer)", key, value)
+		}
+		cfg.VectorQuantizedShortlist = n
+	case "vector_exact_rerank":
+		b, err := strconv.ParseBool(value)
+		if err != nil {
+			return fmt.Errorf("invalid %s value %q (must be true or false)", key, value)
+		}
+		cfg.VectorExactRerank = b
 	default:
-		return fmt.Errorf("unknown config key %q (supported: ollama_url, model, embedding_dim, timeout_seconds, retry_count, retry_backoff_ms, index_cooldown_seconds, vector_backend)", key)
+		return fmt.Errorf("unknown config key %q (supported: ollama_url, model, embedding_dim, timeout_seconds, retry_count, retry_backoff_ms, index_cooldown_seconds, vector_backend, vector_quantization, vector_quant_bits, vector_quantized_shortlist, vector_exact_rerank)", key)
 	}
 	return Save(cfgFile, cfg)
 }

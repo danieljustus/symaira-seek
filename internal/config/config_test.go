@@ -290,3 +290,133 @@ func TestOllamaConfig_PassesEmbeddingDim(t *testing.T) {
 		t.Errorf("expected Dim=512 in OllamaConfig, got %d", oc.Dim)
 	}
 }
+
+func TestDefaultConfig_QuantizationDefaults(t *testing.T) {
+	cfg := DefaultConfig()
+	if cfg.VectorQuantization != "off" {
+		t.Errorf("expected default VectorQuantization=off, got %q", cfg.VectorQuantization)
+	}
+	if cfg.VectorQuantBits != 4 {
+		t.Errorf("expected default VectorQuantBits=4, got %d", cfg.VectorQuantBits)
+	}
+	if cfg.VectorQuantizedShortlist != 200 {
+		t.Errorf("expected default VectorQuantizedShortlist=200, got %d", cfg.VectorQuantizedShortlist)
+	}
+	if !cfg.VectorExactRerank {
+		t.Error("expected default VectorExactRerank=true")
+	}
+}
+
+func TestQuantDBConfig_OffReturnsNil(t *testing.T) {
+	cfg := DefaultConfig()
+	if cfg.QuantDBConfig() != nil {
+		t.Error("expected nil QuantDBConfig when vector_quantization=off")
+	}
+}
+
+func TestQuantDBConfig_TurboProdReturnsConfig(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.VectorQuantization = "turbo-prod"
+	cfg.VectorQuantBits = 3
+	cfg.VectorQuantizedShortlist = 100
+	cfg.VectorExactRerank = false
+
+	qc := cfg.QuantDBConfig()
+	if qc == nil {
+		t.Fatal("expected non-nil QuantDBConfig for turbo-prod")
+	}
+	if !qc.Enabled {
+		t.Error("expected Enabled=true")
+	}
+	if qc.BitWidth != 3 {
+		t.Errorf("expected BitWidth=3, got %d", qc.BitWidth)
+	}
+	if qc.Shortlist != 100 {
+		t.Errorf("expected Shortlist=100, got %d", qc.Shortlist)
+	}
+	if qc.ExactRerank {
+		t.Error("expected ExactRerank=false")
+	}
+}
+
+func TestSetValue_AcceptsVectorQuantization(t *testing.T) {
+	dir := t.TempDir()
+	cfgFile := filepath.Join(dir, "config.toml")
+	cfg := DefaultConfig()
+
+	if err := SetValue(cfgFile, "vector_quantization", "turbo-prod", cfg); err != nil {
+		t.Fatalf("SetValue(vector_quantization): %v", err)
+	}
+	if cfg.VectorQuantization != "turbo-prod" {
+		t.Errorf("expected VectorQuantization=turbo-prod, got %q", cfg.VectorQuantization)
+	}
+}
+
+func TestSetValue_RejectsInvalidVectorQuantization(t *testing.T) {
+	dir := t.TempDir()
+	cfgFile := filepath.Join(dir, "config.toml")
+	cfg := DefaultConfig()
+
+	if err := SetValue(cfgFile, "vector_quantization", "invalid", cfg); err == nil {
+		t.Error("expected error for invalid vector_quantization")
+	}
+}
+
+func TestSetValue_AcceptsVectorQuantBits(t *testing.T) {
+	dir := t.TempDir()
+	cfgFile := filepath.Join(dir, "config.toml")
+	cfg := DefaultConfig()
+
+	if err := SetValue(cfgFile, "vector_quant_bits", "3", cfg); err != nil {
+		t.Fatalf("SetValue(vector_quant_bits): %v", err)
+	}
+	if cfg.VectorQuantBits != 3 {
+		t.Errorf("expected VectorQuantBits=3, got %d", cfg.VectorQuantBits)
+	}
+}
+
+func TestSetValue_RejectsInvalidVectorQuantBits(t *testing.T) {
+	dir := t.TempDir()
+	cfgFile := filepath.Join(dir, "config.toml")
+	cfg := DefaultConfig()
+
+	if err := SetValue(cfgFile, "vector_quant_bits", "5", cfg); err == nil {
+		t.Error("expected error for vector_quant_bits=5")
+	}
+}
+
+func TestSetValue_AcceptsVectorQuantizedShortlist(t *testing.T) {
+	dir := t.TempDir()
+	cfgFile := filepath.Join(dir, "config.toml")
+	cfg := DefaultConfig()
+
+	if err := SetValue(cfgFile, "vector_quantized_shortlist", "500", cfg); err != nil {
+		t.Fatalf("SetValue(vector_quantized_shortlist): %v", err)
+	}
+	if cfg.VectorQuantizedShortlist != 500 {
+		t.Errorf("expected VectorQuantizedShortlist=500, got %d", cfg.VectorQuantizedShortlist)
+	}
+}
+
+func TestSetValue_AcceptsVectorExactRerank(t *testing.T) {
+	dir := t.TempDir()
+	cfgFile := filepath.Join(dir, "config.toml")
+	cfg := DefaultConfig()
+
+	if err := SetValue(cfgFile, "vector_exact_rerank", "false", cfg); err != nil {
+		t.Fatalf("SetValue(vector_exact_rerank): %v", err)
+	}
+	if cfg.VectorExactRerank {
+		t.Error("expected VectorExactRerank=false")
+	}
+}
+
+func TestSetValue_RejectsInvalidVectorExactRerank(t *testing.T) {
+	dir := t.TempDir()
+	cfgFile := filepath.Join(dir, "config.toml")
+	cfg := DefaultConfig()
+
+	if err := SetValue(cfgFile, "vector_exact_rerank", "maybe", cfg); err == nil {
+		t.Error("expected error for invalid vector_exact_rerank")
+	}
+}

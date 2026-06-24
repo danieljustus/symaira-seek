@@ -764,7 +764,7 @@ func TestStartServer_StdinEOF(t *testing.T) {
 		devNull.Close()
 	}()
 
-	if err := StartServer(engine.OllamaConfig{}); err != nil {
+	if err := StartServer(engine.OllamaConfig{}, nil); err != nil {
 		t.Fatalf("StartServer returned error: %v", err)
 	}
 }
