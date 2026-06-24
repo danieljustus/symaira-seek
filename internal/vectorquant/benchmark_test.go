@@ -112,6 +112,26 @@ func BenchmarkScore4Bit(b *testing.B) {
 	benchmarkScore(b, BitWidth4, 768)
 }
 
+func BenchmarkDecode2Bit(b *testing.B) {
+	benchmarkDecode(b, BitWidth2, 768)
+}
+
+func BenchmarkDecode3Bit(b *testing.B) {
+	benchmarkDecode(b, BitWidth3, 768)
+}
+
+func BenchmarkDecode4Bit(b *testing.B) {
+	benchmarkDecode(b, BitWidth4, 768)
+}
+
+func BenchmarkSidecarEncode2Bit(b *testing.B) {
+	benchmarkSidecarEncode(b, BitWidth2, 768)
+}
+
+func BenchmarkSidecarEncode4Bit(b *testing.B) {
+	benchmarkSidecarEncode(b, BitWidth4, 768)
+}
+
 func benchmarkEncode(b *testing.B, bw BitWidth, dim int) {
 	codec, _ := NewCodec(dim, bw, 42, 0)
 	rng := rand.New(rand.NewSource(1))
@@ -143,5 +163,32 @@ func benchmarkScore(b *testing.B, bw BitWidth, dim int) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_ = codec.Score(query, code)
+	}
+}
+
+func benchmarkDecode(b *testing.B, bw BitWidth, dim int) {
+	codec, _ := NewCodec(dim, bw, 42, 0)
+	rng := rand.New(rand.NewSource(1))
+	vec := make([]float32, dim)
+	for i := range vec {
+		vec[i] = float32(rng.NormFloat64())
+	}
+	code, _ := codec.Encode(vec)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = codec.Decode(code)
+	}
+}
+
+func benchmarkSidecarEncode(b *testing.B, bw BitWidth, dim int) {
+	codec, _ := NewCodec(dim, bw, 42, 0)
+	rng := rand.New(rand.NewSource(1))
+	vec := make([]float32, dim)
+	for i := range vec {
+		vec[i] = float32(rng.NormFloat64())
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _, _ = codec.EncodeSidecar(vec, 1.0)
 	}
 }
