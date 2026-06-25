@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -505,6 +506,181 @@ func benchmarkIndexDirectory(b *testing.B, parallel bool) {
 			}
 		}
 	}
+}
+
+func TestWatchDirectory_CreatesAndIndexes(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "seek-watch-create-test")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	t.Setenv("HOME", tempDir)
+
+	dbClient, err := db.Open()
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer dbClient.Close()
+
+	embedder := &fakeEmbedder{dim: 768}
+
+	docsDir := filepath.Join(tempDir, "docs")
+	if err := os.MkdirAll(docsDir, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- WatchDirectory(ctx, dbClient, embedder, docsDir)
+	}()
+
+	time.Sleep(200 * time.Millisecond)
+
+	newFile := filepath.Join(docsDir, "new.md")
+	if err := os.WriteFile(newFile, []byte("watched content"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	time.Sleep(1500 * time.Millisecond)
+
+	doc, err := dbClient.GetDocument(newFile)
+	if err != nil {
+		t.Fatalf("GetDocument: %v", err)
+	}
+	if doc == nil {
+		t.Errorf("expected new.md to be indexed by watcher, got nil")
+	}
+
+	cancel()
+	<-errCh
+}
+
+func TestWatchDirectory_ModifiesFile(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "seek-watch-modify-test")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	t.Setenv("HOME", tempDir)
+
+	dbClient, err := db.Open()
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer dbClient.Close()
+
+	embedder := &fakeEmbedder{dim: 768}
+
+	docsDir := filepath.Join(tempDir, "docs")
+	if err := os.MkdirAll(docsDir, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	existingFile := filepath.Join(docsDir, "existing.md")
+	if err := os.WriteFile(existingFile, []byte("original content"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- WatchDirectory(ctx, dbClient, embedder, docsDir)
+	}()
+
+	time.Sleep(200 * time.Millisecond)
+
+	doc, err := dbClient.GetDocument(existingFile)
+	if err != nil || doc == nil {
+		t.Fatalf("initial index: doc=%v err=%v", doc, err)
+	}
+	originalHash := doc.Hash
+
+	if err := os.WriteFile(existingFile, []byte("updated content for watcher"), 0644); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+
+	time.Sleep(1500 * time.Millisecond)
+
+	docAfter, err := dbClient.GetDocument(existingFile)
+	if err != nil {
+		t.Fatalf("GetDocument after modify: %v", err)
+	}
+	if docAfter == nil {
+		t.Fatal("expected existing.md to still be in DB after modify")
+	}
+	if docAfter.Hash == originalHash {
+		t.Errorf("expected hash to change after file modification, still %q", originalHash)
+	}
+
+	cancel()
+	<-errCh
+}
+
+func TestWatchDirectory_RemovesFile(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "seek-watch-remove-test")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	t.Setenv("HOME", tempDir)
+
+	dbClient, err := db.Open()
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer dbClient.Close()
+
+	embedder := &fakeEmbedder{dim: 768}
+
+	docsDir := filepath.Join(tempDir, "docs")
+	if err := os.MkdirAll(docsDir, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	doomedFile := filepath.Join(docsDir, "doomed.md")
+	if err := os.WriteFile(doomedFile, []byte("about to be deleted"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- WatchDirectory(ctx, dbClient, embedder, docsDir)
+	}()
+
+	time.Sleep(200 * time.Millisecond)
+
+	doc, err := dbClient.GetDocument(doomedFile)
+	if err != nil || doc == nil {
+		t.Fatalf("initial index: doc=%v err=%v", doc, err)
+	}
+
+	if err := os.Remove(doomedFile); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+
+	time.Sleep(1500 * time.Millisecond)
+
+	docAfter, err := dbClient.GetDocument(doomedFile)
+	if err != nil {
+		t.Fatalf("GetDocument after remove: %v", err)
+	}
+	if docAfter != nil {
+		t.Errorf("expected doomed.md to be removed from index, still present")
+	}
+
+	cancel()
+	<-errCh
 }
 
 func TestIndexDirectory(t *testing.T) {

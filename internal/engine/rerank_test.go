@@ -2,6 +2,9 @@ package engine
 
 import (
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -281,5 +284,108 @@ func TestRerankerPromptTruncatesLongContent(t *testing.T) {
 	}
 	if !strings.Contains(prompt, "...") {
 		t.Error("prompt should append ellipsis for truncated content")
+	}
+}
+
+func TestOllamaChatCompletion_Success(t *testing.T) {
+	var receivedBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("expected POST, got %s", r.Method)
+		}
+		if r.URL.Path != "/api/chat" {
+			t.Errorf("expected /api/chat, got %s", r.URL.Path)
+		}
+		body, _ := io.ReadAll(r.Body)
+		receivedBody = body
+
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"message":{"content":"[95, 42, 80]"}}`)
+	}))
+	defer srv.Close()
+
+	got, err := ollamaChatCompletion(srv.URL+"/api/embeddings", "test-model", "score these", 5*time.Second)
+	if err != nil {
+		t.Fatalf("ollamaChatCompletion: %v", err)
+	}
+	if got != "[95, 42, 80]" {
+		t.Errorf("expected score array, got %q", got)
+	}
+	if !strings.Contains(string(receivedBody), `"model":"test-model"`) {
+		t.Error("request body should contain model name")
+	}
+	if !strings.Contains(string(receivedBody), `"stream":false`) {
+		t.Error("request body should disable streaming")
+	}
+	if !strings.Contains(string(receivedBody), "score these") {
+		t.Error("request body should contain the prompt")
+	}
+}
+
+func TestOllamaChatCompletion_EmbedURLRewrite(t *testing.T) {
+	var path string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"message":{"content":"ok"}}`)
+	}))
+	defer srv.Close()
+
+	_, err := ollamaChatCompletion(srv.URL+"/api/embed", "m", "p", 5*time.Second)
+	if err != nil {
+		t.Fatalf("ollamaChatCompletion: %v", err)
+	}
+	if path != "/api/chat" {
+		t.Errorf("expected /api/chat path after rewrite, got %s", path)
+	}
+}
+
+func TestOllamaChatCompletion_HTTPError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprintf(w, "model not found")
+	}))
+	defer srv.Close()
+
+	_, err := ollamaChatCompletion(srv.URL+"/api/embeddings", "m", "p", 5*time.Second)
+	if err == nil {
+		t.Fatal("expected error on HTTP 500")
+	}
+	if !strings.Contains(err.Error(), "HTTP 500") {
+		t.Errorf("expected HTTP 500 in error, got: %v", err)
+	}
+}
+
+func TestOllamaChatCompletion_BadJSON(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"message":{"content":123}}`)
+	}))
+	defer srv.Close()
+
+	_, err := ollamaChatCompletion(srv.URL+"/api/embeddings", "m", "p", 5*time.Second)
+	if err == nil {
+		t.Fatal("expected error on malformed response")
+	}
+}
+
+func TestOllamaChatCompletion_Timeout(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(200 * time.Millisecond)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"message":{"content":"late"}}`)
+	}))
+	defer srv.Close()
+
+	_, err := ollamaChatCompletion(srv.URL+"/api/embeddings", "m", "p", 50*time.Millisecond)
+	if err == nil {
+		t.Fatal("expected timeout error")
+	}
+}
+
+func TestOllamaChatCompletion_ConnectionRefused(t *testing.T) {
+	_, err := ollamaChatCompletion("http://127.0.0.1:1/api/embeddings", "m", "p", 1*time.Second)
+	if err == nil {
+		t.Fatal("expected connection error")
 	}
 }
