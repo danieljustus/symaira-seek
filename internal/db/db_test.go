@@ -541,3 +541,260 @@ func TestDetectMixedEmbeddingSpaces_Empty(t *testing.T) {
 		t.Errorf("expected 0 embedding spaces for empty DB, got %d", len(spaces))
 	}
 }
+
+func TestListDocuments_Empty(t *testing.T) {
+	d := setupDB(t)
+
+	docs, err := d.ListDocuments()
+	if err != nil {
+		t.Fatalf("ListDocuments on empty DB: %v", err)
+	}
+	if len(docs) != 0 {
+		t.Errorf("expected 0 documents, got %d", len(docs))
+	}
+}
+
+func TestListDocuments_Multiple(t *testing.T) {
+	d := setupDB(t)
+
+	paths := []string{"/doc/a.md", "/doc/b.md", "/doc/c.md"}
+	for i, p := range paths {
+		doc := &Document{Path: p, Hash: fmt.Sprintf("hash%d", i), UpdatedAt: time.Now()}
+		if err := d.SaveDocument(doc); err != nil {
+			t.Fatalf("SaveDocument(%q): %v", p, err)
+		}
+	}
+
+	docs, err := d.ListDocuments()
+	if err != nil {
+		t.Fatalf("ListDocuments: %v", err)
+	}
+	if len(docs) != len(paths) {
+		t.Fatalf("expected %d documents, got %d", len(paths), len(docs))
+	}
+
+	found := make(map[string]bool)
+	for _, d := range docs {
+		found[d.Path] = true
+	}
+	for _, p := range paths {
+		if !found[p] {
+			t.Errorf("expected document %q in list, not found", p)
+		}
+	}
+
+	// Ensure order is by updated_at DESC (most recent first).
+	for i := 1; i < len(docs); i++ {
+		if docs[i].UpdatedAt.After(docs[i-1].UpdatedAt) {
+			t.Errorf("documents not in descending updated_at order: %s (%v) before %s (%v)",
+				docs[i].Path, docs[i].UpdatedAt, docs[i-1].Path, docs[i-1].UpdatedAt)
+		}
+	}
+}
+
+func TestListDocuments_AfterDelete(t *testing.T) {
+	d := setupDB(t)
+
+	doc := &Document{Path: "/doc/to-delete.md", Hash: "del1", UpdatedAt: time.Now()}
+	if err := d.SaveDocument(doc); err != nil {
+		t.Fatalf("SaveDocument: %v", err)
+	}
+	doc2 := &Document{Path: "/doc/keep.md", Hash: "keep1", UpdatedAt: time.Now()}
+	if err := d.SaveDocument(doc2); err != nil {
+		t.Fatalf("SaveDocument: %v", err)
+	}
+
+	if err := d.DeleteDocument("/doc/to-delete.md"); err != nil {
+		t.Fatalf("DeleteDocument: %v", err)
+	}
+
+	docs, err := d.ListDocuments()
+	if err != nil {
+		t.Fatalf("ListDocuments after delete: %v", err)
+	}
+	if len(docs) != 1 {
+		t.Fatalf("expected 1 document after delete, got %d", len(docs))
+	}
+	if docs[0].Path != "/doc/keep.md" {
+		t.Errorf("expected remaining document path 'keep.md', got %q", docs[0].Path)
+	}
+}
+
+func TestSetFolderContext_Create(t *testing.T) {
+	d := setupDB(t)
+
+	err := d.SetFolderContext("/home/user/docs", "Documentation root")
+	if err != nil {
+		t.Fatalf("SetFolderContext: %v", err)
+	}
+
+	contexts, err := d.GetFolderContexts()
+	if err != nil {
+		t.Fatalf("GetFolderContexts: %v", err)
+	}
+	if len(contexts) != 1 {
+		t.Fatalf("expected 1 context, got %d", len(contexts))
+	}
+	if contexts[0].PathPrefix != "/home/user/docs" {
+		t.Errorf("expected path_prefix /home/user/docs, got %q", contexts[0].PathPrefix)
+	}
+	if contexts[0].ContextText != "Documentation root" {
+		t.Errorf("expected context_text 'Documentation root', got %q", contexts[0].ContextText)
+	}
+}
+
+func TestSetFolderContext_Update(t *testing.T) {
+	d := setupDB(t)
+
+	if err := d.SetFolderContext("/home/user/docs", "Original text"); err != nil {
+		t.Fatalf("SetFolderContext (create): %v", err)
+	}
+	if err := d.SetFolderContext("/home/user/docs", "Updated text"); err != nil {
+		t.Fatalf("SetFolderContext (update): %v", err)
+	}
+
+	contexts, err := d.GetFolderContexts()
+	if err != nil {
+		t.Fatalf("GetFolderContexts: %v", err)
+	}
+	if len(contexts) != 1 {
+		t.Fatalf("expected 1 context, got %d", len(contexts))
+	}
+	if contexts[0].ContextText != "Updated text" {
+		t.Errorf("expected updated context_text 'Updated text', got %q", contexts[0].ContextText)
+	}
+}
+
+func TestGetFolderContexts_Multiple(t *testing.T) {
+	d := setupDB(t)
+
+	entries := []struct {
+		path string
+		text string
+	}{
+		{"/projects/api", "API docs"},
+		{"/projects/web", "Web app docs"},
+		{"/personal", "Personal notes"},
+	}
+	for _, e := range entries {
+		if err := d.SetFolderContext(e.path, e.text); err != nil {
+			t.Fatalf("SetFolderContext(%q): %v", e.path, err)
+		}
+	}
+
+	contexts, err := d.GetFolderContexts()
+	if err != nil {
+		t.Fatalf("GetFolderContexts: %v", err)
+	}
+	if len(contexts) != len(entries) {
+		t.Fatalf("expected %d contexts, got %d", len(entries), len(contexts))
+	}
+
+	// Verify ordered by path_prefix.
+	for i := 1; i < len(contexts); i++ {
+		if contexts[i].PathPrefix < contexts[i-1].PathPrefix {
+			t.Errorf("contexts not in ascending path_prefix order: %q before %q",
+				contexts[i].PathPrefix, contexts[i-1].PathPrefix)
+		}
+	}
+}
+
+func TestGetFolderContexts_Empty(t *testing.T) {
+	d := setupDB(t)
+
+	contexts, err := d.GetFolderContexts()
+	if err != nil {
+		t.Fatalf("GetFolderContexts on empty DB: %v", err)
+	}
+	if len(contexts) != 0 {
+		t.Errorf("expected 0 contexts, got %d", len(contexts))
+	}
+}
+
+func TestGetMatchingContext_LongestPrefix(t *testing.T) {
+	d := setupDB(t)
+
+	if err := d.SetFolderContext("/home/user", "User root"); err != nil {
+		t.Fatalf("SetFolderContext: %v", err)
+	}
+	if err := d.SetFolderContext("/home/user/docs", "User docs"); err != nil {
+		t.Fatalf("SetFolderContext: %v", err)
+	}
+	if err := d.SetFolderContext("/home/user/docs/api", "API docs"); err != nil {
+		t.Fatalf("SetFolderContext: %v", err)
+	}
+
+	tests := []struct {
+		name     string
+		path     string
+		wantText string
+	}{
+		{"exact match api", "/home/user/docs/api", "API docs"},
+		{"exact match docs", "/home/user/docs", "User docs"},
+		{"nested in api", "/home/user/docs/api/handlers", "API docs"},
+		{"nested in docs", "/home/user/docs/guide.md", "User docs"},
+		{"root prefix", "/home/user/other", "User root"},
+		{"root prefix dotfiles", "/home/user/config/settings", "User root"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := d.GetMatchingContext(tt.path)
+			if err != nil {
+				t.Fatalf("GetMatchingContext(%q): %v", tt.path, err)
+			}
+			if got == nil {
+				t.Fatalf("GetMatchingContext(%q) returned nil, expected context with text %q", tt.path, tt.wantText)
+			}
+			if got.ContextText != tt.wantText {
+				t.Errorf("GetMatchingContext(%q) = %q, want %q", tt.path, got.ContextText, tt.wantText)
+			}
+		})
+	}
+}
+
+func TestGetMatchingContext_NoMatch(t *testing.T) {
+	d := setupDB(t)
+
+	if err := d.SetFolderContext("/other/path", "Other"); err != nil {
+		t.Fatalf("SetFolderContext: %v", err)
+	}
+
+	got, err := d.GetMatchingContext("/unrelated/path/file.md")
+	if err != nil {
+		t.Fatalf("GetMatchingContext: %v", err)
+	}
+	if got != nil {
+		t.Errorf("expected nil for non-matching path, got %+v", got)
+	}
+}
+
+func TestGetMatchingContext_EmptyDB(t *testing.T) {
+	d := setupDB(t)
+
+	got, err := d.GetMatchingContext("/any/path")
+	if err != nil {
+		t.Fatalf("GetMatchingContext on empty DB: %v", err)
+	}
+	if got != nil {
+		t.Errorf("expected nil on empty DB, got %+v", got)
+	}
+}
+
+func TestGetMatchingContext_ExactPrefix(t *testing.T) {
+	d := setupDB(t)
+
+	if err := d.SetFolderContext("/home/user/docs", "Docs"); err != nil {
+		t.Fatalf("SetFolderContext: %v", err)
+	}
+
+	got, err := d.GetMatchingContext("/home/user/docs")
+	if err != nil {
+		t.Fatalf("GetMatchingContext: %v", err)
+	}
+	if got == nil {
+		t.Fatal("GetMatchingContext returned nil for exact prefix match")
+	}
+	if got.ContextText != "Docs" {
+		t.Errorf("want 'Docs', got %q", got.ContextText)
+	}
+}
