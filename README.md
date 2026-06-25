@@ -17,6 +17,8 @@ Symaira-Seek is a local-first, CGO-free document retrieval tool designed for AI 
 - **Dual embedding modes**: Local Ollama integration for quality, deterministic fallback for offline usage
 - **Multiple interfaces**: CLI, MCP server for AI agents, and HTTP REST daemon
 - **Local-first**: Your data stays on your machine — no cloud dependencies required
+- **LLM re-ranking**: Optional Ollama-based re-ranking of search results for improved relevance
+- **HyDE query expansion**: Optional Hypothetical Document Embeddings for better query understanding
 
 It exposes multiple interfaces:
 1. **Command Line Interface (CLI)**: A Unix-friendly command utility.
