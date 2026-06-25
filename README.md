@@ -219,7 +219,7 @@ To use Symaira-Seek as an MCP tool for AI clients (like Claude Desktop or Cursor
 
 ### Exposed Tools
 1. `search_documents(query, limit)`: Hybrid search over all indexed files.
-2. `read_document(path)`: Retrieves the complete content of an indexed file.
+2. `read_document(path, fromLine?, maxLines?)`: Retrieves content from an indexed file, with optional line-range filtering.
 3. `list_documents(folder)`: Explorative folder and index structure scanning.
 4. `get_context(topic, max_chars)`: Aggregates relevant context blocks from multiple documents.
 5. `index_document(path)`: Manually indexes a local file or directory.
@@ -243,9 +243,13 @@ Returns formatted search results with file paths, chunk indices, and RRF scores.
 #### read_document
 ```json
 {
-  "path": "/home/user/documents/report.md"
+  "path": "/home/user/documents/report.md",
+  "fromLine": 10,
+  "maxLines": 5
 }
 ```
+
+Returns lines 10-14 of the document. Both `fromLine` (1-based) and `maxLines` are optional; omitting them returns the complete file.
 
 Returns the full text content of an indexed file.
 
