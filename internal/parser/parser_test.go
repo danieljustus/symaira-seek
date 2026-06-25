@@ -434,6 +434,184 @@ func TestParseFileXLSXNotFound(t *testing.T) {
 	}
 }
 
+func TestSplitText_ZeroChunkSize(t *testing.T) {
+	got := SplitText("any text", 0, 0)
+	if len(got) != 1 || got[0] != "any text" {
+		t.Errorf("zero chunkSize should return full text, got %v", got)
+	}
+}
+
+func TestSplitText_NegativeChunkSize(t *testing.T) {
+	got := SplitText("hello world", -10, 0)
+	if len(got) != 1 || got[0] != "hello world" {
+		t.Errorf("negative chunkSize should return full text, got %v", got)
+	}
+}
+
+func TestSplitText_OverlapExceedsChunkSize(t *testing.T) {
+	text := "aaa bbb ccc ddd eee fff ggg hhh"
+	chunks := SplitText(text, 10, 50)
+	for i, c := range chunks {
+		if len(c) > 10 {
+			t.Errorf("chunk %d exceeds chunkSize: len=%d, content=%q", i, len(c), c)
+		}
+	}
+	if len(chunks) < 2 {
+		t.Errorf("expected multiple chunks, got %d", len(chunks))
+	}
+}
+
+func TestSplitText_NoSeparatorFound(t *testing.T) {
+	text := strings.Repeat("a", 50)
+	chunks := SplitText(text, 20, 5)
+	if len(chunks) < 2 {
+		t.Fatalf("expected multiple chunks for long no-separator text, got %d", len(chunks))
+	}
+	total := 0
+	for _, c := range chunks {
+		total += len(c)
+	}
+	if total < len(text) {
+		t.Errorf("reconstructed length %d < original %d", total, len(text))
+	}
+}
+
+func TestSplitText_RecursiveNewlineSplit(t *testing.T) {
+	text := "line1\nline2\nline3\nline4\nline5\nline6"
+	chunks := SplitText(text, 15, 3)
+	for i, c := range chunks {
+		if len(c) > 15 {
+			t.Errorf("chunk %d exceeds chunkSize: len=%d", i, len(c))
+		}
+	}
+	if len(chunks) < 3 {
+		t.Errorf("expected at least 3 chunks, got %d", len(chunks))
+	}
+}
+
+func TestSplitText_EmptyString(t *testing.T) {
+	got := SplitText("", 10, 2)
+	if len(got) != 1 || got[0] != "" {
+		t.Errorf("empty string should return [\"\"], got %v", got)
+	}
+}
+
+func TestSplitText_ExactChunkSize(t *testing.T) {
+	text := "exact ten chars"
+	got := SplitText(text, 15, 3)
+	if len(got) != 1 || got[0] != text {
+		t.Errorf("text shorter than chunkSize should return single chunk, got %v", got)
+	}
+}
+
+func TestExtractXMLText_MalformedXML(t *testing.T) {
+	malformed := []byte(`<root><t>good</t><broken>&&&</root>`)
+	r := bytes.NewReader(malformed)
+	got, err := extractXMLText(r)
+	if err != nil {
+		t.Fatalf("extractXMLText should not return error on malformed XML, got: %v", err)
+	}
+	if !strings.Contains(got, "good") {
+		t.Errorf("expected extracted text to contain 'good', got %q", got)
+	}
+}
+
+func TestExtractXMLText_NoTextElements(t *testing.T) {
+	xml := []byte(`<root><para>hello</para></root>`)
+	r := bytes.NewReader(xml)
+	got, err := extractXMLText(r)
+	if err != nil {
+		t.Fatalf("extractXMLText error: %v", err)
+	}
+	if got != "" {
+		t.Errorf("expected empty text for non-t elements, got %q", got)
+	}
+}
+
+func TestExtractXMLText_EmptyInput(t *testing.T) {
+	r := bytes.NewReader(nil)
+	got, err := extractXMLText(r)
+	if err != nil {
+		t.Fatalf("extractXMLText on empty input: %v", err)
+	}
+	if got != "" {
+		t.Errorf("expected empty string, got %q", got)
+	}
+}
+
+func TestExtractPPTXSlideText_MalformedXML(t *testing.T) {
+	slideXML := `<?xml version="1.0"?><p><t>visible</t><broken>&&&</p>`
+	fakeFile := createFakeZipFile(t, slideXML)
+	got, err := extractPPTXSlideText(fakeFile)
+	if err != nil {
+		t.Fatalf("extractPPTXSlideText should handle malformed XML: %v", err)
+	}
+	if !strings.Contains(got, "visible") {
+		t.Errorf("expected text to contain 'visible', got %q", got)
+	}
+}
+
+func TestExtractPPTXSlideText_EmptySlide(t *testing.T) {
+	slideXML := `<?xml version="1.0"?><p><r><t></t></r></p>`
+	fakeFile := createFakeZipFile(t, slideXML)
+	got, err := extractPPTXSlideText(fakeFile)
+	if err != nil {
+		t.Fatalf("extractPPTXSlideText: %v", err)
+	}
+	if got != "\n" {
+		t.Errorf("empty slide should produce newline, got %q", got)
+	}
+}
+
+func TestExtractPPTXSlideText_MultipleParagraphs(t *testing.T) {
+	slideXML := `<?xml version="1.0"?><p><t>first</t></p><p><t>second</t></p>`
+	fakeFile := createFakeZipFile(t, slideXML)
+	got, err := extractPPTXSlideText(fakeFile)
+	if err != nil {
+		t.Fatalf("extractPPTXSlideText: %v", err)
+	}
+	if !strings.Contains(got, "first") || !strings.Contains(got, "second") {
+		t.Errorf("expected both paragraphs, got %q", got)
+	}
+	if !strings.Contains(got, "\n") {
+		t.Error("expected newline between paragraphs")
+	}
+}
+
+func TestExtractPPTXSlideText_NoTextElements(t *testing.T) {
+	slideXML := `<?xml version="1.0"?><p><r><rPr/></r></p>`
+	fakeFile := createFakeZipFile(t, slideXML)
+	got, err := extractPPTXSlideText(fakeFile)
+	if err != nil {
+		t.Fatalf("extractPPTXSlideText: %v", err)
+	}
+	if !strings.Contains(got, "\n") {
+		t.Error("expected at least a newline for paragraph end")
+	}
+}
+
+func createFakeZipFile(t *testing.T, xmlContent string) *zip.File {
+	t.Helper()
+	var buf bytes.Buffer
+	w := zip.NewWriter(&buf)
+	entry, err := w.Create("slide1.xml")
+	if err != nil {
+		t.Fatalf("create zip entry: %v", err)
+	}
+	if _, err := entry.Write([]byte(xmlContent)); err != nil {
+		t.Fatalf("write zip entry: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("close zip writer: %v", err)
+	}
+
+	r, err := zip.NewReader(bytes.NewReader(buf.Bytes()), int64(buf.Len()))
+	if err != nil {
+		t.Fatalf("open zip reader: %v", err)
+	}
+	return r.File[0]
+}
+
 // createZipBomb writes a ZIP file containing a single entry whose
 // decompressed content exceeds MaxIndexFileSize bytes.
 func createZipBomb(t *testing.T, zipPath, entryName string, decompressedSize int) {
