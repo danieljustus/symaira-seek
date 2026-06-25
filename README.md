@@ -17,6 +17,8 @@ Symaira-Seek is a local-first, CGO-free document retrieval tool designed for AI 
 - **Dual embedding modes**: Local Ollama integration for quality, deterministic fallback for offline usage
 - **Multiple interfaces**: CLI, MCP server for AI agents, and HTTP REST daemon
 - **Local-first**: Your data stays on your machine — no cloud dependencies required
+- **LLM re-ranking**: Optional Ollama-based re-ranking of search results for improved relevance
+- **HyDE query expansion**: Optional Hypothetical Document Embeddings for better query understanding
 
 It exposes multiple interfaces:
 1. **Command Line Interface (CLI)**: A Unix-friendly command utility.
@@ -149,10 +151,12 @@ The file is rewritten with mode `0600` on every write. Supported keys:
 | --- | --- | --- |
 | `ollama_url` | Ollama embeddings endpoint URL | `http://localhost:11434/api/embeddings` |
 | `model` | Embedding model name | `nomic-embed-text` |
+| `embedding_dim` | Embedding dimension (0 = auto-detect from model) | `0` |
 | `timeout_seconds` | Per-request Ollama timeout (seconds) | `120` |
 | `retry_count` | Number of Ollama retries on failure | `2` |
 | `retry_backoff_ms` | Initial retry backoff (milliseconds) | `500` |
 | `index_cooldown_seconds` | Cooldown between `/index` requests on the HTTP daemon | `5` |
+| `vector_backend` | Database backend for vector storage (only `"sqlite"` supported) | `"sqlite"` |
 | `vector_quantization` | Quantized search mode: `"off"` or `"turbo-prod"` | `"off"` |
 | `vector_quant_bits` | Quantization bit width (2, 3, or 4) | `4` |
 | `vector_quantized_shortlist` | Approximate shortlist size for quantized search | `200` |
@@ -219,7 +223,7 @@ To use Symaira-Seek as an MCP tool for AI clients (like Claude Desktop or Cursor
 
 ### Exposed Tools
 1. `search_documents(query, limit)`: Hybrid search over all indexed files.
-2. `read_document(path)`: Retrieves the complete content of an indexed file.
+2. `read_document(path, fromLine?, maxLines?)`: Retrieves content from an indexed file, with optional line-range filtering.
 3. `list_documents(folder)`: Explorative folder and index structure scanning.
 4. `get_context(topic, max_chars)`: Aggregates relevant context blocks from multiple documents.
 5. `index_document(path)`: Manually indexes a local file or directory.
@@ -243,9 +247,13 @@ Returns formatted search results with file paths, chunk indices, and RRF scores.
 #### read_document
 ```json
 {
-  "path": "/home/user/documents/report.md"
+  "path": "/home/user/documents/report.md",
+  "fromLine": 10,
+  "maxLines": 5
 }
 ```
+
+Returns lines 10-14 of the document. Both `fromLine` (1-based) and `maxLines` are optional; omitting them returns the complete file.
 
 Returns the full text content of an indexed file.
 
