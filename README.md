@@ -2,6 +2,8 @@
 
 > Local-first, CGO-free document retrieval for AI agents with hybrid BM25+vector search.
 
+![Symaira-Seek architecture](docs/architecture.svg)
+
 [![CI](https://github.com/danieljustus/symaira-seek/actions/workflows/ci.yml/badge.svg)](https://github.com/danieljustus/symaira-seek/actions/workflows/ci.yml)
 [![Go Version](https://img.shields.io/badge/go-1.26+-00ADD8?logo=go&logoColor=white)](https://go.dev/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
