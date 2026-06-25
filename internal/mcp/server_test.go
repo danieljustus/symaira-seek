@@ -130,10 +130,10 @@ func (f *fakeEmbedder) ModelName() string {
 func newTestServer(store db.Store, vectorStore db.VectorStore, embedder engine.Embedder) *mcpserver.Server {
 	ServerVersion = "test-version"
 	s := mcpserver.New("symseek", ServerVersion)
-	registerSearchDocuments(s, store, vectorStore, embedder)
+	registerSearchDocuments(s, store, vectorStore, embedder, engine.SearchOptions{})
 	registerReadDocument(s, store, embedder)
 	registerListDocuments(s, store, embedder)
-	registerGetContext(s, store, vectorStore, embedder)
+	registerGetContext(s, store, vectorStore, embedder, engine.SearchOptions{})
 	registerIndexDocument(s, store, embedder)
 	registerIndexURL(s, store, embedder)
 	registerMultiGet(s, store, embedder)
@@ -800,7 +800,7 @@ func TestStartServer_StdinEOF(t *testing.T) {
 		devNull.Close()
 	}()
 
-	if err := StartServer(engine.OllamaConfig{}, nil); err != nil {
+	if err := StartServer(engine.OllamaConfig{}, nil, engine.RerankConfig{}, engine.ExpandConfig{}); err != nil {
 		t.Fatalf("StartServer returned error: %v", err)
 	}
 }

@@ -11,11 +11,23 @@ import (
 	"github.com/danieljustus/symaira-seek/internal/db"
 )
 
+// SearchOptions configures optional behaviour for SearchHybridWithOptions.
+type SearchOptions struct {
+	RerankCfg RerankConfig
+	ExpandCfg ExpandConfig
+}
+
 // SearchHybrid combines BM25 keyword search and semantic vector search using Reciprocal Rank Fusion (RRF).
 // The BM25 leg uses db.Store while the vector leg uses the pluggable
 // db.VectorStore interface so callers can substitute alternate vector
 // backends without changing the engine layer.
 func SearchHybrid(dbClient db.Store, vectorStore db.VectorStore, embedder Embedder, query string, limit int) ([]*db.SearchResult, error) {
+	return SearchHybridWithOptions(dbClient, vectorStore, embedder, query, limit, SearchOptions{})
+}
+
+// SearchHybridWithOptions is like SearchHybrid but accepts SearchOptions for
+// optional LLM re-ranking. Existing callers that use SearchHybrid are unchanged.
+func SearchHybridWithOptions(dbClient db.Store, vectorStore db.VectorStore, embedder Embedder, query string, limit int, opts SearchOptions) ([]*db.SearchResult, error) {
 	if query == "" {
 		return nil, nil
 	}
@@ -36,6 +48,18 @@ func SearchHybrid(dbClient db.Store, vectorStore db.VectorStore, embedder Embedd
 
 	// 1. Generate query vector (no retry — fast fallback when Ollama is offline, issue #162)
 	queryVec := embedder.GenerateVectorNoRetry(query)
+
+	// 1a. Optional HyDE query expansion: generate a hypothetical document
+	// passage via Ollama chat and average it with the original query vector.
+	searchVec := queryVec
+	if opts.ExpandCfg.Enabled {
+		expander := NewExpander(opts.ExpandCfg)
+		if expandedText, err := expander.Expand(query); err == nil {
+			searchVec = computeExpandedVec(embedder, queryVec, expandedText)
+		} else {
+			fmt.Fprintf(os.Stderr, "engine: HyDE expansion failed (%v), using original query vector\n", err)
+		}
+	}
 
 	// We fetch a bit more than limit to ensure good fusion overlap
 	fetchLimit := limit * 3
@@ -64,7 +88,7 @@ func SearchHybrid(dbClient db.Store, vectorStore db.VectorStore, embedder Embedd
 	}()
 	go func() {
 		defer wg.Done()
-		vectorResults, vectorErr = vectorStore.Search(context.Background(), queryVec, fetchLimit)
+		vectorResults, vectorErr = vectorStore.Search(context.Background(), searchVec, fetchLimit)
 	}()
 	wg.Wait()
 
@@ -123,6 +147,12 @@ func SearchHybrid(dbClient db.Store, vectorStore db.VectorStore, embedder Embedd
 	// Truncate to limit
 	if len(combined) > limit {
 		combined = combined[:limit]
+	}
+
+	// 5. Optional LLM re-ranking
+	if opts.RerankCfg.Enabled {
+		reranker := NewReranker(opts.RerankCfg)
+		combined = reranker.RerankResults(query, combined)
 	}
 
 	return combined, nil
