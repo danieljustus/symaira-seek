@@ -149,10 +149,12 @@ The file is rewritten with mode `0600` on every write. Supported keys:
 | --- | --- | --- |
 | `ollama_url` | Ollama embeddings endpoint URL | `http://localhost:11434/api/embeddings` |
 | `model` | Embedding model name | `nomic-embed-text` |
+| `embedding_dim` | Embedding dimension (0 = auto-detect from model) | `0` |
 | `timeout_seconds` | Per-request Ollama timeout (seconds) | `120` |
 | `retry_count` | Number of Ollama retries on failure | `2` |
 | `retry_backoff_ms` | Initial retry backoff (milliseconds) | `500` |
 | `index_cooldown_seconds` | Cooldown between `/index` requests on the HTTP daemon | `5` |
+| `vector_backend` | Database backend for vector storage (only `"sqlite"` supported) | `"sqlite"` |
 | `vector_quantization` | Quantized search mode: `"off"` or `"turbo-prod"` | `"off"` |
 | `vector_quant_bits` | Quantization bit width (2, 3, or 4) | `4` |
 | `vector_quantized_shortlist` | Approximate shortlist size for quantized search | `200` |
