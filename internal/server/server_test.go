@@ -172,7 +172,7 @@ func (m *mockEmbedder) ModelName() string {
 // testHandler returns the full middleware-wrapped handler for the mux.
 func testHandler(t *testing.T, store db.Store, vectorStore db.VectorStore, embedder engine.Embedder, indexCooldown time.Duration) http.Handler {
 	t.Helper()
-	mux := newServeMux(store, vectorStore, embedder, indexCooldown)
+	mux := newServeMux(store, vectorStore, embedder, indexCooldown, engine.SearchOptions{})
 	return hostValidation(originValidation(contentTypeEnforcement(bearerTokenAuth(mux))))
 }
 
@@ -1398,7 +1398,7 @@ func TestStartHTTPServer_ListensAndServe(t *testing.T) {
 
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- StartHTTPServer(0, engine.OllamaConfig{}, 5*time.Second, nil)
+		errCh <- StartHTTPServer(0, engine.OllamaConfig{}, 5*time.Second, nil, engine.RerankConfig{}, engine.ExpandConfig{})
 	}()
 
 	time.Sleep(200 * time.Millisecond)

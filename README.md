@@ -155,6 +155,12 @@ The file is rewritten with mode `0600` on every write. Supported keys:
 | `vector_quant_bits` | Quantization bit width (2, 3, or 4) | `4` |
 | `vector_quantized_shortlist` | Approximate shortlist size for quantized search | `200` |
 | `vector_exact_rerank` | Exact cosine rerank on quantized shortlist (recommended) | `true` |
+| `rerank_query` | Enable Ollama re-ranking of search results | `false` |
+| `rerank_model` | Chat model for re-ranking (empty = reuse embedding model) | `""` |
+| `rerank_timeout_seconds` | Per-request timeout for re-ranking | `120` |
+| `expand_query` | Enable HyDE query expansion via Ollama chat | `false` |
+| `expand_model` | Chat model for expansion (empty = reuse embedding model) | `""` |
+| `expand_timeout_seconds` | Per-request timeout for query expansion | `120` |
 
 ### Quantized Vector Search (Opt-In)
 
