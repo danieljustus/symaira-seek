@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -699,5 +700,249 @@ func TestSetValue_PersistsExpandConfig(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "expand_query") {
 		t.Error("expected expand_query in config file")
+	}
+}
+
+func TestLoadFromPath(t *testing.T) {
+	tests := []struct {
+		name    string
+		setup   func(t *testing.T) string
+		wantErr bool
+		check   func(t *testing.T, cfg *Config)
+	}{
+		{
+			name: "valid TOML parses values",
+			setup: func(t *testing.T) string {
+				dir := t.TempDir()
+				path := filepath.Join(dir, "config.toml")
+				content := `ollama_url = "http://custom.test/api"
+model = "custom-model"
+timeout_seconds = 99
+retry_count = 7
+vector_backend = "sqlite"
+`
+				if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+					t.Fatal(err)
+				}
+				return path
+			},
+			check: func(t *testing.T, cfg *Config) {
+				if cfg.OllamaURL != "http://custom.test/api" {
+					t.Errorf("OllamaURL = %q, want %q", cfg.OllamaURL, "http://custom.test/api")
+				}
+				if cfg.Model != "custom-model" {
+					t.Errorf("Model = %q, want %q", cfg.Model, "custom-model")
+				}
+				if cfg.TimeoutSeconds != 99 {
+					t.Errorf("TimeoutSeconds = %d, want 99", cfg.TimeoutSeconds)
+				}
+				if cfg.RetryCount != 7 {
+					t.Errorf("RetryCount = %d, want 7", cfg.RetryCount)
+				}
+			},
+		},
+		{
+			name: "valid JSON migrated to TOML",
+			setup: func(t *testing.T) string {
+				dir := t.TempDir()
+				configDir := filepath.Join(dir, "subdir")
+				if err := os.MkdirAll(configDir, 0700); err != nil {
+					t.Fatal(err)
+				}
+				jsonPath := filepath.Join(configDir, "config.json")
+				jsonData := `{"ollama_url":"http://json.test/api","model":"json-model","timeout_seconds":42,"retry_count":3}`
+				if err := os.WriteFile(jsonPath, []byte(jsonData), 0600); err != nil {
+					t.Fatal(err)
+				}
+				return filepath.Join(configDir, "config.toml")
+			},
+			check: func(t *testing.T, cfg *Config) {
+				if cfg.OllamaURL != "http://json.test/api" {
+					t.Errorf("OllamaURL = %q, want %q", cfg.OllamaURL, "http://json.test/api")
+				}
+				if cfg.Model != "json-model" {
+					t.Errorf("Model = %q, want %q", cfg.Model, "json-model")
+				}
+				if cfg.TimeoutSeconds != 42 {
+					t.Errorf("TimeoutSeconds = %d, want 42", cfg.TimeoutSeconds)
+				}
+			},
+		},
+		{
+			name: "missing file returns default config",
+			setup: func(t *testing.T) string {
+				dir := t.TempDir()
+				return filepath.Join(dir, "nonexistent", "config.toml")
+			},
+			check: func(t *testing.T, cfg *Config) {
+				def := DefaultConfig()
+				if *cfg != *def {
+					t.Error("expected default config when file does not exist")
+				}
+			},
+		},
+		{
+			name: "malformed TOML returns error",
+			setup: func(t *testing.T) string {
+				dir := t.TempDir()
+				path := filepath.Join(dir, "config.toml")
+				if err := os.WriteFile(path, []byte("this is not valid {{{ toml content"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				return path
+			},
+			wantErr: true,
+		},
+		{
+			name: "path is a directory returns read error",
+			setup: func(t *testing.T) string {
+				dir := t.TempDir()
+				configDir := filepath.Join(dir, "config.toml")
+				if err := os.MkdirAll(configDir, 0700); err != nil {
+					t.Fatal(err)
+				}
+				return configDir
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := tt.setup(t)
+			cfg, err := LoadFromPath(path)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("LoadFromPath() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if !tt.wantErr {
+				if cfg == nil {
+					t.Fatal("expected non-nil config")
+				}
+				if tt.check != nil {
+					tt.check(t, cfg)
+				}
+			}
+		})
+	}
+}
+
+func TestLoad_UsesGlobalPath(t *testing.T) {
+	dir := t.TempDir()
+	configDir := filepath.Join(dir, ".config", "symseek")
+	if err := os.MkdirAll(configDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	tomlPath := filepath.Join(configDir, "config.toml")
+	content := `ollama_url = "http://load.test/api"
+model = "load-model"
+`
+	if err := os.WriteFile(tomlPath, []byte(content), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("HOME", dir)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if cfg.OllamaURL != "http://load.test/api" {
+		t.Errorf("OllamaURL = %q, want %q", cfg.OllamaURL, "http://load.test/api")
+	}
+	if cfg.Model != "load-model" {
+		t.Errorf("Model = %q, want %q", cfg.Model, "load-model")
+	}
+}
+
+func TestReload_UsesGlobalPath(t *testing.T) {
+	dir := t.TempDir()
+	configDir := filepath.Join(dir, ".config", "symseek")
+	if err := os.MkdirAll(configDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	tomlPath := filepath.Join(configDir, "config.toml")
+	content := `ollama_url = "http://reload.test/api"
+model = "reload-model"
+`
+	if err := os.WriteFile(tomlPath, []byte(content), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("HOME", dir)
+
+	cfg, err := Reload()
+	if err != nil {
+		t.Fatalf("Reload() error: %v", err)
+	}
+	if cfg.OllamaURL != "http://reload.test/api" {
+		t.Errorf("OllamaURL = %q, want %q", cfg.OllamaURL, "http://reload.test/api")
+	}
+	if cfg.Model != "reload-model" {
+		t.Errorf("Model = %q, want %q", cfg.Model, "reload-model")
+	}
+}
+
+func TestSave_MkdirAllFails_ParentIsFile(t *testing.T) {
+	dir := t.TempDir()
+	parentFile := filepath.Join(dir, "not-a-dir")
+	if err := os.WriteFile(parentFile, []byte("I am a file"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfgFile := filepath.Join(parentFile, "config.toml")
+	cfg := DefaultConfig()
+
+	err := Save(cfgFile, cfg)
+	if err == nil {
+		t.Fatal("expected error when parent is a file, not a directory")
+	}
+	if !strings.Contains(err.Error(), "failed to create config directory") {
+		t.Errorf("unexpected error message: %v", err)
+	}
+}
+
+func TestSave_OpenFileFails_PathIsDirectory(t *testing.T) {
+	dir := t.TempDir()
+	targetDir := filepath.Join(dir, "config.toml")
+	if err := os.MkdirAll(targetDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := DefaultConfig()
+
+	err := Save(targetDir, cfg)
+	if err == nil {
+		t.Fatal("expected error when path is a directory")
+	}
+	if !strings.Contains(err.Error(), "failed to create config file") {
+		t.Errorf("unexpected error message: %v", err)
+	}
+}
+
+func TestSave_EncodeError_BrokenPipe(t *testing.T) {
+	dir := t.TempDir()
+	cfgFile := filepath.Join(dir, "config.toml")
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Close()
+
+	fdLink := filepath.Join("/dev", "fd", fmt.Sprintf("%d", w.Fd()))
+	if err := os.Symlink(fdLink, cfgFile); err != nil {
+		w.Close()
+		t.Skipf("symlink not supported: %v", err)
+	}
+
+	cfg := DefaultConfig()
+	saveErr := Save(cfgFile, cfg)
+	w.Close()
+
+	if saveErr == nil {
+		t.Skip("encode succeeded on broken pipe (OS buffered the write)")
+	}
+	if !strings.Contains(saveErr.Error(), "failed to encode config") {
+		t.Errorf("unexpected error: %v", saveErr)
 	}
 }
