@@ -197,33 +197,20 @@ func (db *DB) exactRerankShortlist(queryVec []float32, queryNorm float32, shortl
 		return nil, fmt.Errorf("rerank fetch rows: %w", err)
 	}
 
-	results := make([]*SearchResult, 0, limit)
+	h := &SearchResultHeap{}
 	for _, id := range shortlistIDs {
 		r, ok := rowByID[id]
 		if !ok {
 			continue
 		}
 
-		var score float32
-		if queryNorm > 0 && r.norm > 0 {
-			score = CosineSimilarityWithStoredNorm(queryVec, r.embBytes, queryNorm, r.norm)
-		} else {
-			r.chunk.Embedding = BytesToFloat32Slice(r.embBytes)
-			score = CosineSimilarity(queryVec, r.chunk.Embedding)
-		}
-
-		if len(results) < limit {
-			results = appendSortedByScoreDesc(results, &SearchResult{
-				Chunk:       &r.chunk,
-				CosineScore: score,
-			})
-		} else if score > results[limit-1].CosineScore {
-			results = appendSortedByScoreDesc(results[:limit-1], &SearchResult{
-				Chunk:       &r.chunk,
-				CosineScore: score,
-			})
-		}
+		scoreShortlist(h, limit, queryVec, queryNorm, &r.chunk, r.embBytes, r.norm)
 	}
+
+	sort.SliceStable(*h, func(i, j int) bool {
+		return (*h)[i].CosineScore > (*h)[j].CosineScore
+	})
+	results := ([]*SearchResult)(*h)
 
 	for i, r := range results {
 		r.VectorRank = i + 1

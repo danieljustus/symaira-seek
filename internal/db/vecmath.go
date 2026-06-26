@@ -3,7 +3,6 @@ package db
 import (
 	"math"
 	"math/bits"
-	"sort"
 )
 
 func Float32SliceToBytes(slice []float32) []byte {
@@ -77,14 +76,23 @@ func l2Norm(v []float32) float32 {
 	return float32(math.Sqrt(sum))
 }
 
-func appendSortedByScoreDesc(list []*SearchResult, res *SearchResult) []*SearchResult {
-	pos := sort.Search(len(list), func(i int) bool {
-		return list[i].CosineScore < res.CosineScore
-	})
-	list = append(list, nil)
-	copy(list[pos+1:], list[pos:len(list)-1])
-	list[pos] = res
-	return list
+// SearchResultHeap is a min-heap of SearchResults.
+type SearchResultHeap []*SearchResult
+
+func (h SearchResultHeap) Len() int           { return len(h) }
+func (h SearchResultHeap) Less(i, j int) bool { return h[i].CosineScore < h[j].CosineScore }
+func (h SearchResultHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+
+func (h *SearchResultHeap) Push(x interface{}) {
+	*h = append(*h, x.(*SearchResult))
+}
+
+func (h *SearchResultHeap) Pop() interface{} {
+	old := *h
+	n := len(old)
+	x := old[n-1]
+	*h = old[0 : n-1]
+	return x
 }
 
 // SignBinarySignature packs one bit per dimension (1 if value >= 0, else 0),
