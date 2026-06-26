@@ -1,6 +1,7 @@
 package db
 
 import (
+	"container/heap"
 	"fmt"
 	"math"
 	"sort"
@@ -127,7 +128,7 @@ func hammingShortlist(allRows []rowEntry, querySig []byte, limit int) []rowEntry
 	return allRows
 }
 
-func scoreShortlist(results []*SearchResult, limit int, queryVec []float32, queryNorm float32, chunk *Chunk, embBytes []byte, norm float32) []*SearchResult {
+func scoreShortlist(h *SearchResultHeap, limit int, queryVec []float32, queryNorm float32, chunk *Chunk, embBytes []byte, norm float32) {
 	var score float32
 	if queryNorm > 0 && norm > 0 {
 		score = CosineSimilarityWithStoredNorm(queryVec, embBytes, queryNorm, norm)
@@ -138,18 +139,18 @@ func scoreShortlist(results []*SearchResult, limit int, queryVec []float32, quer
 		score = CosineSimilarity(queryVec, chunk.Embedding)
 	}
 
-	if len(results) < limit {
-		return appendSortedByScoreDesc(results, &SearchResult{
+	if h.Len() < limit {
+		heap.Push(h, &SearchResult{
 			Chunk:       chunk,
 			CosineScore: score,
 		})
-	} else if score > results[limit-1].CosineScore {
-		return appendSortedByScoreDesc(results[:limit-1], &SearchResult{
+	} else if score > (*h)[0].CosineScore {
+		(*h)[0] = &SearchResult{
 			Chunk:       chunk,
 			CosineScore: score,
-		})
+		}
+		heap.Fix(h, 0)
 	}
-	return results
 }
 
 // searchVectorFiltered scores the given candidate chunk IDs using a two-stage
@@ -193,13 +194,18 @@ func (db *DB) searchVectorFiltered(queryVec []float32, queryNorm float32, candid
 	querySig := SignBinarySignature(queryVec)
 	shortlist := hammingShortlist(allRows, querySig, limit)
 
-	results := make([]*SearchResult, 0, limit)
+	h := &SearchResultHeap{}
 	for i := range shortlist {
 		e := &shortlist[i]
 		c := &e.chunk
 
-		results = scoreShortlist(results, limit, queryVec, queryNorm, c, e.embBytes, e.norm)
+		scoreShortlist(h, limit, queryVec, queryNorm, c, e.embBytes, e.norm)
 	}
+
+	sort.SliceStable(*h, func(i, j int) bool {
+		return (*h)[i].CosineScore > (*h)[j].CosineScore
+	})
+	results := ([]*SearchResult)(*h)
 
 	for i, r := range results {
 		r.VectorRank = i + 1
@@ -258,13 +264,18 @@ func (db *DB) searchVectorFullScan(queryVec []float32, queryNorm float32, limit 
 	querySig := SignBinarySignature(queryVec)
 	shortlist := hammingShortlist(allRows, querySig, limit)
 
-	results := make([]*SearchResult, 0, limit)
+	h := &SearchResultHeap{}
 	for i := range shortlist {
 		e := &shortlist[i]
 		c := &e.chunk
 
-		results = scoreShortlist(results, limit, queryVec, queryNorm, c, e.embBytes, e.norm)
+		scoreShortlist(h, limit, queryVec, queryNorm, c, e.embBytes, e.norm)
 	}
+
+	sort.SliceStable(*h, func(i, j int) bool {
+		return (*h)[i].CosineScore > (*h)[j].CosineScore
+	})
+	results := ([]*SearchResult)(*h)
 
 	for i, r := range results {
 		r.VectorRank = i + 1
@@ -286,7 +297,7 @@ func (db *DB) searchVectorFullScanCosine(queryVec []float32, queryNorm float32, 
 	}
 	defer rows.Close()
 
-	results := make([]*SearchResult, 0, limit)
+	h := &SearchResultHeap{}
 	for rows.Next() {
 		var c Chunk
 		var embBytes []byte
@@ -297,8 +308,13 @@ func (db *DB) searchVectorFullScanCosine(queryVec []float32, queryNorm float32, 
 		}
 		c.Norm = norm
 
-		results = scoreShortlist(results, limit, queryVec, queryNorm, &c, embBytes, norm)
+		scoreShortlist(h, limit, queryVec, queryNorm, &c, embBytes, norm)
 	}
+
+	sort.SliceStable(*h, func(i, j int) bool {
+		return (*h)[i].CosineScore > (*h)[j].CosineScore
+	})
+	results := ([]*SearchResult)(*h)
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
