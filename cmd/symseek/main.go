@@ -58,8 +58,9 @@ func main() {
 
 func newRootCmd() *cobra.Command {
 	rootCmd := &cobra.Command{
-		Use:   "symseek",
-		Short: "Symaira-Seek: A local hybrid document retrieval CLI and MCP tool",
+		Use:           "symseek",
+		Short:         "Symaira-Seek: A local hybrid document retrieval CLI and MCP tool",
+		SilenceErrors: true,
 		PersistentPreRun: func(cmd *cobra.Command, args []string) {
 			level := slog.LevelInfo
 			if verboseFlag {
@@ -121,9 +122,10 @@ func newRootCmd() *cobra.Command {
 
 	// 2. Index Command
 	indexCmd := &cobra.Command{
-		Use:   "index [folder_path]",
-		Short: "Crawl and index a local directory, URL, or stdin",
-		Args:  cobra.ArbitraryArgs,
+		Use:          "index [folder_path]",
+		Short:        "Crawl and index a local directory, URL, or stdin",
+		Args:         cobra.ArbitraryArgs,
+		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			dbClient, err := db.Open()
 			if err != nil {
@@ -148,6 +150,7 @@ func newRootCmd() *cobra.Command {
 			}
 
 			if len(args) == 0 {
+				_ = cmd.Help()
 				return fmt.Errorf("folder path, --url, or --stdin required")
 			}
 			dirPath := args[0]
