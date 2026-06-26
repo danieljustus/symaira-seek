@@ -25,6 +25,14 @@ builds:
       - arm64
     ldflags:
       - -s -w -X main.version={{.Version}}
+    hooks:
+      post:
+        # Sign macOS binaries when running on macOS with signing identity
+        - cmd: |
+            if [ "{{ .Os }}" = "darwin" ] && [ -n "${CODESIGN_IDENTITY:-}" ]; then
+              codesign -s "$CODESIGN_IDENTITY" --timestamp --options runtime "{{ .Path }}"
+              echo "Signed {{ .Path }}"
+            fi
 
 archives:
   - id: default
