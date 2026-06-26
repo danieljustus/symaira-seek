@@ -4,14 +4,14 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/danieljustus/symaira-corekit/vectorkit/turboquant"
 	"github.com/danieljustus/symaira-seek/internal/db"
-	"github.com/danieljustus/symaira-seek/internal/vectorquant"
 )
 
 func BackfillQuantSidecars(d *db.DB, bitWidth int, seed int, onProgress func(processed, total int)) (int, error) {
 	dim := 768
 
-	codec, err := vectorquant.NewCodec(dim, vectorquant.BitWidth(bitWidth), seed, 0)
+	codec, err := turboquant.NewCodec(dim, turboquant.BitWidth(bitWidth), seed, 0)
 	if err != nil {
 		return 0, fmt.Errorf("create codec: %w", err)
 	}
