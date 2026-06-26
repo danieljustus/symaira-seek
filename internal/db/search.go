@@ -13,20 +13,13 @@ import (
 const binarySignatureCandidateMultiplier = 4
 
 func escapeFTS5Query(query string) string {
-	replacer := strings.NewReplacer(
-		"\"", " ",
-		"*", " ",
-		"(", " ",
-		")", " ",
-		"+", " ",
-		"-", " ",
-		".", " ",
-		"~", " ",
-	)
-	cleaned := replacer.Replace(query)
-	tokens := strings.Fields(cleaned)
+	tokens := strings.Fields(query)
 	if len(tokens) == 0 {
 		return ""
+	}
+	for i, token := range tokens {
+		escaped := strings.ReplaceAll(token, "\"", "\"\"")
+		tokens[i] = "\"" + escaped + "\""
 	}
 	return strings.Join(tokens, " AND ")
 }
