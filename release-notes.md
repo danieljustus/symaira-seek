@@ -1,48 +1,64 @@
 ## What's changed
 
-### Security
-- #154 Fix SSRF: pin validated IP in HTTP fallback and harden symfetch path — closes #146
-- #154 Fix DB: create data directory and DB with restrictive permissions — closes #147
-- #163 Cap file and archive sizes during indexing to prevent memory exhaustion / zip-bomb DoS — closes #155
+### Features
+- #179 Vector index lifecycle: incremental updates, external-write detection, and persistence — closes #171, #172, #173
+- #180 Binary-quantized vector search, dimension tracking, and VectorStore — closes #136, #151, #174
+- #181 TurboQuant-style vector quantization prototype and benchmark — closes #175
+- #182 Quantized embedding sidecar storage and backfill plumbing — closes #176, #177, #178
+- #195 Add fromLine/maxLines to read_document MCP tool — closes #190, #191, #192
+- #196 Optional LLM re-ranking via Ollama for search results — closes #193, #194
 
 ### Fixes
-- #154 Fix --config flag honored on write but silently ignored on read — closes #150
-- #154 Warn on embedding dimension mismatch instead of silent hash fallback — closes #151
-- #163 Warn at startup when HTTP daemon runs without SEEK_API_TOKEN — closes #156
+- #189 Benchmark768Dim and BitWidth.Levels fixes — closes #185, #186
 
-### Performance
-- #154 Avoid per-chunk float32 slice allocation in vector search — closes #152
-- #163 Avoid Ollama retry latency during search by using no-retry embedding path — closes #162
-- #163 Add recall-preserving IVF prefilter for vector search — closes #161
-
-### Features
-- #154 Add --plain flag to search to skip the TUI — closes #148
-- #158 Add top-level --version flag — closes #158
+### Security
+- #206 Enable secret scanning and push protection — closes #197, #198
 
 ### Docs
-- #154 Fix --config path help and document SEEK_API_TOKEN / SEEK_ALLOW_PRIVATE_URLS — closes #149
-- #144 Distilled architecture research notes
+- #208 Add architecture diagram to README — closes #199
+- #216 Update read_document MCP tool documentation — closes #213, #214, #215
 
 ### Tests
-- #169 Add tests for HTTP REST daemon endpoints and startup — closes #164, #165, #166, #167, #168
+- #187 Unit tests for BackfillQuantSidecars — closes #183
+- #188 Meaningful assertions to CLI serve/version tests — closes #184
+- #209 Config load, reload, and save error path coverage — closes #200
+- #210 Folder-context and document-list database API tests — closes #201
+- #211 Directory watch and re-rank HTTP path tests — closes #202
+- #212 Parser PPTX and text-split branch tests — closes #203
 
 ### Dependencies
-- #157 Make embeddings retry backoff injectable to cut engine test time — closes #157
+- #204 Bump actions/checkout from 6 to 7
+- #205 Bump modernc.org/sqlite from 1.52.0 to 1.53.0
 
 ### Closed Issues
-- #146 SSRF: validate-then-fetch bypassable via DNS rebinding
-- #147 Index database directory created world-readable
-- #148 search: add --plain/--no-tui opt-out
-- #149 Docs: fix --config path help text
-- #150 --config flag ignored on read
+- #136 Binary-quantized vector search
 - #151 Embedding dimension mismatch silent degradation
-- #152 Vector search allocates fresh float32 slice per chunk
-- #155 Cap file and archive sizes during indexing
-- #156 Warn at startup without SEEK_API_TOKEN
-- #157 Make embeddings retry backoff injectable
-- #158 Add top-level --version flag
-- #161 Add recall-preserving IVF prefilter
-- #162 Avoid Ollama retry latency during search
-- #164–#168 Test coverage for HTTP, CLI, MCP, URL fetching, PDF/XLSX
+- #171 Vector index incremental updates
+- #172 External-write detection
+- #173 Vector index persistence
+- #174 VectorStore seam
+- #175 TurboQuant-style quantization
+- #176 Quantized sidecar storage
+- #177 Backfill plumbing
+- #178 Sidecar format
+- #183 BackfillQuantSidecars tests
+- #184 CLI serve/version test assertions
+- #185 Benchmark768Dim fix
+- #186 BitWidth.Levels fix
+- #190 read_document fromLine
+- #191 read_document maxLines
+- #192 read_document line-range docs
+- #193 LLM re-ranking
+- #194 Ollama re-ranking config
+- #197 Secret scanning
+- #198 Push protection
+- #199 Architecture diagram
+- #200 Config error paths
+- #201 Folder-context and document-list tests
+- #202 Directory watch and re-rank tests
+- #203 Parser PPTX and text-split tests
+- #213 read_document fromLine docs
+- #214 read_document maxLines docs
+- #215 LLM re-ranking docs
 
-**Full Changelog**: https://github.com/danieljustus/symaira-seek/compare/v2.1.0...v2.1.1
+**Full Changelog**: https://github.com/danieljustus/symaira-seek/compare/v2.1.1...v2.2.0
