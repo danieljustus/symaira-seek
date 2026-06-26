@@ -1,6 +1,7 @@
 package db
 
 import (
+	"container/heap"
 	"fmt"
 	"math"
 	"sort"
@@ -13,20 +14,13 @@ import (
 const binarySignatureCandidateMultiplier = 4
 
 func escapeFTS5Query(query string) string {
-	replacer := strings.NewReplacer(
-		"\"", " ",
-		"*", " ",
-		"(", " ",
-		")", " ",
-		"+", " ",
-		"-", " ",
-		".", " ",
-		"~", " ",
-	)
-	cleaned := replacer.Replace(query)
-	tokens := strings.Fields(cleaned)
+	tokens := strings.Fields(query)
 	if len(tokens) == 0 {
 		return ""
+	}
+	for i, token := range tokens {
+		escaped := strings.ReplaceAll(token, "\"", "\"\"")
+		tokens[i] = "\"" + escaped + "\""
 	}
 	return strings.Join(tokens, " AND ")
 }
@@ -134,6 +128,31 @@ func hammingShortlist(allRows []rowEntry, querySig []byte, limit int) []rowEntry
 	return allRows
 }
 
+func scoreShortlist(h *SearchResultHeap, limit int, queryVec []float32, queryNorm float32, chunk *Chunk, embBytes []byte, norm float32) {
+	var score float32
+	if queryNorm > 0 && norm > 0 {
+		score = CosineSimilarityWithStoredNorm(queryVec, embBytes, queryNorm, norm)
+	} else {
+		if chunk.Embedding == nil {
+			chunk.Embedding = BytesToFloat32Slice(embBytes)
+		}
+		score = CosineSimilarity(queryVec, chunk.Embedding)
+	}
+
+	if h.Len() < limit {
+		heap.Push(h, &SearchResult{
+			Chunk:       chunk,
+			CosineScore: score,
+		})
+	} else if score > (*h)[0].CosineScore {
+		(*h)[0] = &SearchResult{
+			Chunk:       chunk,
+			CosineScore: score,
+		}
+		heap.Fix(h, 0)
+	}
+}
+
 // searchVectorFiltered scores the given candidate chunk IDs using a two-stage
 // Hamming pre-filter followed by exact cosine rescoring on a shortlist.
 func (db *DB) searchVectorFiltered(queryVec []float32, queryNorm float32, candidateIDs []int64, limit int) ([]*SearchResult, error) {
@@ -175,31 +194,18 @@ func (db *DB) searchVectorFiltered(queryVec []float32, queryNorm float32, candid
 	querySig := SignBinarySignature(queryVec)
 	shortlist := hammingShortlist(allRows, querySig, limit)
 
-	results := make([]*SearchResult, 0, limit)
+	h := &SearchResultHeap{}
 	for i := range shortlist {
 		e := &shortlist[i]
 		c := &e.chunk
 
-		var score float32
-		if queryNorm > 0 && e.norm > 0 {
-			score = CosineSimilarityWithStoredNorm(queryVec, e.embBytes, queryNorm, e.norm)
-		} else {
-			c.Embedding = BytesToFloat32Slice(e.embBytes)
-			score = CosineSimilarity(queryVec, c.Embedding)
-		}
-
-		if len(results) < limit {
-			results = appendSortedByScoreDesc(results, &SearchResult{
-				Chunk:       c,
-				CosineScore: score,
-			})
-		} else if score > results[limit-1].CosineScore {
-			results = appendSortedByScoreDesc(results[:limit-1], &SearchResult{
-				Chunk:       c,
-				CosineScore: score,
-			})
-		}
+		scoreShortlist(h, limit, queryVec, queryNorm, c, e.embBytes, e.norm)
 	}
+
+	sort.SliceStable(*h, func(i, j int) bool {
+		return (*h)[i].CosineScore > (*h)[j].CosineScore
+	})
+	results := ([]*SearchResult)(*h)
 
 	for i, r := range results {
 		r.VectorRank = i + 1
@@ -258,33 +264,18 @@ func (db *DB) searchVectorFullScan(queryVec []float32, queryNorm float32, limit 
 	querySig := SignBinarySignature(queryVec)
 	shortlist := hammingShortlist(allRows, querySig, limit)
 
-	results := make([]*SearchResult, 0, limit)
+	h := &SearchResultHeap{}
 	for i := range shortlist {
 		e := &shortlist[i]
 		c := &e.chunk
 
-		var score float32
-		if queryNorm > 0 && e.norm > 0 {
-			score = CosineSimilarityWithStoredNorm(queryVec, e.embBytes, queryNorm, e.norm)
-		} else {
-			if c.Embedding == nil {
-				c.Embedding = BytesToFloat32Slice(e.embBytes)
-			}
-			score = CosineSimilarity(queryVec, c.Embedding)
-		}
-
-		if len(results) < limit {
-			results = appendSortedByScoreDesc(results, &SearchResult{
-				Chunk:       c,
-				CosineScore: score,
-			})
-		} else if score > results[limit-1].CosineScore {
-			results = appendSortedByScoreDesc(results[:limit-1], &SearchResult{
-				Chunk:       c,
-				CosineScore: score,
-			})
-		}
+		scoreShortlist(h, limit, queryVec, queryNorm, c, e.embBytes, e.norm)
 	}
+
+	sort.SliceStable(*h, func(i, j int) bool {
+		return (*h)[i].CosineScore > (*h)[j].CosineScore
+	})
+	results := ([]*SearchResult)(*h)
 
 	for i, r := range results {
 		r.VectorRank = i + 1
@@ -306,7 +297,7 @@ func (db *DB) searchVectorFullScanCosine(queryVec []float32, queryNorm float32, 
 	}
 	defer rows.Close()
 
-	results := make([]*SearchResult, 0, limit)
+	h := &SearchResultHeap{}
 	for rows.Next() {
 		var c Chunk
 		var embBytes []byte
@@ -317,26 +308,13 @@ func (db *DB) searchVectorFullScanCosine(queryVec []float32, queryNorm float32, 
 		}
 		c.Norm = norm
 
-		var score float32
-		if queryNorm > 0 && norm > 0 {
-			score = CosineSimilarityWithStoredNorm(queryVec, embBytes, queryNorm, norm)
-		} else {
-			c.Embedding = BytesToFloat32Slice(embBytes)
-			score = CosineSimilarity(queryVec, c.Embedding)
-		}
-
-		if len(results) < limit {
-			results = appendSortedByScoreDesc(results, &SearchResult{
-				Chunk:       &c,
-				CosineScore: score,
-			})
-		} else if score > results[limit-1].CosineScore {
-			results = appendSortedByScoreDesc(results[:limit-1], &SearchResult{
-				Chunk:       &c,
-				CosineScore: score,
-			})
-		}
+		scoreShortlist(h, limit, queryVec, queryNorm, &c, embBytes, norm)
 	}
+
+	sort.SliceStable(*h, func(i, j int) bool {
+		return (*h)[i].CosineScore > (*h)[j].CosineScore
+	})
+	results := ([]*SearchResult)(*h)
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
