@@ -8,7 +8,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/danieljustus/symaira-seek/internal/vectorquant"
+	"github.com/danieljustus/symaira-corekit/vectorkit/turboquant"
 )
 
 type quantCandidate struct {
@@ -44,7 +44,7 @@ func (db *DB) SearchVectorQuantized(queryVec []float32, limit int) ([]*SearchRes
 }
 
 func (db *DB) searchVectorQuantizedInner(queryVec []float32, queryNorm float32, cfg *QuantConfig, limit int) ([]*SearchResult, error) {
-	codec, err := vectorquant.NewCodec(len(queryVec), vectorquant.BitWidth(cfg.BitWidth), cfg.Seed, 0)
+	codec, err := turboquant.NewCodec(len(queryVec), turboquant.BitWidth(cfg.BitWidth), cfg.Seed, 0)
 	if err != nil {
 		return nil, fmt.Errorf("create codec: %w", err)
 	}
@@ -75,21 +75,21 @@ func (db *DB) searchVectorQuantizedInner(queryVec []float32, queryNorm float32, 
 			continue
 		}
 
-		var sideMeta vectorquant.SidecarMeta
+		var sideMeta turboquant.SidecarMeta
 		if metaRaw.Valid && metaRaw.String != "" {
 			if err := json.Unmarshal([]byte(metaRaw.String), &sideMeta); err != nil {
 				continue
 			}
 		}
 
-		if sideMeta.CodecVersion != vectorquant.CodecVersion {
+		if sideMeta.CodecVersion != turboquant.CodecVersion {
 			continue
 		}
 		if sideMeta.Dimension != len(queryVec) {
 			continue
 		}
 
-		code, err := vectorquant.UnpackSidecarBlob(quantBytes)
+		code, err := turboquant.UnpackSidecarBlob(quantBytes)
 		if err != nil {
 			continue
 		}
