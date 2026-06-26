@@ -7,11 +7,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/danieljustus/symaira-seek/internal/vectorquant"
+	"github.com/danieljustus/symaira-corekit/vectorkit/turboquant"
 )
 
-func newTestCodec(dim int, bitWidth int, seed int) (*vectorquant.Codec, error) {
-	return vectorquant.NewCodec(dim, vectorquant.BitWidth(bitWidth), seed, 0)
+func newTestCodec(dim int, bitWidth int, seed int) (*turboquant.Codec, error) {
+	return turboquant.NewCodec(dim, turboquant.BitWidth(bitWidth), seed, 0)
 }
 
 func backfillSidecarsForTest(t *testing.T, d *DB, chunks []*Chunk, bitWidth int, seed int) {
