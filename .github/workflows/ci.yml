@@ -36,7 +36,6 @@ jobs:
 
       - name: Build
         run: |
-          VERSION_PKG="github.com/danieljustus/symaira-seek/cmd/symseek"
           if [ -n "$GITHUB_REF_NAME" ] && git describe --tags --exact-match >/dev/null 2>&1; then
             VERSION="$(git describe --tags --exact-match)"
           elif [ -n "$GITHUB_SHA" ]; then
@@ -46,7 +45,7 @@ jobs:
             VERSION="0.0.0-dev"
           fi
           echo "Injecting version: ${VERSION}"
-          go build -ldflags "-s -w -X ${VERSION_PKG}.version=${VERSION}" ./...
+          go build -ldflags "-s -w -X main.version=${VERSION}" ./...
 
       - name: Test
         run: go test -race ./...
