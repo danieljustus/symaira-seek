@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1401,7 +1402,17 @@ func TestStartHTTPServer_ListensAndServe(t *testing.T) {
 		errCh <- StartHTTPServer(0, engine.OllamaConfig{}, 5*time.Second, nil, engine.RerankConfig{}, engine.ExpandConfig{})
 	}()
 
-	time.Sleep(200 * time.Millisecond)
+	// Wait for the server to actually be listening before sending SIGTERM.
+	// The fixed 200ms sleep was too short under the race detector.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		conn, err := net.DialTimeout("tcp", "127.0.0.1:0", 200*time.Millisecond)
+		if err == nil {
+			conn.Close()
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 
 	p, err := os.FindProcess(os.Getpid())
 	if err != nil {
