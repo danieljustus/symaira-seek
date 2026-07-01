@@ -1,19 +1,14 @@
 ## What's changed
 
-### Features
-- #225 Improve CLI error handling for missing arguments — closes #221
+### Build & Release
+- #227 Sign and notarize macOS binaries with Developer ID — macOS users will no longer see Gatekeeper "malware" warnings when running `symseek`.
+- #230 Migrate Homebrew cask to formula with service and test — adds a `launchd` service and a `brew test` block.
 
 ### Fixes
-- #224 Fix SQL syntax error risk in FTS5 escaping (+2 more) — closes #220, #222, #223
-
-### Refactoring & Dependencies
-- #219 Migrate vectorquant codec to corekit vectorkit/turboquant — closes #217
+- #228 Fix `symseek` release version injection — release builds now report the correct version via `symseek version` and the MCP server info.
+- #231 Backfill legacy NULL `embedding_dim` and tolerate mixed spaces — closes #229.
 
 ### Closed Issues
-- #220 Fix SQL syntax error risk in FTS5 escaping
-- #221 Improve CLI error handling for missing arguments
-- #222 Deduplicate vector scoring logic
-- #223 Optimize top-K vector extraction with a Min-Heap
-- #217 migrate vectorquant package to corekit
+- #229 Legacy chunks with NULL `embedding_dim` need backfill.
 
-**Full Changelog**: https://github.com/danieljustus/symaira-seek/compare/v2.2.0...v2.2.1
+**Full Changelog**: https://github.com/danieljustus/symaira-seek/compare/v2.2.1...v2.2.2
