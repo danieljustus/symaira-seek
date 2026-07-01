@@ -70,13 +70,17 @@ release:
   prerelease: auto
   name_template: "v{{.Version}}"
 
-homebrew_casks:
+brews:
   - name: symseek
     repository:
       owner: danieljustus
       name: homebrew-tap
       token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
-    directory: Casks
+    directory: Formula
     homepage: https://github.com/danieljustus/symaira-seek
     description: Local-first, CGO-free document retrieval for AI agents
     license: MIT
+    service: |
+      run "#{opt_bin}/symseek"
+    test: |
+      system "#{bin}/symseek", "version"
