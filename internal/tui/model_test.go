@@ -122,7 +122,99 @@ func TestQuit(t *testing.T) {
 	_ = cmd
 }
 
-// TestViewContainsQuery verifies the banner contains the search query.
+func TestInit(t *testing.T) {
+	m := tui.New("test", sampleResults())
+	if cmd := m.Init(); cmd != nil {
+		t.Fatalf("expected nil init cmd, got %v", cmd)
+	}
+}
+
+func TestEscQuits(t *testing.T) {
+	m := tui.New("test", sampleResults())
+	m2, _ := m.Update(tea.WindowSizeMsg{Width: 200, Height: 50})
+	m = m2.(tui.Model)
+
+	m3, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if cmd == nil {
+		t.Fatal("expected quit command after esc")
+	}
+	view := m3.(tui.Model).View()
+	if strings.TrimSpace(view) != "" {
+		t.Fatalf("expected empty view after esc, got: %q", view)
+	}
+}
+
+func TestCtrlCQuits(t *testing.T) {
+	m := tui.New("test", sampleResults())
+	m2, _ := m.Update(tea.WindowSizeMsg{Width: 200, Height: 50})
+	m = m2.(tui.Model)
+
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	if cmd == nil {
+		t.Fatal("expected quit command after ctrl+c")
+	}
+}
+
+func TestEnterOpensEditor(t *testing.T) {
+	t.Setenv("EDITOR", "true")
+	results := sampleResults()
+	m := tui.New("test", results)
+	m2, _ := m.Update(tea.WindowSizeMsg{Width: 200, Height: 50})
+	m = m2.(tui.Model)
+
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("expected editor command after enter")
+	}
+	msg := cmd()
+	if msg == nil {
+		t.Fatal("expected editor finished message")
+	}
+}
+
+func TestEnterNoResults(t *testing.T) {
+	m := tui.New("test", []*db.SearchResult{})
+	m2, _ := m.Update(tea.WindowSizeMsg{Width: 200, Height: 50})
+	m = m2.(tui.Model)
+
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd != nil {
+		t.Fatalf("expected nil command for empty results, got %v", cmd)
+	}
+}
+
+func TestCursorBounds(t *testing.T) {
+	results := sampleResults()
+	m := tui.New("test", results)
+	m2, _ := m.Update(tea.WindowSizeMsg{Width: 200, Height: 50})
+	m = m2.(tui.Model)
+
+	m3, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("k")})
+	m = m3.(tui.Model)
+	if m.Cursor() != 0 {
+		t.Fatalf("expected cursor 0 after k at top, got %d", m.Cursor())
+	}
+
+	for i := 0; i < len(results)+3; i++ {
+		m4, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+		m = m4.(tui.Model)
+	}
+	if m.Cursor() != len(results)-1 {
+		t.Fatalf("expected cursor %d after repeated j, got %d", len(results)-1, m.Cursor())
+	}
+}
+
+func TestViewNarrowWidth(t *testing.T) {
+	m := tui.New("test", sampleResults())
+	m2, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 50})
+	m = m2.(tui.Model)
+
+	view := m.View()
+	if view == "" {
+		t.Fatal("expected non-empty view for narrow width")
+	}
+}
+
 func TestViewContainsQuery(t *testing.T) {
 	m := tui.New("semantic search", sampleResults())
 
