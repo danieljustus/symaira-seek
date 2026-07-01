@@ -780,6 +780,63 @@ func TestGetMatchingContext_EmptyDB(t *testing.T) {
 	}
 }
 
+func TestLegacyNULLEmbeddingDimBackfill(t *testing.T) {
+	d := setupDB(t)
+
+	docPath := filepath.Join(t.TempDir(), "legacy.md")
+	if err := d.SaveDocument(&Document{Path: docPath, Hash: "leg", UpdatedAt: time.Now()}); err != nil {
+		t.Fatalf("SaveDocument: %v", err)
+	}
+
+	emb := []float32{1.0, 0.0, 0.0}
+	embBytes := Float32SliceToBytes(emb)
+	sigBytes := SignBinarySignature(emb)
+	norm := l2Norm(emb)
+
+	_, err := d.conn.Exec(
+		`INSERT INTO chunks (uuid, document_path, chunk_index, content, embedding, hash, norm, binary_signature, embedding_dim, embedding_model)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)`,
+		"legacy-1", docPath, 0, "legacy content", embBytes, "leg-hash", norm, sigBytes,
+	)
+	if err != nil {
+		t.Fatalf("direct INSERT with NULLs: %v", err)
+	}
+
+	spaces, err := d.DetectMixedEmbeddingSpaces()
+	if err != nil {
+		t.Fatalf("DetectMixedEmbeddingSpaces on pre-backfill data: %v", err)
+	}
+	if count, ok := spaces["unknown/unknown"]; !ok || count != 1 {
+		t.Errorf("expected unknown/unknown with count 1 before backfill, got %v", spaces)
+	}
+
+	_, err = d.conn.Exec(`UPDATE chunks SET embedding_dim = length(embedding) / 4 WHERE embedding_dim IS NULL AND embedding IS NOT NULL AND length(embedding) % 4 = 0`)
+	if err != nil {
+		t.Fatalf("backfill embedding_dim: %v", err)
+	}
+	_, err = d.conn.Exec(`UPDATE chunks SET embedding_model = 'unknown' WHERE embedding_dim IS NOT NULL AND (embedding_model IS NULL OR embedding_model = '')`)
+	if err != nil {
+		t.Fatalf("backfill embedding_model: %v", err)
+	}
+
+	spaces, err = d.DetectMixedEmbeddingSpaces()
+	if err != nil {
+		t.Fatalf("DetectMixedEmbeddingSpaces after backfill: %v", err)
+	}
+	key := "3/unknown"
+	if count, ok := spaces[key]; !ok || count != 1 {
+		t.Errorf("expected %s with count 1 after backfill, got %v", key, spaces)
+	}
+
+	results, err := d.SearchVector([]float32{0.9, 0.1, 0.0}, 10)
+	if err != nil {
+		t.Fatalf("SearchVector after backfill: %v", err)
+	}
+	if len(results) == 0 {
+		t.Error("expected non-empty search results after backfill")
+	}
+}
+
 func TestGetMatchingContext_ExactPrefix(t *testing.T) {
 	d := setupDB(t)
 

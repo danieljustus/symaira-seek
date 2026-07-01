@@ -438,7 +438,9 @@ func (db *DB) GetStats() (*Stats, error) {
 }
 
 // DetectMixedEmbeddingSpaces returns the distinct (dim, model) combinations
-// present in the chunks table and their row counts.
+// present in the chunks table and their row counts.  NULL values in
+// embedding_dim or embedding_model are treated as a distinct group keyed by
+// "unknown/<model-or-unknown>" so that legacy rows never cause a scan error.
 func (db *DB) DetectMixedEmbeddingSpaces() (map[string]int, error) {
 	rows, err := db.conn.Query(
 		"SELECT embedding_dim, embedding_model, COUNT(*) FROM chunks GROUP BY embedding_dim, embedding_model",
@@ -450,13 +452,21 @@ func (db *DB) DetectMixedEmbeddingSpaces() (map[string]int, error) {
 
 	result := make(map[string]int)
 	for rows.Next() {
-		var dim int
-		var model string
+		var dim sql.NullInt64
+		var model sql.NullString
 		var count int
 		if err := rows.Scan(&dim, &model, &count); err != nil {
 			return nil, fmt.Errorf("detect mixed embedding spaces: %w", err)
 		}
-		key := fmt.Sprintf("%d/%s", dim, model)
+		dimStr := "unknown"
+		if dim.Valid {
+			dimStr = fmt.Sprintf("%d", dim.Int64)
+		}
+		modelStr := "unknown"
+		if model.Valid && model.String != "" {
+			modelStr = model.String
+		}
+		key := fmt.Sprintf("%s/%s", dimStr, modelStr)
 		result[key] = count
 	}
 	if err := rows.Err(); err != nil {
