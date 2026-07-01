@@ -59,6 +59,23 @@ func freePort(t *testing.T) int {
 	return port
 }
 
+// waitForServer polls until the server accepts TCP connections on addr or the
+// deadline expires.  It retries more aggressively than a fixed-sleep loop to
+// tolerate the slower goroutine scheduling under the race detector.
+func waitForServer(t *testing.T, addr string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		conn, err := net.DialTimeout("tcp", addr, 200*time.Millisecond)
+		if err == nil {
+			conn.Close()
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("server at %s did not become ready within %v", addr, timeout)
+}
+
 // captureStdout redirects os.Stdout for the duration of fn and returns the
 // captured bytes.  It is NOT safe for concurrent use.
 func captureStdout(t *testing.T, fn func()) string {
@@ -757,8 +774,6 @@ func TestVersionCmd_Check(t *testing.T) {
 // Serve command tests  (lines 302-315)
 // ---------------------------------------------------------------------------
 
-// TestServeCmd_HTTP covers lines 306-308: --port > 0 starts the HTTP server.
-// Verifies the server accepts TCP connections on the chosen port.
 func TestServeCmd_HTTP(t *testing.T) {
 	setupTestEnv(t)
 	port := freePort(t)
@@ -770,20 +785,7 @@ func TestServeCmd_HTTP(t *testing.T) {
 		done <- cmd.Execute()
 	}()
 
-	// Wait for the server to start listening.
-	var conn net.Conn
-	var err error
-	for i := 0; i < 20; i++ {
-		conn, err = net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 100*time.Millisecond)
-		if err == nil {
-			break
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	if err != nil {
-		t.Fatalf("server did not accept connection on port %d: %v", port, err)
-	}
-	conn.Close()
+	waitForServer(t, fmt.Sprintf("127.0.0.1:%d", port), 5*time.Second)
 }
 
 // TestServeCmd_MCP covers lines 310-311: no --port starts the MCP server.
@@ -809,9 +811,6 @@ func TestServeCmd_MCP(t *testing.T) {
 // startHTTPServer tests  (lines 334-340)
 // ---------------------------------------------------------------------------
 
-// TestStartHTTPServer_DefaultCooldown covers lines 335-338: when
-// IndexCooldownSeconds <= 0, cooldown defaults to 5s. Verifies the server
-// accepts TCP connections.
 func TestStartHTTPServer_DefaultCooldown(t *testing.T) {
 	setupTestEnv(t)
 	cfg = *config.DefaultConfig()
@@ -823,24 +822,9 @@ func TestStartHTTPServer_DefaultCooldown(t *testing.T) {
 		done <- startHTTPServer(port)
 	}()
 
-	var conn net.Conn
-	var err error
-	for i := 0; i < 20; i++ {
-		conn, err = net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 100*time.Millisecond)
-		if err == nil {
-			break
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	if err != nil {
-		t.Fatalf("server did not accept connection on port %d: %v", port, err)
-	}
-	conn.Close()
+	waitForServer(t, fmt.Sprintf("127.0.0.1:%d", port), 5*time.Second)
 }
 
-// TestStartHTTPServer_CustomCooldown covers line 335: non-zero
-// IndexCooldownSeconds is used directly. Verifies the server accepts TCP
-// connections.
 func TestStartHTTPServer_CustomCooldown(t *testing.T) {
 	setupTestEnv(t)
 	cfg = *config.DefaultConfig()
@@ -852,19 +836,7 @@ func TestStartHTTPServer_CustomCooldown(t *testing.T) {
 		done <- startHTTPServer(port)
 	}()
 
-	var conn net.Conn
-	var err error
-	for i := 0; i < 20; i++ {
-		conn, err = net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 100*time.Millisecond)
-		if err == nil {
-			break
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	if err != nil {
-		t.Fatalf("server did not accept connection on port %d: %v", port, err)
-	}
-	conn.Close()
+	waitForServer(t, fmt.Sprintf("127.0.0.1:%d", port), 5*time.Second)
 }
 
 // ---------------------------------------------------------------------------
