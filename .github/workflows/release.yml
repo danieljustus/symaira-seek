@@ -60,7 +60,50 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
 
-      - name: Notarize macOS binaries
+      - name: Build macOS GUI and Package DMG
+        run: |
+          # 1. Build Swift executable for arm64 and x86_64
+          swift build -c release --package-path client --arch arm64
+          swift build -c release --package-path client --arch x86_64
+          
+          # 2. Merge Swift executables into a Universal binary
+          mkdir -p client/build/bin
+          lipo -create \
+            client/.build/arm64-apple-macosx/release/symseek-gui \
+            client/.build/x86_64-apple-macosx/release/symseek-gui \
+            -output client/build/bin/symseek-gui
+            
+          # 3. Merge Go binaries into a Universal binary
+          lipo -create \
+            dist/symseek_darwin_amd64/symseek \
+            dist/symseek_darwin_arm64/symseek \
+            -output client/build/bin/symseek
+            
+          # 4. Assemble the App Bundle
+          APP_DIR="client/build/Symseek.app"
+          mkdir -p "$APP_DIR/Contents/MacOS"
+          mkdir -p "$APP_DIR/Contents/Resources"
+          cp client/Sources/SymseekApp/Info.plist "$APP_DIR/Contents/"
+          cp client/build/bin/symseek-gui "$APP_DIR/Contents/MacOS/"
+          cp client/build/bin/symseek "$APP_DIR/Contents/Resources/"
+          chmod +x "$APP_DIR/Contents/Resources/symseek"
+          
+          # 5. Codesign the App Bundle if CODESIGN_IDENTITY is available
+          if [ -n "${CODESIGN_IDENTITY:-}" ]; then
+            echo "Codesigning Symseek.app with $CODESIGN_IDENTITY..."
+            codesign --force --options runtime --deep --sign "$CODESIGN_IDENTITY" --timestamp "$APP_DIR"
+          else
+            echo "Signing identity not found. Packaging unsigned app."
+          fi
+          
+          # 6. Package into DMG
+          DMG_STAGE="client/build/dmg"
+          mkdir -p "$DMG_STAGE"
+          cp -R "$APP_DIR" "$DMG_STAGE/"
+          ln -s /Applications "$DMG_STAGE/Applications"
+          hdiutil create -volname "Symseek" -srcfolder "$DMG_STAGE" -ov -format UDZO client/build/Symseek.dmg
+
+      - name: Notarize macOS DMG
         if: steps.signing.outputs.signed == 'true'
         env:
           NOTARY_API_KEY: ${{ secrets.NOTARY_API_KEY }}
@@ -71,22 +114,22 @@ jobs:
             echo "::warning::NOTARY_API_KEY secret is not set. Skipping notarization."
             exit 0
           fi
-          VERSION="${GITHUB_REF_NAME#v}"
-          # Notarize each darwin binary
-          for ARCH in amd64 arm64; do
-            BINARY="dist/symseek_darwin_${ARCH}/symseek"
-            if [ -f "$BINARY" ]; then
-              echo "Notarizing darwin/${ARCH}..."
-              ZIP_PATH="$RUNNER_TEMP/symseek_darwin_${ARCH}.zip"
-              ditto -c -k --keepParent "$BINARY" "$ZIP_PATH"
-              xcrun notarytool submit "$ZIP_PATH" \
-                --apple-id "${NOTARY_API_KEY_ID}" \
-                --team-id "${NOTARY_API_ISSUER}" \
-                --password "${NOTARY_API_KEY}" \
-                --wait
-              rm -f "$ZIP_PATH"
-            fi
-          done
+          echo "Notarizing Symseek.dmg..."
+          xcrun notarytool submit client/build/Symseek.dmg \
+            --apple-id "${NOTARY_API_KEY_ID}" \
+            --team-id "${NOTARY_API_ISSUER}" \
+            --password "${NOTARY_API_KEY}" \
+            --wait
+          
+          echo "Stapling notarization ticket to DMG..."
+          xcrun stapler staple client/build/Symseek.dmg
+
+      - name: Upload DMG to Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "Uploading Symseek.dmg to release ${GITHUB_REF_NAME}..."
+          gh release upload "${GITHUB_REF_NAME}" client/build/Symseek.dmg --clobber
 
       - name: Clean up signing material
         if: always()
