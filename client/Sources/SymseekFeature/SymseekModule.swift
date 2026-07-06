@@ -16,5 +16,5 @@ public struct SymseekModuleView: View {
 public enum SymseekModule {
     /// CLI JSON schema version this module expects. 0 until symseek ships
     /// corekit versionkit (`version --json`); bump together with the CLI.
-    public static let expectedSchemaVersion = 0
+    public static let expectedSchemaVersion = 1
 }
