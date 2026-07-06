@@ -762,11 +762,21 @@ func TestVersionCmd_Check(t *testing.T) {
 	out := captureStdout(t, func() {
 		_ = cmd.Execute()
 	})
-	if !strings.Contains(out, "symseek version") {
-		t.Errorf("expected output to contain 'symseek version', got %q", out)
+	if !strings.Contains(out, "symseek") {
+		t.Errorf("expected output to contain 'symseek', got %q", out)
 	}
 	if !strings.Contains(out, version) {
 		t.Errorf("expected output to contain version %q, got %q", version, out)
+	}
+
+	// Test --json flag
+	cmdJSON := newRootCmd()
+	cmdJSON.SetArgs([]string{"version", "--json"})
+	outJSON := captureStdout(t, func() {
+		_ = cmdJSON.Execute()
+	})
+	if !strings.Contains(outJSON, `"tool":"symseek"`) {
+		t.Errorf("expected JSON output to contain tool 'symseek', got %q", outJSON)
 	}
 }
 

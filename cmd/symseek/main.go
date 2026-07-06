@@ -19,6 +19,7 @@ import (
 	"github.com/danieljustus/symaira-corekit/exitcodes"
 	"github.com/danieljustus/symaira-corekit/logkit"
 	"github.com/danieljustus/symaira-corekit/updatecheck"
+	"github.com/danieljustus/symaira-corekit/versionkit"
 	"github.com/danieljustus/symaira-seek/internal/config"
 	"github.com/danieljustus/symaira-seek/internal/db"
 	"github.com/danieljustus/symaira-seek/internal/engine"
@@ -304,11 +305,16 @@ func newRootCmd() *cobra.Command {
 
 	// 6. Version Command
 	var checkUpdate bool
+	var versionJSON bool
 	versionCmd := &cobra.Command{
 		Use:   "version",
 		Short: "Print the version number of Symaira-Seek",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			fmt.Printf("symseek version %s\n", version)
+			info := versionkit.New("symseek", version, 1)
+			if versionJSON {
+				return info.Write(os.Stdout)
+			}
+			fmt.Println(info.String())
 			if checkUpdate {
 				ctx := context.Background()
 				checker := updatecheck.NewChecker("danieljustus", "symaira-seek")
@@ -327,6 +333,7 @@ func newRootCmd() *cobra.Command {
 		},
 	}
 	versionCmd.Flags().BoolVar(&checkUpdate, "check", false, "Check for updates on GitHub")
+	versionCmd.Flags().BoolVar(&versionJSON, "json", false, "Emit version as machine-readable JSON")
 	rootCmd.AddCommand(versionCmd)
 
 	// 7. Serve Command
