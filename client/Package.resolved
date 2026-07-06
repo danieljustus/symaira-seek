@@ -1,13 +1,13 @@
 {
-  "originHash" : "2c0116b7e52906609ebba0ee20bb6525440aee503a073515a13b68700f004611",
+  "originHash" : "37a7320e9a085a887d3c2849bc565acc0225767fd6f4aa9ebd009a713be50d98",
   "pins" : [
     {
       "identity" : "symaira-appkit",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/danieljustus/symaira-appkit.git",
       "state" : {
-        "revision" : "f38b7c08f90ff2d0af485d9edfdb0ea750d6c3a6",
-        "version" : "0.1.1"
+        "revision" : "350f91658a4bb7cd12254eb433728227ce9e9bc8",
+        "version" : "0.2.0"
       }
     }
   ],
