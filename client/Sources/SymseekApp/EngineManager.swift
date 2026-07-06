@@ -1,7 +1,15 @@
 import Foundation
 import Observation
+import SymairaToolKit
 
 /// Manages the embedded symseek engine process on macOS.
+///
+/// NOTE (DaemonKit v0.2 requirements): this is a long-running daemon
+/// supervisor — start/stop lifecycle, streaming log capture via
+/// readabilityHandler, terminate-then-interrupt escalation, state machine.
+/// Together with symaira-memory's daemon start this defines the scope of
+/// corekit-appkit's future SymairaDaemonKit; only binary discovery is
+/// shared for now.
 @Observable
 @MainActor
 public final class EngineManager {
@@ -173,38 +181,14 @@ public final class EngineManager {
     }
 
     private func locateBinary() -> URL? {
-        // 1. Search in App Bundle Resources
-        if let bundleURL = Bundle.main.url(forResource: "symseek", withExtension: nil) {
-            return bundleURL
-        }
-
-        // 2. Search alongside App bundle (dev environment)
-        let bundleDir = Bundle.main.bundleURL.deletingLastPathComponent()
-        let devBinary = bundleDir.appendingPathComponent("symseek")
-        if FileManager.default.fileExists(atPath: devBinary.path) {
-            return devBinary
-        }
-
-        // 3. Search in current repository root relative to Swift compile path
+        // Repo root (../symseek) as extra fallback keeps the pre-AppKit dev
+        // workflow working when running without a bundled binary.
         let projectRoot = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-        let projectBinary = projectRoot.appendingPathComponent("symseek")
-        if FileManager.default.fileExists(atPath: projectBinary.path) {
-            return projectBinary
-        }
-
-        // 4. Check system path (Homebrew default fallback)
-        let fallbackPath = "/usr/local/bin/symseek"
-        if FileManager.default.fileExists(atPath: fallbackPath) {
-            return URL(fileURLWithPath: fallbackPath)
-        }
-        let armFallbackPath = "/opt/homebrew/bin/symseek"
-        if FileManager.default.fileExists(atPath: armFallbackPath) {
-            return URL(fileURLWithPath: armFallbackPath)
-        }
-
-        return nil
+            .deletingLastPathComponent() // SymseekApp/
+            .deletingLastPathComponent() // Sources/
+            .deletingLastPathComponent() // client/
+            .deletingLastPathComponent() // repo root
+        let locator = BinaryLocator(extraDirectories: ["/opt/homebrew/bin", "/usr/local/bin", projectRoot.path])
+        return locator.locate("symseek")?.url
     }
 }

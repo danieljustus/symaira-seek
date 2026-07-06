@@ -25,3 +25,6 @@
 
 # Agent/developer workspace files
 AGENTS.md
+
+# Local agent session state
+.omo/
