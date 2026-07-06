@@ -33,17 +33,21 @@ public final class EngineManager {
         return nil
     }
 
-    nonisolated(unsafe) private var process: Process?
+    private final class ProcessHandle {
+        var process: Process?
+
+        deinit {
+            process?.terminate()
+        }
+    }
+
+    private let processHandle = ProcessHandle()
     private var stdoutFH: FileHandle?
     private var stderrFH: FileHandle?
 
     private let maxLogs = 500
 
     public init() {}
-
-    nonisolated deinit {
-        process?.terminate()
-    }
 
     public func start(port: Int = 8080) async {
         guard !isRunning else { return }
@@ -121,7 +125,7 @@ public final class EngineManager {
 
         do {
             try proc.run()
-            self.process = proc
+            self.processHandle.process = proc
             appendLog("[engine] Process started (PID \(proc.processIdentifier))")
             
             // Mark as running. Since symseek starts the server immediately,
@@ -136,7 +140,7 @@ public final class EngineManager {
     }
 
     public func stop() {
-        guard let proc = process, proc.isRunning else {
+        guard let proc = processHandle.process, proc.isRunning else {
             state = .stopped
             return
         }
@@ -158,7 +162,7 @@ public final class EngineManager {
         stderrFH?.readabilityHandler = nil
         stdoutFH = nil
         stderrFH = nil
-        process = nil
+        processHandle.process = nil
     }
 
     private func processOutput(_ text: String, source: String) {
