@@ -7,18 +7,26 @@ let package = Package(
         .macOS(.v14)
     ],
     products: [
-        .executable(name: "symseek-gui", targets: ["SymseekApp"])
+        .executable(name: "symseek-gui", targets: ["SymseekApp"]),
+        .library(name: "SymseekFeature", targets: ["SymseekFeature"]),
     ],
     dependencies: [
-        .package(url: "https://github.com/danieljustus/symaira-appkit.git", exact: "0.1.0"),
+        .package(url: "https://github.com/danieljustus/symaira-appkit.git", exact: "0.1.1"),
     ],
     targets: [
-        .executableTarget(
-            name: "SymseekApp",
+        // Feature module (views + engine supervision, no app entry) —
+        // consumed by the thin standalone app and the Symaira Hub.
+        .target(
+            name: "SymseekFeature",
             dependencies: [
                 .product(name: "SymairaTheme", package: "symaira-appkit"),
                 .product(name: "SymairaToolKit", package: "symaira-appkit"),
             ],
+            path: "Sources/SymseekFeature"
+        ),
+        .executableTarget(
+            name: "SymseekApp",
+            dependencies: ["SymseekFeature"],
             path: "Sources/SymseekApp",
             resources: []
         )

@@ -34,3 +34,13 @@ This repository is the public MIT-licensed Symaira Seek self-hosted foundation.
   by design — it defines the requirements for a future SymairaDaemonKit
   (appkit v0.2); do not replace it with CLIRunner one-shot calls.
 - Migration context: see `../docs/symaira-appkit-migration.md` (Welle 2).
+
+### Feature module (`SymseekFeature`)
+
+- `client/Package.swift` exposes **SymseekFeature** (views + EngineManager,
+  no app entry) with the public root view `SymseekModuleView` — consumed by
+  the thin standalone app AND embedded in **symaira-hub** per its Module
+  Integration Contract. `SymseekModule.expectedSchemaVersion` declares the
+  CLI JSON contract (0 until symseek ships `version --json`).
+- Keep new views internal to SymseekFeature; only the module root is
+  public. Breaking view/state changes are hub-visible — build the hub too.
