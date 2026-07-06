@@ -11,7 +11,7 @@ let package = Package(
         .library(name: "SymseekFeature", targets: ["SymseekFeature"]),
     ],
     dependencies: [
-        .package(url: "https://github.com/danieljustus/symaira-appkit.git", exact: "0.1.2"),
+        .package(url: "https://github.com/danieljustus/symaira-appkit.git", exact: "0.2.0"),
     ],
     targets: [
         // Feature module (views + engine supervision, no app entry) —
@@ -21,6 +21,7 @@ let package = Package(
             dependencies: [
                 .product(name: "SymairaTheme", package: "symaira-appkit"),
                 .product(name: "SymairaToolKit", package: "symaira-appkit"),
+                .product(name: "SymairaDaemonKit", package: "symaira-appkit"),
             ],
             path: "Sources/SymseekFeature"
         ),
