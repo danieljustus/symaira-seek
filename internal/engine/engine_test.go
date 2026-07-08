@@ -385,13 +385,24 @@ func (m *mixedSpaceStore) SearchVector(queryVec []float32, limit int) ([]*db.Sea
 	return nil, nil
 }
 
+func (m *mixedSpaceStore) SearchVectorWithPath(queryVec []float32, pathPrefix string, limit int) ([]*db.SearchResult, error) {
+	return m.SearchVector(queryVec, limit)
+}
+
 func (m *mixedSpaceStore) SearchBM25(query string, limit int) ([]*db.SearchResult, error) {
 	return nil, nil
+}
+
+func (m *mixedSpaceStore) SearchBM25WithPath(query string, pathPrefix string, limit int) ([]*db.SearchResult, error) {
+	return m.SearchBM25(query, limit)
 }
 
 func (m *mixedSpaceStore) Upsert(_ context.Context, _ []*db.Chunk) error { return nil }
 func (m *mixedSpaceStore) Delete(_ context.Context, _ string) error     { return nil }
 func (m *mixedSpaceStore) Search(_ context.Context, _ []float32, _ int) ([]*db.SearchResult, error) {
+	return nil, nil
+}
+func (m *mixedSpaceStore) SearchWithPath(_ context.Context, _ []float32, _ string, _ int) ([]*db.SearchResult, error) {
 	return nil, nil
 }
 
@@ -437,6 +448,9 @@ func (f *fakeVectorStore) Search(_ context.Context, queryVec []float32, limit in
 	}
 	return nil, nil
 }
+func (f *fakeVectorStore) SearchWithPath(_ context.Context, queryVec []float32, _ string, limit int) ([]*db.SearchResult, error) {
+	return f.Search(context.Background(), queryVec, limit)
+}
 
 func TestSearchHybridUsesVectorStore(t *testing.T) {
 	tempDir, err := os.MkdirTemp("", "seek-hybrid-vs-test")
@@ -469,4 +483,88 @@ func TestSearchHybridUsesVectorStore(t *testing.T) {
 	if !called {
 		t.Error("expected VectorStore.Search to be called")
 	}
+}
+
+// TestSearchHybridWithPathFilter is a regression test for issue #254. A
+// non-empty PathFilter must be passed to both BM25 and vector search legs.
+func TestSearchHybridWithPathFilter(t *testing.T) {
+	embedder := &fakeEmbedder{dim: 768}
+
+	var bm25Path, vectorPath string
+	store := &pathFilterStore{
+		bm25Fn: func(query, pathPrefix string, limit int) ([]*db.SearchResult, error) {
+			bm25Path = pathPrefix
+			return []*db.SearchResult{}, nil
+		},
+		vectorFn: func(queryVec []float32, pathPrefix string, limit int) ([]*db.SearchResult, error) {
+			vectorPath = pathPrefix
+			return []*db.SearchResult{}, nil
+		},
+	}
+	vs := &pathFilterVectorStore{
+		searchFn: func(queryVec []float32, pathPrefix string, limit int) ([]*db.SearchResult, error) {
+			vectorPath = pathPrefix
+			return []*db.SearchResult{}, nil
+		},
+	}
+
+	_, err := SearchHybridWithOptions(store, vs, embedder, "test", 5, SearchOptions{PathFilter: "/home/user/docs/project-a/"})
+	if err != nil {
+		t.Fatalf("SearchHybridWithOptions failed: %v", err)
+	}
+
+	if bm25Path != "/home/user/docs/project-a/" {
+		t.Errorf("expected BM25 path prefix %q, got %q", "/home/user/docs/project-a/", bm25Path)
+	}
+	if vectorPath != "/home/user/docs/project-a/" {
+		t.Errorf("expected vector path prefix %q, got %q", "/home/user/docs/project-a/", vectorPath)
+	}
+}
+
+type pathFilterStore struct {
+	bm25Fn   func(query, pathPrefix string, limit int) ([]*db.SearchResult, error)
+	vectorFn func(queryVec []float32, pathPrefix string, limit int) ([]*db.SearchResult, error)
+}
+
+func (p *pathFilterStore) Close() error                                             { return nil }
+func (p *pathFilterStore) SaveDocument(doc *db.Document) error                      { return nil }
+func (p *pathFilterStore) DeleteDocument(path string) error                         { return nil }
+func (p *pathFilterStore) GetDocument(path string) (*db.Document, error)            { return nil, nil }
+func (p *pathFilterStore) ListDocuments() ([]*db.Document, error)                   { return nil, nil }
+func (p *pathFilterStore) SaveChunks(chunks []*db.Chunk) error                      { return nil }
+func (p *pathFilterStore) GetChunksForDocument(docPath string) ([]*db.Chunk, error)  { return nil, nil }
+func (p *pathFilterStore) GetStats() (*db.Stats, error)                             { return &db.Stats{}, nil }
+func (p *pathFilterStore) SearchBM25(query string, limit int) ([]*db.SearchResult, error) {
+	return p.bm25Fn(query, "", limit)
+}
+func (p *pathFilterStore) SearchBM25WithPath(query string, pathPrefix string, limit int) ([]*db.SearchResult, error) {
+	return p.bm25Fn(query, pathPrefix, limit)
+}
+func (p *pathFilterStore) SearchVector(queryVec []float32, limit int) ([]*db.SearchResult, error) {
+	return p.vectorFn(queryVec, "", limit)
+}
+func (p *pathFilterStore) SearchVectorWithPath(queryVec []float32, pathPrefix string, limit int) ([]*db.SearchResult, error) {
+	return p.vectorFn(queryVec, pathPrefix, limit)
+}
+func (p *pathFilterStore) DetectMixedEmbeddingSpaces() (map[string]int, error) { return map[string]int{}, nil }
+func (p *pathFilterStore) SetFolderContext(path, text string) error             { return nil }
+func (p *pathFilterStore) GetFolderContexts() ([]db.FolderContext, error)          { return nil, nil }
+func (p *pathFilterStore) GetMatchingContext(path string) (*db.FolderContext, error) { return nil, nil }
+func (p *pathFilterStore) SaveExtractions(extractions []*db.Extraction) error     { return nil }
+func (p *pathFilterStore) DeleteExtractionsForDocument(docPath string) error      { return nil }
+func (p *pathFilterStore) GetDocumentExtractions(docPath string) ([]*db.Extraction, error) { return nil, nil }
+func (p *pathFilterStore) ListExtractions(class string, limit int) ([]*db.Extraction, error) { return nil, nil }
+func (p *pathFilterStore) SearchExtractions(queryStr string, limit int) ([]*db.Extraction, error) { return nil, nil }
+
+type pathFilterVectorStore struct {
+	searchFn func(queryVec []float32, pathPrefix string, limit int) ([]*db.SearchResult, error)
+}
+
+func (p *pathFilterVectorStore) Upsert(_ context.Context, _ []*db.Chunk) error { return nil }
+func (p *pathFilterVectorStore) Delete(_ context.Context, _ string) error       { return nil }
+func (p *pathFilterVectorStore) Search(_ context.Context, queryVec []float32, limit int) ([]*db.SearchResult, error) {
+	return p.searchFn(queryVec, "", limit)
+}
+func (p *pathFilterVectorStore) SearchWithPath(_ context.Context, queryVec []float32, pathPrefix string, limit int) ([]*db.SearchResult, error) {
+	return p.searchFn(queryVec, pathPrefix, limit)
 }

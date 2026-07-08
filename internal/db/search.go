@@ -26,16 +26,34 @@ func escapeFTS5Query(query string) string {
 }
 
 func (db *DB) SearchBM25(queryStr string, limit int) ([]*SearchResult, error) {
-	sqlQuery := `
-		SELECT c.id, c.uuid, c.document_path, c.chunk_index, c.content, c.embedding, c.hash
-		FROM chunks c
-		JOIN chunks_fts f ON c.id = f.rowid
-		WHERE chunks_fts MATCH ?
-		ORDER BY bm25(chunks_fts) ASC
-		LIMIT ?`
+	return db.SearchBM25WithPath(queryStr, "", limit)
+}
 
+func (db *DB) SearchBM25WithPath(queryStr string, pathPrefix string, limit int) ([]*SearchResult, error) {
+	var sqlQuery string
+	var args []any
 	escapedQuery := escapeFTS5Query(queryStr)
-	rows, err := db.conn.Query(sqlQuery, escapedQuery, limit)
+	if pathPrefix != "" {
+		sqlQuery = `
+			SELECT c.id, c.uuid, c.document_path, c.chunk_index, c.content, c.embedding, c.hash
+			FROM chunks c
+			JOIN chunks_fts f ON c.id = f.rowid
+			WHERE chunks_fts MATCH ? AND c.document_path LIKE ? || '%'
+			ORDER BY bm25(chunks_fts) ASC
+			LIMIT ?`
+		args = []any{escapedQuery, pathPrefix, limit}
+	} else {
+		sqlQuery = `
+			SELECT c.id, c.uuid, c.document_path, c.chunk_index, c.content, c.embedding, c.hash
+			FROM chunks c
+			JOIN chunks_fts f ON c.id = f.rowid
+			WHERE chunks_fts MATCH ?
+			ORDER BY bm25(chunks_fts) ASC
+			LIMIT ?`
+		args = []any{escapedQuery, limit}
+	}
+
+	rows, err := db.conn.Query(sqlQuery, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -67,6 +85,10 @@ func (db *DB) SearchBM25(queryStr string, limit int) ([]*SearchResult, error) {
 const searchVectorScanSelect = "SELECT id, uuid, document_path, chunk_index, embedding, hash, norm, binary_signature, embedding_dim, embedding_model FROM chunks"
 
 func (db *DB) SearchVector(queryVec []float32, limit int) ([]*SearchResult, error) {
+	return db.SearchVectorWithPath(queryVec, "", limit)
+}
+
+func (db *DB) SearchVectorWithPath(queryVec []float32, pathPrefix string, limit int) ([]*SearchResult, error) {
 	if limit <= 0 {
 		return nil, nil
 	}
@@ -80,11 +102,11 @@ func (db *DB) SearchVector(queryVec []float32, limit int) ([]*SearchResult, erro
 	if idx := db.vectorIndex; idx != nil && idx.IsReady() {
 		candidateIDs := idx.CandidateIDs(queryVec, idx.ProbeCount())
 		if candidateIDs != nil {
-			return db.searchVectorFiltered(queryVec, queryNorm, candidateIDs, limit)
+			return db.searchVectorFilteredWithPath(queryVec, queryNorm, pathPrefix, candidateIDs, limit)
 		}
 	}
 
-	return db.searchVectorFullScan(queryVec, queryNorm, limit)
+	return db.searchVectorFullScanWithPath(queryVec, queryNorm, pathPrefix, limit)
 }
 
 func hammingDistFallback(query, stored []byte) int {
@@ -153,19 +175,23 @@ func scoreShortlist(h *SearchResultHeap, limit int, queryVec []float32, queryNor
 	}
 }
 
-// searchVectorFiltered scores the given candidate chunk IDs using a two-stage
-// Hamming pre-filter followed by exact cosine rescoring on a shortlist.
-func (db *DB) searchVectorFiltered(queryVec []float32, queryNorm float32, candidateIDs []int64, limit int) ([]*SearchResult, error) {
+func (db *DB) searchVectorFilteredWithPath(queryVec []float32, queryNorm float32, pathPrefix string, candidateIDs []int64, limit int) ([]*SearchResult, error) {
 	placeholders := make([]string, len(candidateIDs))
-	args := make([]interface{}, len(candidateIDs))
+	args := make([]interface{}, 0, len(candidateIDs)+1)
 	for i, id := range candidateIDs {
 		placeholders[i] = "?"
-		args[i] = id
+		args = append(args, id)
+	}
+
+	whereClause := fmt.Sprintf("id IN (%s)", strings.Join(placeholders, ","))
+	if pathPrefix != "" {
+		whereClause += " AND document_path LIKE ? || '%'"
+		args = append(args, pathPrefix)
 	}
 
 	query := fmt.Sprintf(
-		"SELECT id, uuid, document_path, chunk_index, embedding, hash, norm, binary_signature, embedding_dim, embedding_model FROM chunks WHERE id IN (%s)",
-		strings.Join(placeholders, ","),
+		"SELECT id, uuid, document_path, chunk_index, embedding, hash, norm, binary_signature, embedding_dim, embedding_model FROM chunks WHERE %s",
+		whereClause,
 	)
 
 	rows, err := db.conn.Query(query, args...)
@@ -217,17 +243,24 @@ func (db *DB) searchVectorFiltered(queryVec []float32, queryNorm float32, candid
 	return results, nil
 }
 
-// searchVectorFullScan scans every chunk, applies a Hamming pre-filter to
-// shortlist rows for exact cosine rescoring, and builds the IVF index on the
-// first call so that subsequent queries use the prefilter.
-func (db *DB) searchVectorFullScan(queryVec []float32, queryNorm float32, limit int) ([]*SearchResult, error) {
-	rows, err := db.conn.Query(searchVectorScanSelect)
+func (db *DB) searchVectorFullScanWithPath(queryVec []float32, queryNorm float32, pathPrefix string, limit int) ([]*SearchResult, error) {
+	query := searchVectorScanSelect
+	args := []any{}
+	if pathPrefix != "" {
+		query += " WHERE document_path LIKE ? || '%'"
+		args = append(args, pathPrefix)
+	}
+
+	rows, err := db.conn.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	needIndex := db.vectorIndex == nil || !db.vectorIndex.IsReady()
+	// Only build the IVF index from a full, unfiltered scan so the index covers
+	// the entire corpus and remains useful for future queries regardless of path
+	// scope.
+	needIndex := pathPrefix == "" && (db.vectorIndex == nil || !db.vectorIndex.IsReady())
 	var indexChunks []*Chunk
 
 	var allRows []rowEntry

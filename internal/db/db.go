@@ -59,6 +59,35 @@ type SearchResult struct {
 	CosineScore float32 `json:"cosine_score"`
 }
 
+// StructuredSearchResult is the consumer-facing JSON shape shared by the CLI
+// --json output and the MCP search_documents tool. It exposes only the fields
+// callers need to cite or navigate to a source passage, omitting the full
+// embedding vector.
+type StructuredSearchResult struct {
+	Path      string  `json:"path"`
+	ChunkID   string  `json:"chunk_id"`
+	CharStart *int    `json:"char_start,omitempty"`
+	CharEnd   *int    `json:"char_end,omitempty"`
+	Score     float32 `json:"score"`
+	Snippet   string  `json:"snippet"`
+}
+
+// Structured converts a SearchResult into the shared consumer-facing shape.
+// It returns nil when the result has no chunk.
+func (r *SearchResult) Structured() *StructuredSearchResult {
+	if r == nil || r.Chunk == nil {
+		return nil
+	}
+	return &StructuredSearchResult{
+		Path:      r.Chunk.DocumentPath,
+		ChunkID:   r.Chunk.UUID,
+		CharStart: r.Chunk.CharStart,
+		CharEnd:   r.Chunk.CharEnd,
+		Score:     r.RRFScore,
+		Snippet:   r.Chunk.Content,
+	}
+}
+
 type DB struct {
 	conn        *sql.DB
 	vectorIndex *VectorIndex
@@ -103,6 +132,8 @@ type Store interface {
 	GetStats() (*Stats, error)
 	SearchBM25(queryStr string, limit int) ([]*SearchResult, error)
 	SearchVector(queryVec []float32, limit int) ([]*SearchResult, error)
+	SearchBM25WithPath(queryStr string, pathPrefix string, limit int) ([]*SearchResult, error)
+	SearchVectorWithPath(queryVec []float32, pathPrefix string, limit int) ([]*SearchResult, error)
 	DetectMixedEmbeddingSpaces() (map[string]int, error)
 	SetFolderContext(path, text string) error
 	GetFolderContexts() ([]FolderContext, error)

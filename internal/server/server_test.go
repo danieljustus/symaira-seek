@@ -53,11 +53,19 @@ func (m *mockStore) SearchBM25(query string, limit int) ([]*db.SearchResult, err
 	return nil, nil
 }
 
+func (m *mockStore) SearchBM25WithPath(query string, pathPrefix string, limit int) ([]*db.SearchResult, error) {
+	return m.SearchBM25(query, limit)
+}
+
 func (m *mockStore) SearchVector(queryVec []float32, limit int) ([]*db.SearchResult, error) {
 	if m.searchVectorFn != nil {
 		return m.searchVectorFn(queryVec, limit)
 	}
 	return nil, nil
+}
+
+func (m *mockStore) SearchVectorWithPath(queryVec []float32, pathPrefix string, limit int) ([]*db.SearchResult, error) {
+	return m.SearchVector(queryVec, limit)
 }
 
 func (m *mockStore) DetectMixedEmbeddingSpaces() (map[string]int, error) {
@@ -133,6 +141,9 @@ func (m *mockStore) Search(_ context.Context, queryVec []float32, limit int) ([]
 		return m.searchVectorFn(queryVec, limit)
 	}
 	return nil, nil
+}
+func (m *mockStore) SearchWithPath(_ context.Context, queryVec []float32, pathPrefix string, limit int) ([]*db.SearchResult, error) {
+	return m.Search(context.Background(), queryVec, limit)
 }
 
 // ---------------------------------------------------------------------------

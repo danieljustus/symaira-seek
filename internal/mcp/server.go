@@ -53,11 +53,13 @@ func registerSearchDocuments(server *mcpserver.Server, dbClient db.Store, vector
 	server.RegisterTool(&mcpserver.Tool{
 		Name:        "search_documents",
 		Description: "Search the local document index for relevant content using hybrid keyword (BM25) and vector search. Use when the user asks about specific topics, files, or information that might be indexed.",
-		InputSchema: json.RawMessage(`{"type":"object","properties":{"query":{"type":"string","description":"Natural language search query"},"limit":{"type":"integer","description":"Maximum number of search results to return (default 5)"}},"required":["query"]}`),
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"query":{"type":"string","description":"Natural language search query"},"limit":{"type":"integer","description":"Maximum number of search results to return (default 5)"},"format":{"type":"string","description":"Output format: 'json' (structured results) or 'text' (human-readable). Default: 'json'."},"path_prefix":{"type":"string","description":"Optional document path prefix to restrict search results to a subtree"}},"required":["query"]}`),
 		Handler: func(ctx context.Context, input json.RawMessage) (any, error) {
 			var params struct {
-				Query string `json:"query"`
-				Limit int    `json:"limit"`
+				Query      string `json:"query"`
+				Limit      int    `json:"limit"`
+				Format     string `json:"format"`
+				PathPrefix string `json:"path_prefix"`
 			}
 			if err := json.Unmarshal(input, &params); err != nil {
 				return nil, &symerrors.ValidationError{Field: "params", Message: err.Error()}
@@ -69,33 +71,52 @@ func registerSearchDocuments(server *mcpserver.Server, dbClient db.Store, vector
 				params.Limit = 5
 			}
 
-			results, err := engine.SearchHybridWithOptions(dbClient, vectorStore, embedder, params.Query, params.Limit, searchOpts)
+			opts := searchOpts
+			opts.PathFilter = params.PathPrefix
+			results, err := engine.SearchHybridWithOptions(dbClient, vectorStore, embedder, params.Query, params.Limit, opts)
 			if err != nil {
 				return nil, &symerrors.SearchError{Query: params.Query, Err: err}
 			}
 
-			type contextMatcher interface {
-				GetMatchingContext(path string) (*db.FolderContext, error)
-			}
-			var matcher contextMatcher
-			if cm, ok := dbClient.(contextMatcher); ok {
-				matcher = cm
-			}
-
-			var textBuilder strings.Builder
-			for idx, r := range results {
-				textBuilder.WriteString(fmt.Sprintf("[%d] File: %s (Chunk %d, RRF Score: %.4f)\n", idx+1, r.Chunk.DocumentPath, r.Chunk.ChunkIndex, r.RRFScore))
-				if matcher != nil {
-					if fc, err := matcher.GetMatchingContext(r.Chunk.DocumentPath); err == nil && fc != nil {
-						textBuilder.WriteString(fmt.Sprintf("Context: %s — %s\n", fc.PathPrefix, fc.ContextText))
+			switch strings.ToLower(params.Format) {
+			case "text":
+				return renderSearchText(results, dbClient)
+			default:
+				structured := make([]*db.StructuredSearchResult, 0, len(results))
+				for _, r := range results {
+					if s := r.Structured(); s != nil {
+						structured = append(structured, s)
 					}
 				}
-				textBuilder.WriteString(r.Chunk.Content)
-				textBuilder.WriteString("\n\n")
+				return structured, nil
 			}
-			return textBuilder.String(), nil
 		},
 	})
+}
+
+// renderSearchText returns the legacy human-readable text representation of
+// search results, including folder context annotations when available.
+func renderSearchText(results []*db.SearchResult, dbClient db.Store) (string, error) {
+	type contextMatcher interface {
+		GetMatchingContext(path string) (*db.FolderContext, error)
+	}
+	var matcher contextMatcher
+	if cm, ok := dbClient.(contextMatcher); ok {
+		matcher = cm
+	}
+
+	var textBuilder strings.Builder
+	for idx, r := range results {
+		textBuilder.WriteString(fmt.Sprintf("[%d] File: %s (Chunk %d, RRF Score: %.4f)\n", idx+1, r.Chunk.DocumentPath, r.Chunk.ChunkIndex, r.RRFScore))
+		if matcher != nil {
+			if fc, err := matcher.GetMatchingContext(r.Chunk.DocumentPath); err == nil && fc != nil {
+				textBuilder.WriteString(fmt.Sprintf("Context: %s — %s\n", fc.PathPrefix, fc.ContextText))
+			}
+		}
+		textBuilder.WriteString(r.Chunk.Content)
+		textBuilder.WriteString("\n\n")
+	}
+	return textBuilder.String(), nil
 }
 
 func registerReadDocument(server *mcpserver.Server, dbClient db.Store, _ engine.Embedder) {

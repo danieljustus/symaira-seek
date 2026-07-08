@@ -13,8 +13,9 @@ import (
 
 // SearchOptions configures optional behaviour for SearchHybridWithOptions.
 type SearchOptions struct {
-	RerankCfg RerankConfig
-	ExpandCfg ExpandConfig
+	RerankCfg  RerankConfig
+	ExpandCfg  ExpandConfig
+	PathFilter string
 }
 
 // SearchHybrid combines BM25 keyword search and semantic vector search using Reciprocal Rank Fusion (RRF).
@@ -84,11 +85,19 @@ func SearchHybridWithOptions(dbClient db.Store, vectorStore db.VectorStore, embe
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		bm25Results, bm25Err = dbClient.SearchBM25(query, fetchLimit)
+		if opts.PathFilter != "" {
+			bm25Results, bm25Err = dbClient.SearchBM25WithPath(query, opts.PathFilter, fetchLimit)
+		} else {
+			bm25Results, bm25Err = dbClient.SearchBM25(query, fetchLimit)
+		}
 	}()
 	go func() {
 		defer wg.Done()
-		vectorResults, vectorErr = vectorStore.Search(context.Background(), searchVec, fetchLimit)
+		if opts.PathFilter != "" {
+			vectorResults, vectorErr = vectorStore.SearchWithPath(context.Background(), searchVec, opts.PathFilter, fetchLimit)
+		} else {
+			vectorResults, vectorErr = vectorStore.Search(context.Background(), searchVec, fetchLimit)
+		}
 	}()
 	wg.Wait()
 
