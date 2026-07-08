@@ -29,6 +29,26 @@ type Chunk struct {
 	Norm         float32   `json:"norm"`
 	Dim          int       `json:"dim"`
 	Model        string    `json:"embedding_model"`
+	CharStart    *int      `json:"char_start,omitempty"`
+	CharEnd      *int      `json:"char_end,omitempty"`
+}
+
+// Extraction is a persisted grounded extraction linked to a document and,
+// where a matching chunk was found, the chunk whose character span contains
+// (or best overlaps) the extraction's span.
+type Extraction struct {
+	ID           int64     `json:"id"`
+	DocumentPath string    `json:"document_path"`
+	ChunkID      *int64    `json:"chunk_id,omitempty"`
+	Class        string    `json:"class"`
+	Value        string    `json:"value"`
+	EvidenceText string    `json:"evidence_text"`
+	SpanStart    *int      `json:"span_start,omitempty"`
+	SpanEnd      *int      `json:"span_end,omitempty"`
+	Matched      bool      `json:"matched"`
+	Producer     string    `json:"producer"`
+	SourceRef    string    `json:"source_ref"`
+	CreatedAt    time.Time `json:"created_at"`
 }
 
 type SearchResult struct {
@@ -48,11 +68,11 @@ type DB struct {
 
 // QuantConfig holds opt-in parameters for TurboQuant quantized vector search.
 type QuantConfig struct {
-	Enabled      bool
-	BitWidth     int
-	Shortlist    int
-	ExactRerank  bool
-	Seed         int
+	Enabled     bool
+	BitWidth    int
+	Shortlist   int
+	ExactRerank bool
+	Seed        int
 }
 
 // SetQuantConfig enables or reconfigures quantized search on this DB handle.
@@ -87,6 +107,11 @@ type Store interface {
 	SetFolderContext(path, text string) error
 	GetFolderContexts() ([]FolderContext, error)
 	GetMatchingContext(path string) (*FolderContext, error)
+	SaveExtractions(extractions []*Extraction) error
+	DeleteExtractionsForDocument(docPath string) error
+	GetDocumentExtractions(docPath string) ([]*Extraction, error)
+	ListExtractions(class string, limit int) ([]*Extraction, error)
+	SearchExtractions(queryStr string, limit int) ([]*Extraction, error)
 }
 
 var _ Store = (*DB)(nil)
@@ -276,6 +301,11 @@ func (db *DB) DeleteDocument(path string) error {
 		rows.Close()
 	}
 
+	_, err = tx.Exec("DELETE FROM extractions WHERE document_path = ?", path)
+	if err != nil {
+		return err
+	}
+
 	_, err = tx.Exec("DELETE FROM chunks WHERE document_path = ?", path)
 	if err != nil {
 		return err
@@ -337,8 +367,8 @@ func (db *DB) SaveChunks(chunks []*Chunk) error {
 	}
 	defer tx.Rollback()
 
-	query := `INSERT INTO chunks (uuid, document_path, chunk_index, content, embedding, hash, norm, binary_signature, embedding_dim, embedding_model)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	query := `INSERT INTO chunks (uuid, document_path, chunk_index, content, embedding, hash, norm, binary_signature, embedding_dim, embedding_model, char_start, char_end)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 	stmt, err := tx.Prepare(query)
 	if err != nil {
@@ -350,7 +380,7 @@ func (db *DB) SaveChunks(chunks []*Chunk) error {
 		c.Norm = l2Norm(c.Embedding)
 		embBytes := Float32SliceToBytes(c.Embedding)
 		sigBytes := SignBinarySignature(c.Embedding)
-		res, err := stmt.Exec(c.UUID, c.DocumentPath, c.ChunkIndex, c.Content, embBytes, c.Hash, c.Norm, sigBytes, c.Dim, c.Model)
+		res, err := stmt.Exec(c.UUID, c.DocumentPath, c.ChunkIndex, c.Content, embBytes, c.Hash, c.Norm, sigBytes, c.Dim, c.Model, c.CharStart, c.CharEnd)
 		if err != nil {
 			return fmt.Errorf("failed to insert chunk: %w", err)
 		}
@@ -379,7 +409,7 @@ func (db *DB) SaveChunks(chunks []*Chunk) error {
 }
 
 func (db *DB) GetChunksForDocument(docPath string) ([]*Chunk, error) {
-	query := "SELECT id, uuid, document_path, chunk_index, content, embedding, hash, norm, embedding_dim, embedding_model FROM chunks WHERE document_path = ? ORDER BY chunk_index ASC"
+	query := "SELECT id, uuid, document_path, chunk_index, content, embedding, hash, norm, embedding_dim, embedding_model, char_start, char_end FROM chunks WHERE document_path = ? ORDER BY chunk_index ASC"
 	rows, err := db.conn.Query(query, docPath)
 	if err != nil {
 		return nil, err
@@ -390,13 +420,36 @@ func (db *DB) GetChunksForDocument(docPath string) ([]*Chunk, error) {
 	for rows.Next() {
 		var c Chunk
 		var embBytes []byte
-		if err := rows.Scan(&c.ID, &c.UUID, &c.DocumentPath, &c.ChunkIndex, &c.Content, &embBytes, &c.Hash, &c.Norm, &c.Dim, &c.Model); err != nil {
+		if err := rows.Scan(&c.ID, &c.UUID, &c.DocumentPath, &c.ChunkIndex, &c.Content, &embBytes, &c.Hash, &c.Norm, &c.Dim, &c.Model, &c.CharStart, &c.CharEnd); err != nil {
 			return nil, err
 		}
 		c.Embedding = BytesToFloat32Slice(embBytes)
 		chunks = append(chunks, &c)
 	}
 	return chunks, nil
+}
+
+// GetChunkSpansForDocument returns just the id/char_start/char_end triples
+// for a document's chunks, ordered by chunk_index, for use when linking
+// extractions to their best matching chunk without loading full content and
+// embeddings.
+func (db *DB) GetChunkSpansForDocument(docPath string) ([]*Chunk, error) {
+	query := "SELECT id, chunk_index, char_start, char_end FROM chunks WHERE document_path = ? ORDER BY chunk_index ASC"
+	rows, err := db.conn.Query(query, docPath)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var chunks []*Chunk
+	for rows.Next() {
+		var c Chunk
+		if err := rows.Scan(&c.ID, &c.ChunkIndex, &c.CharStart, &c.CharEnd); err != nil {
+			return nil, err
+		}
+		chunks = append(chunks, &c)
+	}
+	return chunks, rows.Err()
 }
 
 // FolderContext stores a path prefix and its descriptive context text.
@@ -524,4 +577,117 @@ func (db *DB) GetMatchingContext(path string) (*FolderContext, error) {
 		}
 	}
 	return best, rows.Err()
+}
+
+// SaveExtractions inserts extraction rows. Callers that want reindex-safe
+// semantics (no duplicates, stale rows removed) should call
+// DeleteExtractionsForDocument for the affected document path(s) first.
+func (db *DB) SaveExtractions(extractions []*Extraction) error {
+	if len(extractions) == 0 {
+		return nil
+	}
+
+	tx, err := db.conn.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	query := `INSERT INTO extractions (document_path, chunk_id, class, value, evidence_text, span_start, span_end, matched, producer, source_ref, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	stmt, err := tx.Prepare(query)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+
+	for _, e := range extractions {
+		res, err := stmt.Exec(e.DocumentPath, e.ChunkID, e.Class, e.Value, e.EvidenceText, e.SpanStart, e.SpanEnd, e.Matched, e.Producer, e.SourceRef, e.CreatedAt)
+		if err != nil {
+			return fmt.Errorf("failed to insert extraction: %w", err)
+		}
+		if id, err := res.LastInsertId(); err == nil {
+			e.ID = id
+		}
+	}
+
+	return tx.Commit()
+}
+
+// DeleteExtractionsForDocument removes all extraction rows for a document
+// path. Called before re-importing a sidecar so reindexing never duplicates
+// or leaves stale extractions behind.
+func (db *DB) DeleteExtractionsForDocument(docPath string) error {
+	_, err := db.conn.Exec("DELETE FROM extractions WHERE document_path = ?", docPath)
+	return err
+}
+
+// GetDocumentExtractions returns all extractions for a document, ordered by
+// span position (extractions without a span sort last).
+func (db *DB) GetDocumentExtractions(docPath string) ([]*Extraction, error) {
+	query := `SELECT id, document_path, chunk_id, class, value, evidence_text, span_start, span_end, matched, producer, source_ref, created_at
+		FROM extractions WHERE document_path = ?
+		ORDER BY (span_start IS NULL), span_start ASC, id ASC`
+	rows, err := db.conn.Query(query, docPath)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanExtractions(rows)
+}
+
+// ListExtractions returns extractions optionally filtered by class, most
+// recent first, capped at limit (0 or negative means no cap).
+func (db *DB) ListExtractions(class string, limit int) ([]*Extraction, error) {
+	query := `SELECT id, document_path, chunk_id, class, value, evidence_text, span_start, span_end, matched, producer, source_ref, created_at
+		FROM extractions`
+	args := []any{}
+	if class != "" {
+		query += " WHERE class = ?"
+		args = append(args, class)
+	}
+	query += " ORDER BY created_at DESC, id DESC"
+	if limit > 0 {
+		query += " LIMIT ?"
+		args = append(args, limit)
+	}
+
+	rows, err := db.conn.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanExtractions(rows)
+}
+
+// SearchExtractions performs an FTS5 full-text search over extraction value
+// and evidence text, ranked by BM25 relevance.
+func (db *DB) SearchExtractions(queryStr string, limit int) ([]*Extraction, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	query := `SELECT e.id, e.document_path, e.chunk_id, e.class, e.value, e.evidence_text, e.span_start, e.span_end, e.matched, e.producer, e.source_ref, e.created_at
+		FROM extractions_fts f
+		JOIN extractions e ON e.id = f.rowid
+		WHERE extractions_fts MATCH ?
+		ORDER BY bm25(extractions_fts)
+		LIMIT ?`
+	rows, err := db.conn.Query(query, queryStr, limit)
+	if err != nil {
+		return nil, fmt.Errorf("search extractions: %w", err)
+	}
+	defer rows.Close()
+	return scanExtractions(rows)
+}
+
+func scanExtractions(rows *sql.Rows) ([]*Extraction, error) {
+	var extractions []*Extraction
+	for rows.Next() {
+		var e Extraction
+		if err := rows.Scan(&e.ID, &e.DocumentPath, &e.ChunkID, &e.Class, &e.Value, &e.EvidenceText, &e.SpanStart, &e.SpanEnd, &e.Matched, &e.Producer, &e.SourceRef, &e.CreatedAt); err != nil {
+			return nil, err
+		}
+		extractions = append(extractions, &e)
+	}
+	return extractions, rows.Err()
 }

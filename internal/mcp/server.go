@@ -42,6 +42,9 @@ func StartServer(cfg engine.OllamaConfig, quantCfg *db.QuantConfig, rerankCfg en
 	registerMultiGet(server, dbClient, embedder)
 	registerSetContext(server, dbClient)
 	registerGetContexts(server, dbClient)
+	registerSearchExtractions(server, dbClient)
+	registerListExtractions(server, dbClient)
+	registerGetDocumentExtractions(server, dbClient)
 
 	return server.ServeStdio(context.Background())
 }

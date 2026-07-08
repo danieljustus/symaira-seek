@@ -200,6 +200,136 @@ func parsePPTX(path string) (string, error) {
 	return result, nil
 }
 
+// Span is a chunk of text paired with its byte offset range within the
+// original source text. Start/End are exact for chunks that fit without
+// overlap reconstruction; for chunks stitched from an overlap tail plus a
+// separator that was re-inserted to keep the join readable, End may overshoot
+// the true source range by up to len(separator) bytes. This is precise enough
+// to find the best-matching chunk for an extraction span, not a guarantee
+// that text[Start:End] always reproduces Text byte-for-byte.
+type Span struct {
+	Text  string
+	Start int
+	End   int
+}
+
+// SplitTextWithSpans behaves like SplitText but also returns each chunk's
+// byte offset range within the original text, so callers can persist source
+// character spans alongside chunk content.
+func SplitTextWithSpans(text string, chunkSize, chunkOverlap int) []Span {
+	if chunkSize <= 0 {
+		return []Span{{Text: text, Start: 0, End: len(text)}}
+	}
+	if chunkOverlap >= chunkSize {
+		chunkOverlap = chunkSize / 2
+	}
+
+	separators := []string{"\n\n", "\n", " ", ""}
+	return splitRecursiveSpans(text, 0, separators, chunkSize, chunkOverlap)
+}
+
+func splitRecursiveSpans(text string, base int, separators []string, chunkSize, chunkOverlap int) []Span {
+	if len(text) <= chunkSize {
+		return []Span{{Text: text, Start: base, End: base + len(text)}}
+	}
+
+	var separator string
+	var nextSeps []string
+	found := false
+	for i, sep := range separators {
+		if strings.Contains(text, sep) {
+			separator = sep
+			nextSeps = separators[i+1:]
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		var spans []Span
+		for i := 0; i < len(text); i += chunkSize - chunkOverlap {
+			end := i + chunkSize
+			if end > len(text) {
+				end = len(text)
+			}
+			spans = append(spans, Span{Text: text[i:end], Start: base + i, End: base + end})
+			if end == len(text) {
+				break
+			}
+		}
+		return spans
+	}
+
+	splits := strings.Split(text, separator)
+	var finalSpans []Span
+	var currentChunk strings.Builder
+	chunkStart := 0
+	pos := 0
+
+	for i, part := range splits {
+		partStart := pos
+		pos += len(part)
+		if i < len(splits)-1 {
+			pos += len(separator)
+		}
+
+		if len(part) > chunkSize {
+			if currentChunk.Len() > 0 {
+				chunkStr := currentChunk.String()
+				finalSpans = append(finalSpans, Span{Text: chunkStr, Start: base + chunkStart, End: base + chunkStart + len(chunkStr)})
+				currentChunk.Reset()
+			}
+			subSpans := splitRecursiveSpans(part, base+partStart, nextSeps, chunkSize, chunkOverlap)
+			finalSpans = append(finalSpans, subSpans...)
+			continue
+		}
+
+		sepLen := len(separator)
+		if currentChunk.Len() > 0 {
+			if currentChunk.Len()+sepLen+len(part) <= chunkSize {
+				currentChunk.WriteString(separator)
+				currentChunk.WriteString(part)
+			} else {
+				chunkStr := currentChunk.String()
+				finalSpans = append(finalSpans, Span{Text: chunkStr, Start: base + chunkStart, End: base + chunkStart + len(chunkStr)})
+
+				overlapStart := len(chunkStr) - chunkOverlap
+				if overlapStart < 0 {
+					overlapStart = 0
+				}
+				tail := chunkStr[overlapStart:]
+				// An empty tail means nothing carries over from the previous
+				// chunk, so the new chunk starts exactly at this part's real
+				// position rather than at chunkStart+overlapStart (which
+				// would land on the separator instead of the part).
+				var newChunkStart int
+				if len(tail) > 0 {
+					newChunkStart = chunkStart + overlapStart
+				} else {
+					newChunkStart = partStart
+				}
+				currentChunk.Reset()
+				currentChunk.WriteString(tail)
+				if currentChunk.Len() > 0 && !strings.HasSuffix(tail, separator) {
+					currentChunk.WriteString(separator)
+				}
+				currentChunk.WriteString(part)
+				chunkStart = newChunkStart
+			}
+		} else {
+			currentChunk.WriteString(part)
+			chunkStart = partStart
+		}
+	}
+
+	if currentChunk.Len() > 0 {
+		chunkStr := currentChunk.String()
+		finalSpans = append(finalSpans, Span{Text: chunkStr, Start: base + chunkStart, End: base + chunkStart + len(chunkStr)})
+	}
+
+	return finalSpans
+}
+
 // SplitText recursively splits a string into chunks of max chunkSize, overlapping by chunkOverlap.
 func SplitText(text string, chunkSize, chunkOverlap int) []string {
 	if chunkSize <= 0 {

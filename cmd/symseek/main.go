@@ -205,6 +205,8 @@ func newRootCmd() *cobra.Command {
 	}
 	rootCmd.AddCommand(deleteCmd)
 
+	rootCmd.AddCommand(newExtractCmd())
+
 	// 4. Status Command
 	statusCmd := &cobra.Command{
 		Use:   "status",
