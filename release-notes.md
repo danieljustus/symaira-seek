@@ -11,4 +11,4 @@
 ### Closed Issues
 - #229 Legacy chunks with NULL `embedding_dim` need backfill.
 
-**Full Changelog**: https://github.com/danieljustus/symaira-seek/compare/v2.2.1...v2.2.2
+**Full Changelog**: https://github.com/danieljustus/symaira-seek/compare/v2.2.2...v2.3.0
