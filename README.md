@@ -53,14 +53,14 @@ brew install symseek
 
 Download the latest release for your platform from [GitHub Releases](https://github.com/danieljustus/symaira-seek/releases):
 
-- **Linux**: `symaira-seek_Linux_x86_64.tar.gz` or `symaira-seek_Linux_arm64.tar.gz`
-- **macOS**: `symaira-seek_Darwin_x86_64.tar.gz` or `symaira-seek_Darwin_arm64.tar.gz`
-- **Windows**: `symaira-seek_Windows_x86_64.zip` or `symaira-seek_Windows_arm64.zip`
+- **Linux**: `symaira-seek_2.3.0_linux_amd64.tar.gz` or `symaira-seek_2.3.0_linux_arm64.tar.gz`
+- **macOS**: `symaira-seek_2.3.0_darwin_amd64.tar.gz` or `symaira-seek_2.3.0_darwin_arm64.tar.gz`
+- **Windows**: `symaira-seek_2.3.0_windows_amd64.zip` or `symaira-seek_2.3.0_windows_arm64.zip`
 
 Extract and install:
 ```bash
 # Linux/macOS
-tar -xzf symseek_*.tar.gz
+tar -xzf symaira-seek_*.tar.gz
 chmod +x symseek
 sudo mv symseek /usr/local/bin/
 
