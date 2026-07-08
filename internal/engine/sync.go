@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -20,6 +21,27 @@ import (
 	"github.com/danieljustus/symaira-seek/internal/parser"
 )
 
+// chunkNamespace is the deterministic UUID namespace used for all chunk IDs.
+// It is derived from a project-specific URL so that IDs are stable across
+// installations and do not collide with generic UUID namespaces.
+//
+// See: deriveChunkID for how individual chunk IDs are computed.
+var chunkNamespace = uuid.NewSHA1(uuid.NameSpaceURL, []byte("https://github.com/danieljustus/symaira-seek/chunk"))
+
+// deriveChunkID returns a deterministic UUIDv5 for a chunk. The ID is derived
+// from the document identity, the chunk's content hash, and the chunk's
+// character start offset in the source text. This keeps a chunk's ID stable
+// across reindex runs as long as the document path, chunk content, and start
+// position do not change. Editing a chunk produces a new content hash and
+// therefore a new ID.
+//
+// Inputs are separated by null bytes so that accidental concatenation of two
+// different chunks cannot produce the same name as another valid chunk
+// (e.g. "doc/a" + "bc" vs "doc/ab" + "c").
+func deriveChunkID(documentPath, contentHash string, charStart int) string {
+	name := documentPath + "\x00" + contentHash + "\x00" + strconv.Itoa(charStart)
+	return uuid.NewSHA1(chunkNamespace, []byte(name)).String()
+}
 // isWithinDir reports whether path is dir itself or located inside dir.
 // It uses a trailing path separator to avoid false matches where one
 // directory name is a string prefix of another (e.g. /docs vs /docs2).
@@ -458,7 +480,7 @@ func buildChunks(embedder Embedder, source, content string) []*db.Chunk {
 		chunkHash := hex.EncodeToString(hashSum[:])
 		start, end := spans[idx].Start, spans[idx].End
 		chunks = append(chunks, &db.Chunk{
-			UUID:         uuid.New().String(),
+			UUID:         deriveChunkID(source, chunkHash, start),
 			DocumentPath: source,
 			ChunkIndex:   idx,
 			Content:      tc,

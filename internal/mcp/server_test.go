@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/danieljustus/symaira-corekit/mcpserver"
@@ -28,7 +29,9 @@ type fakeStore struct {
 	listExtractionsFunc   func(class string, limit int) ([]*db.Extraction, error)
 	getDocExtractionsFunc func(docPath string) ([]*db.Extraction, error)
 
-	folderContexts map[string]string
+	folderContexts     map[string]string
+	mu                 sync.Mutex
+	capturedPathPrefix string
 }
 
 func (f *fakeStore) Close() error                                             { return nil }
@@ -59,8 +62,22 @@ func (f *fakeStore) SearchBM25(query string, limit int) ([]*db.SearchResult, err
 	return []*db.SearchResult{}, nil
 }
 
+func (f *fakeStore) SearchBM25WithPath(query string, pathPrefix string, limit int) ([]*db.SearchResult, error) {
+	f.mu.Lock()
+	f.capturedPathPrefix = pathPrefix
+	f.mu.Unlock()
+	return f.SearchBM25(query, limit)
+}
+
 func (f *fakeStore) SearchVector(queryVec []float32, limit int) ([]*db.SearchResult, error) {
 	return []*db.SearchResult{}, nil
+}
+
+func (f *fakeStore) SearchVectorWithPath(queryVec []float32, pathPrefix string, limit int) ([]*db.SearchResult, error) {
+	f.mu.Lock()
+	f.capturedPathPrefix = pathPrefix
+	f.mu.Unlock()
+	return f.SearchVector(queryVec, limit)
 }
 
 func (f *fakeStore) DetectMixedEmbeddingSpaces() (map[string]int, error) {
@@ -125,6 +142,12 @@ func (f *fakeStore) GetMatchingContext(path string) (*db.FolderContext, error) {
 func (f *fakeStore) Upsert(_ context.Context, _ []*db.Chunk) error { return nil }
 func (f *fakeStore) Delete(_ context.Context, _ string) error      { return nil }
 func (f *fakeStore) Search(_ context.Context, _ []float32, _ int) ([]*db.SearchResult, error) {
+	return []*db.SearchResult{}, nil
+}
+func (f *fakeStore) SearchWithPath(_ context.Context, _ []float32, pathPrefix string, _ int) ([]*db.SearchResult, error) {
+	f.mu.Lock()
+	f.capturedPathPrefix = pathPrefix
+	f.mu.Unlock()
 	return []*db.SearchResult{}, nil
 }
 
@@ -436,6 +459,36 @@ func TestServerSearchDocumentsMissingQuery(t *testing.T) {
 	}
 	if result["isError"] != true {
 		t.Fatal("expected isError=true for missing query")
+	}
+}
+
+// TestServerSearchDocumentsWithPathPrefix is a regression test for issue #254.
+// The path_prefix argument must be forwarded to the search backend.
+func TestServerSearchDocumentsWithPathPrefix(t *testing.T) {
+	store := &fakeStore{}
+	embed := &fakeEmbedder{}
+	server := newTestServer(store, store, embed)
+
+	params, _ := json.Marshal(map[string]interface{}{
+		"name": "search_documents",
+		"arguments": map[string]interface{}{
+			"query":       "test query",
+			"limit":       float64(5),
+			"path_prefix": "/home/user/docs/project-a/",
+		},
+	})
+	resp := pipeRequest(t, server, jsonRPCRequest{
+		JSONRPC: "2.0",
+		ID:      float64(1),
+		Method:  "tools/call",
+		Params:  params,
+	})
+
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %v", resp.Error)
+	}
+	if store.capturedPathPrefix != "/home/user/docs/project-a/" {
+		t.Errorf("expected path prefix %q, got %q", "/home/user/docs/project-a/", store.capturedPathPrefix)
 	}
 }
 
@@ -1539,6 +1592,22 @@ func TestMultiGet_DeepGlob(t *testing.T) {
 
 func callTool(t *testing.T, server *mcpserver.Server, name string, args map[string]interface{}) (string, bool) {
 	t.Helper()
+	rawText, isError, err := callToolResult(t, server, name, args)
+	if err != nil {
+		t.Fatalf("callTool failed: %v", err)
+	}
+	text, ok := rawText.(string)
+	if !ok {
+		t.Fatalf("expected tool result text to be a string, got %T", rawText)
+	}
+	return text, isError
+}
+
+// callToolResult returns the parsed value of content[0].text from a tool call.
+// For text results this is a string; for structured JSON results it is the parsed
+// Go value (e.g. []interface{} or map[string]interface{}).
+func callToolResult(t *testing.T, server *mcpserver.Server, name string, args map[string]interface{}) (any, bool, error) {
+	t.Helper()
 	params, _ := json.Marshal(map[string]interface{}{
 		"name":      name,
 		"arguments": args,
@@ -1554,12 +1623,12 @@ func callTool(t *testing.T, server *mcpserver.Server, name string, args map[stri
 	}
 	result, ok := resp.Result.(map[string]interface{})
 	if !ok {
-		t.Fatalf("expected result map, got %T", resp.Result)
+		return nil, false, fmt.Errorf("expected result map, got %T", resp.Result)
 	}
 	isError := result["isError"] == true
 	content := result["content"].([]interface{})
-	text := content[0].(map[string]interface{})["text"].(string)
-	return text, isError
+	text := content[0].(map[string]interface{})["text"]
+	return text, isError, nil
 }
 
 func TestSetContext_Roundtrip(t *testing.T) {
@@ -1653,8 +1722,9 @@ func TestSearchDocuments_LongestPrefixMatch(t *testing.T) {
 	server := newTestServer(store, store, embed)
 
 	got, isError := callTool(t, server, "search_documents", map[string]interface{}{
-		"query": "auth",
-		"limit": float64(5),
+		"query":  "auth",
+		"limit":  float64(5),
+		"format": "text",
 	})
 	if isError {
 		t.Fatalf("search_documents failed: %s", got)
@@ -1686,13 +1756,81 @@ func TestSearchDocuments_NoContextMatch(t *testing.T) {
 	server := newTestServer(store, store, embed)
 
 	got, isError := callTool(t, server, "search_documents", map[string]interface{}{
-		"query": "app",
-		"limit": float64(5),
+		"query":  "app",
+		"limit":  float64(5),
+		"format": "text",
 	})
 	if isError {
 		t.Fatalf("search_documents failed: %s", got)
 	}
 	if strings.Contains(got, "Context:") {
 		t.Errorf("expected no context line when no prefix matches, got:\n%s", got)
+	}
+}
+
+func TestSearchDocuments_StructuredJSON(t *testing.T) {
+	charStart := 42
+	charEnd := 123
+	store := &fakeStore{
+		searchFunc: func(query string, limit int) ([]*db.SearchResult, error) {
+			return []*db.SearchResult{
+				{
+					Chunk: &db.Chunk{
+						DocumentPath: "/home/user/docs/api.md",
+						UUID:         "chunk-uuid-1",
+						ChunkIndex:   0,
+						Content:      "API documentation content",
+						CharStart:    &charStart,
+						CharEnd:      &charEnd,
+					},
+					RRFScore: 0.85,
+				},
+			}, nil
+		},
+	}
+	embed := &fakeEmbedder{}
+	server := newTestServer(store, store, embed)
+
+	got, isError, err := callToolResult(t, server, "search_documents", map[string]interface{}{
+		"query": "api",
+		"limit": float64(5),
+	})
+	if err != nil {
+		t.Fatalf("search_documents failed: %v", err)
+	}
+	if isError {
+		t.Fatalf("search_documents returned error: %v", got)
+	}
+
+	gotJSON, err := json.Marshal(got)
+	if err != nil {
+		t.Fatalf("failed to re-marshal tool result: %v", err)
+	}
+
+	var results []*db.StructuredSearchResult
+	if err := json.Unmarshal(gotJSON, &results); err != nil {
+		t.Fatalf("expected valid JSON result, got %q: %v", gotJSON, err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	r := results[0]
+	if r.Path != "/home/user/docs/api.md" {
+		t.Errorf("expected path /home/user/docs/api.md, got %q", r.Path)
+	}
+	if r.ChunkID != "chunk-uuid-1" {
+		t.Errorf("expected chunk_id chunk-uuid-1, got %q", r.ChunkID)
+	}
+	if r.CharStart == nil || *r.CharStart != 42 {
+		t.Errorf("expected char_start 42, got %v", r.CharStart)
+	}
+	if r.CharEnd == nil || *r.CharEnd != 123 {
+		t.Errorf("expected char_end 123, got %v", r.CharEnd)
+	}
+	if r.Snippet != "API documentation content" {
+		t.Errorf("expected snippet 'API documentation content', got %q", r.Snippet)
+	}
+	if r.Score <= 0 {
+		t.Errorf("expected positive score, got %f", r.Score)
 	}
 }
