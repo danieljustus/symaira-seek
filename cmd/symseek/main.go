@@ -101,9 +101,15 @@ func newRootCmd() *cobra.Command {
 
 			// JSON output — never launch TUI in JSON mode.
 			if jsonFlag {
+				structured := make([]*db.StructuredSearchResult, 0, len(results))
+				for _, r := range results {
+					if s := r.Structured(); s != nil {
+						structured = append(structured, s)
+					}
+				}
 				enc := json.NewEncoder(os.Stdout)
 				enc.SetIndent("", "  ")
-				return enc.Encode(results)
+				return enc.Encode(structured)
 			}
 
 			useTUI := tuiFlag || (!plainFlag && !jsonFlag && isatty.IsTerminal(os.Stdout.Fd()))
