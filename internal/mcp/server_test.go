@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/danieljustus/symaira-corekit/mcpserver"
@@ -29,6 +30,7 @@ type fakeStore struct {
 	getDocExtractionsFunc func(docPath string) ([]*db.Extraction, error)
 
 	folderContexts     map[string]string
+	mu                 sync.Mutex
 	capturedPathPrefix string
 }
 
@@ -61,7 +63,9 @@ func (f *fakeStore) SearchBM25(query string, limit int) ([]*db.SearchResult, err
 }
 
 func (f *fakeStore) SearchBM25WithPath(query string, pathPrefix string, limit int) ([]*db.SearchResult, error) {
+	f.mu.Lock()
 	f.capturedPathPrefix = pathPrefix
+	f.mu.Unlock()
 	return f.SearchBM25(query, limit)
 }
 
@@ -70,7 +74,9 @@ func (f *fakeStore) SearchVector(queryVec []float32, limit int) ([]*db.SearchRes
 }
 
 func (f *fakeStore) SearchVectorWithPath(queryVec []float32, pathPrefix string, limit int) ([]*db.SearchResult, error) {
+	f.mu.Lock()
 	f.capturedPathPrefix = pathPrefix
+	f.mu.Unlock()
 	return f.SearchVector(queryVec, limit)
 }
 
@@ -139,7 +145,9 @@ func (f *fakeStore) Search(_ context.Context, _ []float32, _ int) ([]*db.SearchR
 	return []*db.SearchResult{}, nil
 }
 func (f *fakeStore) SearchWithPath(_ context.Context, _ []float32, pathPrefix string, _ int) ([]*db.SearchResult, error) {
+	f.mu.Lock()
 	f.capturedPathPrefix = pathPrefix
+	f.mu.Unlock()
 	return []*db.SearchResult{}, nil
 }
 
