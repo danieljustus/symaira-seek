@@ -47,10 +47,6 @@ func (db *DB) SearchVectorQuantizedWithPath(queryVec []float32, pathPrefix strin
 	return results, nil
 }
 
-func (db *DB) searchVectorQuantizedInner(queryVec []float32, queryNorm float32, cfg *QuantConfig, limit int) ([]*SearchResult, error) {
-	return db.searchVectorQuantizedInnerWithPath(queryVec, queryNorm, "", cfg, limit)
-}
-
 func (db *DB) searchVectorQuantizedInnerWithPath(queryVec []float32, queryNorm float32, pathPrefix string, cfg *QuantConfig, limit int) ([]*SearchResult, error) {
 	codec, err := turboquant.NewCodec(len(queryVec), turboquant.BitWidth(cfg.BitWidth), cfg.Seed, 0)
 	if err != nil {
@@ -167,10 +163,6 @@ func (db *DB) buildQuantResults(candidates []quantCandidate, limit int) ([]*Sear
 		return nil, err
 	}
 	return results, nil
-}
-
-func (db *DB) exactRerankShortlist(queryVec []float32, queryNorm float32, shortlistIDs []int64, limit int) ([]*SearchResult, error) {
-	return db.exactRerankShortlistWithPath(queryVec, queryNorm, "", shortlistIDs, limit)
 }
 
 func (db *DB) exactRerankShortlistWithPath(queryVec []float32, queryNorm float32, pathPrefix string, shortlistIDs []int64, limit int) ([]*SearchResult, error) {

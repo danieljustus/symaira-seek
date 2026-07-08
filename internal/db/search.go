@@ -175,12 +175,6 @@ func scoreShortlist(h *SearchResultHeap, limit int, queryVec []float32, queryNor
 	}
 }
 
-// searchVectorFiltered scores the given candidate chunk IDs using a two-stage
-// Hamming pre-filter followed by exact cosine rescoring on a shortlist.
-func (db *DB) searchVectorFiltered(queryVec []float32, queryNorm float32, candidateIDs []int64, limit int) ([]*SearchResult, error) {
-	return db.searchVectorFilteredWithPath(queryVec, queryNorm, "", candidateIDs, limit)
-}
-
 func (db *DB) searchVectorFilteredWithPath(queryVec []float32, queryNorm float32, pathPrefix string, candidateIDs []int64, limit int) ([]*SearchResult, error) {
 	placeholders := make([]string, len(candidateIDs))
 	args := make([]interface{}, 0, len(candidateIDs)+1)
@@ -247,13 +241,6 @@ func (db *DB) searchVectorFilteredWithPath(queryVec []float32, queryNorm float32
 		return nil, err
 	}
 	return results, nil
-}
-
-// searchVectorFullScan scans every chunk, applies a Hamming pre-filter to
-// shortlist rows for exact cosine rescoring, and builds the IVF index on the
-// first call so that subsequent queries use the prefilter.
-func (db *DB) searchVectorFullScan(queryVec []float32, queryNorm float32, limit int) ([]*SearchResult, error) {
-	return db.searchVectorFullScanWithPath(queryVec, queryNorm, "", limit)
 }
 
 func (db *DB) searchVectorFullScanWithPath(queryVec []float32, queryNorm float32, pathPrefix string, limit int) ([]*SearchResult, error) {
