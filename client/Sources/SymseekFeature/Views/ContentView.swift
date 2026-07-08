@@ -65,7 +65,7 @@ struct ContentView: View {
                             .font(.system(.caption2, design: .monospaced))
                             .foregroundStyle(Color.symairaTextSecondary)
                     }
-                    Text("v2.3.0")
+                    Text("v2.3.1")
                         .font(.system(.caption2, design: .monospaced))
                         .foregroundStyle(Color.symairaMuted)
                 }

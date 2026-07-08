@@ -74,9 +74,17 @@ jobs:
             -output client/build/bin/symseek-gui
             
           # 3. Merge Go binaries into a Universal binary
+          # GoReleaser v2 places binaries under dist/symseek_<os>_<arch>_<variant>/symseek.
+          # Discover the exact paths so the step survives future variant suffix changes.
+          AMD64_BIN=$(find dist -type f -path 'dist/symseek_darwin_amd64_*/symseek' | head -n 1)
+          ARM64_BIN=$(find dist -type f -path 'dist/symseek_darwin_arm64_*/symseek' | head -n 1)
+          if [ -z "$AMD64_BIN" ] || [ -z "$ARM64_BIN" ]; then
+            echo "Could not locate GoReleaser darwin binaries in dist/"
+            exit 1
+          fi
           lipo -create \
-            dist/symseek_darwin_amd64/symseek \
-            dist/symseek_darwin_arm64/symseek \
+            "$AMD64_BIN" \
+            "$ARM64_BIN" \
             -output client/build/bin/symseek
             
           # 4. Assemble the App Bundle
