@@ -60,7 +60,7 @@ Download the latest release for your platform from [GitHub Releases](https://git
 Extract and install:
 ```bash
 # Linux/macOS
-tar -xzf symaira-seek_*.tar.gz
+tar -xzf symseek_*.tar.gz
 chmod +x symseek
 sudo mv symseek /usr/local/bin/
 
@@ -68,9 +68,30 @@ sudo mv symseek /usr/local/bin/
 # Extract the .zip and add to PATH
 ```
 
+### macOS App (Symseek.app)
+
+For macOS users who prefer a native GUI, download `Symseek.dmg` from [GitHub Releases](https://github.com/danieljustus/symaira-seek/releases):
+
+1. Open the downloaded DMG.
+2. Drag `Symseek.app` into `/Applications`.
+3. Launch `Symseek.app` from Launchpad or Finder.
+
+The app bundles the Go backend and runs it as a local daemon via `SymairaDaemonKit`. It uses the same SQLite database and configuration as the CLI, so indexes and settings are shared.
+
+To build the app from source, ensure you have Xcode installed (the CI build uses `DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer`) and run:
+
+```bash
+./client/build.sh
+```
+
+This produces `client/build/Symseek.app` and `client/build/Symseek.dmg`.
+
+> Note: The macOS app is also embeddable as a module in the Symaira Hub via `SymseekModuleView`. Its expected CLI JSON schema version is `1`.
+
 Verify the installation:
 ```bash
 symseek version
+symseek version --json
 ```
 
 ### Build from Source
@@ -124,6 +145,40 @@ Restrict a search to a subtree with `--path`:
 ```bash
 ./symseek search "renewable energy optimization" --path /home/user/documents/project-a --limit 5
 ```
+
+### Grounded Extraction Sidecars
+
+If your documents have associated extraction sidecars (for example, produced by a `symingest` annotation pipeline), symseek can index them and search the extracted values and evidence.
+
+A sidecar is a JSONL file stored in `.symaira/extractions/<sha256-of-source>.jsonl`, where `<sha256-of-source>` is taken from the source Markdown file's YAML frontmatter:
+
+```yaml
+---
+sha256: <hex-digest>
+---
+```
+
+During indexing, symseek auto-detects matching sidecars for Markdown files. You can also import a sidecar manually for an already-indexed document:
+
+```bash
+./symseek extract import /path/to/sidecar.jsonl
+```
+
+Search indexed extractions:
+
+```bash
+./symseek extract search "deadline" --limit 10
+./symseek extract search "amount" --json
+```
+
+List extractions by class:
+
+```bash
+./symseek extract list --class deadline --limit 20
+./symseek extract list --json
+```
+
+Each result includes the document path, extraction class, value, matched flag, and the evidence snippet with character offsets.
 
 ### Get Database Stats
 ```bash
@@ -227,7 +282,7 @@ To use Symaira-Seek as an MCP tool for AI clients (like Claude Desktop or Cursor
 ```
 
 ### Exposed Tools
-1. `search_documents(query, limit)`: Hybrid search over all indexed files.
+1. `search_documents(query, limit, format, path_prefix)`: Hybrid search over all indexed files. Returns structured results with stable chunk IDs, character offsets, RRF scores, and snippets.
 2. `read_document(path, fromLine?, maxLines?)`: Retrieves content from an indexed file, with optional line-range filtering.
 3. `list_documents(folder)`: Explorative folder and index structure scanning.
 4. `get_context(topic, max_chars)`: Aggregates relevant context blocks from multiple documents.
@@ -236,6 +291,9 @@ To use Symaira-Seek as an MCP tool for AI clients (like Claude Desktop or Cursor
 7. `multi_get(pattern, maxBytes, maxLines)`: Retrieves multiple indexed documents matching a glob pattern.
 8. `set_context(path, text)`: Stores descriptive context text for a filesystem path prefix.
 9. `get_contexts()`: Lists all stored folder context entries.
+10. `search_extractions(query, limit)`: Full-text search over grounded document extractions (values and evidence text).
+11. `list_extractions(class?, limit)`: Lists grounded extractions, optionally filtered by class (e.g. `amount`, `deadline`).
+12. `get_document_extractions(path)`: Retrieves all extractions for a specific indexed document.
 
 ### Tool Examples
 
