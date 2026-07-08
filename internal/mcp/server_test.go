@@ -21,9 +21,12 @@ import (
 )
 
 type fakeStore struct {
-	searchFunc   func(query string, limit int) ([]*db.SearchResult, error)
-	getDocFunc   func(path string) (*db.Document, error)
-	listDocsFunc func() ([]*db.Document, error)
+	searchFunc            func(query string, limit int) ([]*db.SearchResult, error)
+	getDocFunc            func(path string) (*db.Document, error)
+	listDocsFunc          func() ([]*db.Document, error)
+	searchExtractionsFunc func(query string, limit int) ([]*db.Extraction, error)
+	listExtractionsFunc   func(class string, limit int) ([]*db.Extraction, error)
+	getDocExtractionsFunc func(docPath string) ([]*db.Extraction, error)
 
 	folderContexts map[string]string
 }
@@ -80,6 +83,30 @@ func (f *fakeStore) GetFolderContexts() ([]db.FolderContext, error) {
 	return contexts, nil
 }
 
+func (f *fakeStore) SaveExtractions(extractions []*db.Extraction) error { return nil }
+func (f *fakeStore) DeleteExtractionsForDocument(docPath string) error  { return nil }
+
+func (f *fakeStore) GetDocumentExtractions(docPath string) ([]*db.Extraction, error) {
+	if f.getDocExtractionsFunc != nil {
+		return f.getDocExtractionsFunc(docPath)
+	}
+	return nil, nil
+}
+
+func (f *fakeStore) ListExtractions(class string, limit int) ([]*db.Extraction, error) {
+	if f.listExtractionsFunc != nil {
+		return f.listExtractionsFunc(class, limit)
+	}
+	return nil, nil
+}
+
+func (f *fakeStore) SearchExtractions(queryStr string, limit int) ([]*db.Extraction, error) {
+	if f.searchExtractionsFunc != nil {
+		return f.searchExtractionsFunc(queryStr, limit)
+	}
+	return nil, nil
+}
+
 func (f *fakeStore) GetMatchingContext(path string) (*db.FolderContext, error) {
 	if f.folderContexts == nil {
 		return nil, nil
@@ -96,7 +123,7 @@ func (f *fakeStore) GetMatchingContext(path string) (*db.FolderContext, error) {
 }
 
 func (f *fakeStore) Upsert(_ context.Context, _ []*db.Chunk) error { return nil }
-func (f *fakeStore) Delete(_ context.Context, _ string) error     { return nil }
+func (f *fakeStore) Delete(_ context.Context, _ string) error      { return nil }
 func (f *fakeStore) Search(_ context.Context, _ []float32, _ int) ([]*db.SearchResult, error) {
 	return []*db.SearchResult{}, nil
 }
@@ -139,6 +166,9 @@ func newTestServer(store db.Store, vectorStore db.VectorStore, embedder engine.E
 	registerMultiGet(s, store, embedder)
 	registerSetContext(s, store)
 	registerGetContexts(s, store)
+	registerSearchExtractions(s, store)
+	registerListExtractions(s, store)
+	registerGetDocumentExtractions(s, store)
 	return s
 }
 
@@ -1355,8 +1385,8 @@ func newMultiGetStore(t *testing.T, files map[string]string) (*fakeStore, string
 
 func TestMultiGet_MultipleFiles(t *testing.T) {
 	store, _ := newMultiGetStore(t, map[string]string{
-		"docs/a.md": "content A",
-		"docs/b.md": "content B",
+		"docs/a.md":  "content A",
+		"docs/b.md":  "content B",
 		"other/c.md": "content C",
 	})
 	embed := &fakeEmbedder{}
@@ -1481,7 +1511,7 @@ func TestMultiGet_DeepGlob(t *testing.T) {
 	store, _ := newMultiGetStore(t, map[string]string{
 		"a/b/c/d.md": "deep content",
 		"a/x.md":     "shallow content",
-		"z.md":        "root content",
+		"z.md":       "root content",
 	})
 	embed := &fakeEmbedder{}
 	server := newTestServer(store, store, embed)
@@ -1615,8 +1645,8 @@ func TestSearchDocuments_LongestPrefixMatch(t *testing.T) {
 			}, nil
 		},
 		folderContexts: map[string]string{
-			"/home/user/docs":      "General docs",
-			"/home/user/docs/api":  "API documentation",
+			"/home/user/docs":     "General docs",
+			"/home/user/docs/api": "API documentation",
 		},
 	}
 	embed := &fakeEmbedder{}

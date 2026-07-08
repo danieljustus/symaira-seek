@@ -504,6 +504,80 @@ func TestSplitText_ExactChunkSize(t *testing.T) {
 	}
 }
 
+func TestSplitTextWithSpans_MatchesSplitTextContent(t *testing.T) {
+	text := "This is a simple text. It has multiple sentences. We want to test recursive splitting."
+	textChunks := SplitText(text, 25, 5)
+	spans := SplitTextWithSpans(text, 25, 5)
+
+	if len(spans) != len(textChunks) {
+		t.Fatalf("span count %d != chunk count %d", len(spans), len(textChunks))
+	}
+	for i := range spans {
+		if spans[i].Text != textChunks[i] {
+			t.Errorf("span %d text mismatch: got %q want %q", i, spans[i].Text, textChunks[i])
+		}
+		if spans[i].End-spans[i].Start != len(spans[i].Text) {
+			t.Errorf("span %d length mismatch: End-Start=%d len(Text)=%d", i, spans[i].End-spans[i].Start, len(spans[i].Text))
+		}
+	}
+}
+
+func TestSplitTextWithSpans_NoOverlapIsByteExact(t *testing.T) {
+	text := "line1\nline2\nline3\nline4\nline5\nline6"
+	spans := SplitTextWithSpans(text, 15, 0)
+	for i, s := range spans {
+		if s.Start < 0 || s.End > len(text) || s.Start > s.End {
+			t.Fatalf("span %d out of bounds: %+v (len=%d)", i, s, len(text))
+		}
+		if text[s.Start:s.End] != s.Text {
+			t.Errorf("span %d not byte-exact: text[%d:%d]=%q want %q", i, s.Start, s.End, text[s.Start:s.End], s.Text)
+		}
+	}
+}
+
+func TestSplitTextWithSpans_SpansAreOrderedAndInBounds(t *testing.T) {
+	text := strings.Repeat("word ", 200)
+	spans := SplitTextWithSpans(text, 40, 10)
+	if len(spans) == 0 {
+		t.Fatal("expected spans, got none")
+	}
+	for i, s := range spans {
+		if s.Start < 0 || s.End < s.Start || s.End > len(text) {
+			t.Errorf("span %d has invalid bounds: %+v (text len=%d)", i, s, len(text))
+		}
+		if i > 0 && s.Start < spans[i-1].Start {
+			t.Errorf("span %d starts before previous span: %d < %d", i, s.Start, spans[i-1].Start)
+		}
+	}
+}
+
+func TestSplitTextWithSpans_ZeroChunkSize(t *testing.T) {
+	spans := SplitTextWithSpans("any text", 0, 0)
+	if len(spans) != 1 || spans[0].Text != "any text" || spans[0].Start != 0 || spans[0].End != len("any text") {
+		t.Errorf("zero chunkSize should return full text span, got %v", spans)
+	}
+}
+
+func TestSplitTextWithSpans_EmptyString(t *testing.T) {
+	spans := SplitTextWithSpans("", 10, 2)
+	if len(spans) != 1 || spans[0].Text != "" || spans[0].Start != 0 || spans[0].End != 0 {
+		t.Errorf("empty string should return single empty span, got %v", spans)
+	}
+}
+
+func TestSplitTextWithSpans_NoSeparatorFound(t *testing.T) {
+	text := strings.Repeat("a", 50)
+	spans := SplitTextWithSpans(text, 20, 5)
+	if len(spans) < 2 {
+		t.Fatalf("expected multiple spans for long no-separator text, got %d", len(spans))
+	}
+	for i, s := range spans {
+		if text[s.Start:s.End] != s.Text {
+			t.Errorf("span %d not byte-exact: text[%d:%d]=%q want %q", i, s.Start, s.End, text[s.Start:s.End], s.Text)
+		}
+	}
+}
+
 func TestExtractXMLText_MalformedXML(t *testing.T) {
 	malformed := []byte(`<root><t>good</t><broken>&&&</root>`)
 	r := bytes.NewReader(malformed)

@@ -4,7 +4,7 @@ Guidelines and commands for developers and AI agents working on this codebase.
 
 ## Build and Test Commands
 
-- **Build binary**: `go build -o symseek cmd/symseek/main.go`
+- **Build binary**: `go build -o symseek ./cmd/symseek`
 - **Run all tests**: `go test ./...`
 - **Run verbose tests**: `go test -v ./...`
 

@@ -42,22 +42,22 @@ func shouldSkipDir(name string) bool {
 }
 
 var supportedExtensions = map[string]bool{
-	".md":    true,
-	".txt":   true,
-	".go":    true,
-	".py":    true,
-	".js":    true,
-	".ts":    true,
-	".json":  true,
-	".yaml":  true,
-	".yml":   true,
-	".sh":    true,
-	".html":  true,
-	".css":   true,
-	".pdf":   true,
-	".docx":  true,
-	".pptx":  true,
-	".xlsx":  true,
+	".md":   true,
+	".txt":  true,
+	".go":   true,
+	".py":   true,
+	".js":   true,
+	".ts":   true,
+	".json": true,
+	".yaml": true,
+	".yml":  true,
+	".sh":   true,
+	".html": true,
+	".css":  true,
+	".pdf":  true,
+	".docx": true,
+	".pptx": true,
+	".xlsx": true,
 }
 
 // IndexDirectory crawls a directory, computes hashes, parses changed files,
@@ -134,7 +134,7 @@ func IndexDirectory(dbClient db.Store, embedder Embedder, dirPath string) error 
 
 // IndexFile indexes a single file by delegating to the shared prepareIndex/commitIndex pipeline.
 func IndexFile(dbClient db.Store, embedder Embedder, path string) (string, error) {
-	chunks, doc, existing, skipped, err := prepareIndex(dbClient, embedder, path)
+	chunks, doc, existing, skipped, sidecarPath, err := prepareIndex(dbClient, embedder, path)
 	if err != nil {
 		return "", err
 	}
@@ -142,7 +142,7 @@ func IndexFile(dbClient db.Store, embedder Embedder, path string) (string, error
 		currentHash, _ := parser.GetFileHash(path)
 		return currentHash, nil
 	}
-	if err := commitIndex(dbClient, path, chunks, doc, existing); err != nil {
+	if err := commitIndex(dbClient, path, chunks, doc, existing, sidecarPath); err != nil {
 		return "", err
 	}
 	return doc.Hash, nil
@@ -362,12 +362,13 @@ func processFilesInParallel(dbClient db.Store, embedder Embedder, paths map[stri
 	}
 
 	type result struct {
-		path    string
-		chunks  []*db.Chunk
-		doc     *db.Document
-		existing *db.Document
-		err     error
-		skipped bool
+		path        string
+		chunks      []*db.Chunk
+		doc         *db.Document
+		existing    *db.Document
+		sidecarPath string
+		err         error
+		skipped     bool
 	}
 
 	jobs := make(chan string, len(paths))
@@ -384,8 +385,8 @@ func processFilesInParallel(dbClient db.Store, embedder Embedder, paths map[stri
 		go func() {
 			defer prepWG.Done()
 			for path := range jobs {
-				chunks, doc, existing, skipped, err := prepareIndex(dbClient, embedder, path)
-				prepared <- result{path: path, chunks: chunks, doc: doc, existing: existing, err: err, skipped: skipped}
+				chunks, doc, existing, skipped, sidecarPath, err := prepareIndex(dbClient, embedder, path)
+				prepared <- result{path: path, chunks: chunks, doc: doc, existing: existing, sidecarPath: sidecarPath, err: err, skipped: skipped}
 			}
 		}()
 	}
@@ -403,39 +404,40 @@ func processFilesInParallel(dbClient db.Store, embedder Embedder, paths map[stri
 			fmt.Fprintf(os.Stderr, "Warning: %v\n", r.err)
 			continue
 		}
-		if err := commitIndex(dbClient, r.path, r.chunks, r.doc, r.existing); err != nil {
+		if err := commitIndex(dbClient, r.path, r.chunks, r.doc, r.existing, r.sidecarPath); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: %v\n", err)
 			continue
 		}
 	}
 }
 
-func prepareIndex(dbClient db.Store, embedder Embedder, path string) ([]*db.Chunk, *db.Document, *db.Document, bool, error) {
+func prepareIndex(dbClient db.Store, embedder Embedder, path string) ([]*db.Chunk, *db.Document, *db.Document, bool, string, error) {
 	currentHash, err := parser.GetFileHash(path)
 	if err != nil {
-		return nil, nil, nil, false, fmt.Errorf("failed to compute hash for %s: %w", path, err)
+		return nil, nil, nil, false, "", fmt.Errorf("failed to compute hash for %s: %w", path, err)
 	}
 
 	existing, err := dbClient.GetDocument(path)
 	if err != nil {
-		return nil, nil, nil, false, fmt.Errorf("failed to query document from DB: %w", err)
+		return nil, nil, nil, false, "", fmt.Errorf("failed to query document from DB: %w", err)
 	}
 	if existing != nil && existing.Hash == currentHash {
-		return nil, nil, existing, true, nil
+		return nil, nil, existing, true, "", nil
 	}
 
 	content, err := parser.ParseFile(path)
 	if err != nil {
-		return nil, nil, nil, false, fmt.Errorf("failed to parse %s: %w", path, err)
+		return nil, nil, nil, false, "", fmt.Errorf("failed to parse %s: %w", path, err)
 	}
 
 	chunks := buildChunks(embedder, path, content)
+	sidecarPath := detectSidecarPath(path, content)
 
 	return chunks, &db.Document{
 		Path:      path,
 		Hash:      currentHash,
 		UpdatedAt: time.Now(),
-	}, existing, false, nil
+	}, existing, false, sidecarPath, nil
 }
 
 // buildChunks splits content into overlapping chunks, generates their
@@ -443,13 +445,18 @@ func prepareIndex(dbClient db.Store, embedder Embedder, path string) ([]*db.Chun
 // pipeline shared by file/directory indexing (prepareIndex) and content-based
 // indexing (indexContent for URLs and stdin).
 func buildChunks(embedder Embedder, source, content string) []*db.Chunk {
-	textChunks := parser.SplitText(content, 1000, 200)
+	spans := parser.SplitTextWithSpans(content, 1000, 200)
+	textChunks := make([]string, len(spans))
+	for i, s := range spans {
+		textChunks[i] = s.Text
+	}
 	embeddings := embedder.GenerateVectors(textChunks)
 
 	chunks := make([]*db.Chunk, 0, len(textChunks))
 	for idx, tc := range textChunks {
 		hashSum := sha256.Sum256([]byte(tc))
 		chunkHash := hex.EncodeToString(hashSum[:])
+		start, end := spans[idx].Start, spans[idx].End
 		chunks = append(chunks, &db.Chunk{
 			UUID:         uuid.New().String(),
 			DocumentPath: source,
@@ -459,6 +466,8 @@ func buildChunks(embedder Embedder, source, content string) []*db.Chunk {
 			Hash:         chunkHash,
 			Dim:          len(embeddings[idx]),
 			Model:        embedder.ModelName(),
+			CharStart:    &start,
+			CharEnd:      &end,
 		})
 	}
 	return chunks
@@ -467,7 +476,9 @@ func buildChunks(embedder Embedder, source, content string) []*db.Chunk {
 // commitIndex persists a prepared document and its chunks to the database.
 // The caller must pass the already-fetched existing document (or nil for new
 // documents) so commitIndex avoids a redundant GetDocument round-trip.
-func commitIndex(dbClient db.Store, path string, chunks []*db.Chunk, doc *db.Document, existing *db.Document) error {
+// sidecarPath, when non-empty, is a detected extraction sidecar to import
+// after the chunks are saved (so chunk spans are available for linking).
+func commitIndex(dbClient db.Store, path string, chunks []*db.Chunk, doc *db.Document, existing *db.Document, sidecarPath string) error {
 	if existing != nil {
 		if err := dbClient.DeleteDocument(path); err != nil {
 			return fmt.Errorf("failed to delete old document version: %w", err)
@@ -479,6 +490,14 @@ func commitIndex(dbClient db.Store, path string, chunks []*db.Chunk, doc *db.Doc
 	}
 	if err := dbClient.SaveChunks(chunks); err != nil {
 		return fmt.Errorf("failed to save chunks: %w", err)
+	}
+
+	if sidecarPath != "" {
+		if err := ImportExtractionSidecar(dbClient, path, sidecarPath); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to import extraction sidecar %s for %s: %v\n", sidecarPath, path, err)
+		} else {
+			fmt.Fprintf(os.Stderr, "Imported extraction sidecar: %s\n", sidecarPath)
+		}
 	}
 
 	fmt.Fprintf(os.Stderr, "Indexed: %s (%d chunks)\n", path, len(chunks))

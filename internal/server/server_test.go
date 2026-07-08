@@ -26,15 +26,15 @@ import (
 // ---------------------------------------------------------------------------
 
 type mockStore struct {
-	getStatsFn            func() (*db.Stats, error)
-	searchBM25Fn          func(query string, limit int) ([]*db.SearchResult, error)
-	searchVectorFn        func(queryVec []float32, limit int) ([]*db.SearchResult, error)
-	listDocumentsFn       func() ([]*db.Document, error)
-	deleteDocumentFn      func(path string) error
-	saveDocumentFn        func(doc *db.Document) error
-	saveChunksFn          func(chunks []*db.Chunk) error
-	getDocumentFn         func(path string) (*db.Document, error)
-	getChunksForDocFn     func(path string) ([]*db.Chunk, error)
+	getStatsFn        func() (*db.Stats, error)
+	searchBM25Fn      func(query string, limit int) ([]*db.SearchResult, error)
+	searchVectorFn    func(queryVec []float32, limit int) ([]*db.SearchResult, error)
+	listDocumentsFn   func() ([]*db.Document, error)
+	deleteDocumentFn  func(path string) error
+	saveDocumentFn    func(doc *db.Document) error
+	saveChunksFn      func(chunks []*db.Chunk) error
+	getDocumentFn     func(path string) (*db.Document, error)
+	getChunksForDocFn func(path string) ([]*db.Chunk, error)
 }
 
 func (m *mockStore) Close() error { return nil }
@@ -69,6 +69,18 @@ func (m *mockStore) GetFolderContexts() ([]db.FolderContext, error) {
 	return nil, nil
 }
 func (m *mockStore) GetMatchingContext(path string) (*db.FolderContext, error) {
+	return nil, nil
+}
+
+func (m *mockStore) SaveExtractions(extractions []*db.Extraction) error { return nil }
+func (m *mockStore) DeleteExtractionsForDocument(docPath string) error  { return nil }
+func (m *mockStore) GetDocumentExtractions(docPath string) ([]*db.Extraction, error) {
+	return nil, nil
+}
+func (m *mockStore) ListExtractions(class string, limit int) ([]*db.Extraction, error) {
+	return nil, nil
+}
+func (m *mockStore) SearchExtractions(queryStr string, limit int) ([]*db.Extraction, error) {
 	return nil, nil
 }
 
@@ -115,7 +127,7 @@ func (m *mockStore) GetChunksForDocument(docPath string) ([]*db.Chunk, error) {
 }
 
 func (m *mockStore) Upsert(_ context.Context, _ []*db.Chunk) error { return nil }
-func (m *mockStore) Delete(_ context.Context, _ string) error     { return nil }
+func (m *mockStore) Delete(_ context.Context, _ string) error      { return nil }
 func (m *mockStore) Search(_ context.Context, queryVec []float32, limit int) ([]*db.SearchResult, error) {
 	if m.searchVectorFn != nil {
 		return m.searchVectorFn(queryVec, limit)
@@ -1167,7 +1179,7 @@ func TestMux_IndexEndpoint_Success(t *testing.T) {
 	var savedChunks bool
 	store := &mockStore{
 		listDocumentsFn: func() ([]*db.Document, error) { return nil, nil },
-		saveDocumentFn: func(doc *db.Document) error { return nil },
+		saveDocumentFn:  func(doc *db.Document) error { return nil },
 		saveChunksFn: func(chunks []*db.Chunk) error {
 			savedChunks = true
 			return nil
