@@ -11,7 +11,7 @@ cd "$ROOT_DIR"
 
 echo "=== 1. Building Go Backend ==="
 # CGO_ENABLED=0 to stay 100% CGO-free as per guidelines
-CGO_ENABLED=0 go build -ldflags "-s -w -X main.version=2.3.0" -o symseek cmd/symseek/main.go
+CGO_ENABLED=0 go build -ldflags "-s -w -X main.version=2.3.1" -o symseek cmd/symseek/main.go
 echo "Go binary built at ./symseek"
 
 echo "=== 2. Building Swift GUI Client ==="
