@@ -270,5 +270,5 @@ func indexContent(dbClient db.Store, embedder Embedder, source, content string) 
 		Hash:      currentHash,
 		UpdatedAt: time.Now(),
 	}
-	return commitIndex(dbClient, source, chunks, doc, existing)
+	return commitIndex(dbClient, source, chunks, doc, existing, "")
 }
