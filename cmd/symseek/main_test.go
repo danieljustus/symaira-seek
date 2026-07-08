@@ -35,6 +35,7 @@ func resetGlobals() {
 	sourceFlag = ""
 	verboseFlag = false
 	quietFlag = false
+	pathFilterFlag = ""
 }
 
 // setupTestEnv sets HOME to a fresh temporary directory and resets all global
@@ -407,6 +408,52 @@ func TestSearchCmd_PlainWithLimit(t *testing.T) {
 	})
 	if !strings.Contains(out, "No matching documents found.") {
 		t.Errorf("expected no-results message, got %q", out)
+	}
+}
+
+// TestSearchCmd_PathFilter is a regression test for issue #254. The --path flag
+// must restrict results to documents whose path starts with the given prefix.
+func TestSearchCmd_PathFilter(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	resetGlobals()
+	cfg = *config.DefaultConfig()
+
+	docsDir := filepath.Join(tmpDir, "docs")
+	scopeDir := filepath.Join(docsDir, "project-a")
+	otherDir := filepath.Join(docsDir, "project-b")
+	if err := os.MkdirAll(scopeDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(otherDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(scopeDir, "readme.md"), []byte("scoped search target content"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(otherDir, "readme.md"), []byte("other project content"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	indexCmd := newRootCmd()
+	indexCmd.SetArgs([]string{"index", docsDir})
+	if err := indexCmd.Execute(); err != nil {
+		t.Fatalf("index failed: %v", err)
+	}
+
+	searchCmd := newRootCmd()
+	searchCmd.SetArgs([]string{"search", "scoped target", "--path", scopeDir + string(filepath.Separator), "--plain", "--limit", "10"})
+	out := captureStdout(t, func() {
+		if err := searchCmd.Execute(); err != nil {
+			t.Fatalf("search failed: %v", err)
+		}
+	})
+
+	if !strings.Contains(out, scopeDir) {
+		t.Errorf("expected scoped result path %q in output, got %q", scopeDir, out)
+	}
+	if strings.Contains(out, otherDir) {
+		t.Errorf("expected no results from %q, got %q", otherDir, out)
 	}
 }
 

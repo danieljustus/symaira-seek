@@ -37,6 +37,7 @@ var (
 	jsonFlag    bool
 	tuiFlag     bool
 	plainFlag   bool
+	pathFilterFlag string
 	watchFlag   bool
 	portFlag    int
 	urlFlag     string
@@ -92,7 +93,7 @@ func newRootCmd() *cobra.Command {
 			defer dbClient.Close()
 
 			embedder := engine.NewEmbeddingsGeneratorWithOllamaConfig(cfg.OllamaConfig())
-			searchOpts := engine.SearchOptions{ExpandCfg: cfg.ExpandConfig()}
+			searchOpts := engine.SearchOptions{ExpandCfg: cfg.ExpandConfig(), PathFilter: pathFilterFlag}
 
 			results, err := engine.SearchHybridWithOptions(dbClient, dbClient, embedder, query, limitFlag, searchOpts)
 			if err != nil {
@@ -125,6 +126,7 @@ func newRootCmd() *cobra.Command {
 	searchCmd.Flags().BoolVar(&jsonFlag, "json", false, "Output results in JSON format")
 	searchCmd.Flags().BoolVar(&tuiFlag, "tui", false, "Launch interactive TUI browser for results")
 	searchCmd.Flags().BoolVar(&plainFlag, "plain", false, "Output plain human-readable results instead of launching the TUI")
+	searchCmd.Flags().StringVar(&pathFilterFlag, "path", "", "Limit search to documents whose path starts with this prefix")
 	rootCmd.AddCommand(searchCmd)
 
 	// 2. Index Command

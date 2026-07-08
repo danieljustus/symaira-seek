@@ -28,7 +28,8 @@ type fakeStore struct {
 	listExtractionsFunc   func(class string, limit int) ([]*db.Extraction, error)
 	getDocExtractionsFunc func(docPath string) ([]*db.Extraction, error)
 
-	folderContexts map[string]string
+	folderContexts     map[string]string
+	capturedPathPrefix string
 }
 
 func (f *fakeStore) Close() error                                             { return nil }
@@ -59,8 +60,18 @@ func (f *fakeStore) SearchBM25(query string, limit int) ([]*db.SearchResult, err
 	return []*db.SearchResult{}, nil
 }
 
+func (f *fakeStore) SearchBM25WithPath(query string, pathPrefix string, limit int) ([]*db.SearchResult, error) {
+	f.capturedPathPrefix = pathPrefix
+	return f.SearchBM25(query, limit)
+}
+
 func (f *fakeStore) SearchVector(queryVec []float32, limit int) ([]*db.SearchResult, error) {
 	return []*db.SearchResult{}, nil
+}
+
+func (f *fakeStore) SearchVectorWithPath(queryVec []float32, pathPrefix string, limit int) ([]*db.SearchResult, error) {
+	f.capturedPathPrefix = pathPrefix
+	return f.SearchVector(queryVec, limit)
 }
 
 func (f *fakeStore) DetectMixedEmbeddingSpaces() (map[string]int, error) {
@@ -125,6 +136,10 @@ func (f *fakeStore) GetMatchingContext(path string) (*db.FolderContext, error) {
 func (f *fakeStore) Upsert(_ context.Context, _ []*db.Chunk) error { return nil }
 func (f *fakeStore) Delete(_ context.Context, _ string) error      { return nil }
 func (f *fakeStore) Search(_ context.Context, _ []float32, _ int) ([]*db.SearchResult, error) {
+	return []*db.SearchResult{}, nil
+}
+func (f *fakeStore) SearchWithPath(_ context.Context, _ []float32, pathPrefix string, _ int) ([]*db.SearchResult, error) {
+	f.capturedPathPrefix = pathPrefix
 	return []*db.SearchResult{}, nil
 }
 
@@ -436,6 +451,36 @@ func TestServerSearchDocumentsMissingQuery(t *testing.T) {
 	}
 	if result["isError"] != true {
 		t.Fatal("expected isError=true for missing query")
+	}
+}
+
+// TestServerSearchDocumentsWithPathPrefix is a regression test for issue #254.
+// The path_prefix argument must be forwarded to the search backend.
+func TestServerSearchDocumentsWithPathPrefix(t *testing.T) {
+	store := &fakeStore{}
+	embed := &fakeEmbedder{}
+	server := newTestServer(store, store, embed)
+
+	params, _ := json.Marshal(map[string]interface{}{
+		"name": "search_documents",
+		"arguments": map[string]interface{}{
+			"query":       "test query",
+			"limit":       float64(5),
+			"path_prefix": "/home/user/docs/project-a/",
+		},
+	})
+	resp := pipeRequest(t, server, jsonRPCRequest{
+		JSONRPC: "2.0",
+		ID:      float64(1),
+		Method:  "tools/call",
+		Params:  params,
+	})
+
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %v", resp.Error)
+	}
+	if store.capturedPathPrefix != "/home/user/docs/project-a/" {
+		t.Errorf("expected path prefix %q, got %q", "/home/user/docs/project-a/", store.capturedPathPrefix)
 	}
 }
 

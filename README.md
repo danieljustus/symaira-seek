@@ -120,6 +120,11 @@ Export structured search results directly to JSON:
 ./symseek search "renewable energy optimization" --json
 ```
 
+Restrict a search to a subtree with `--path`:
+```bash
+./symseek search "renewable energy optimization" --path /home/user/documents/project-a --limit 5
+```
+
 ### Get Database Stats
 ```bash
 ./symseek status
@@ -238,11 +243,35 @@ To use Symaira-Seek as an MCP tool for AI clients (like Claude Desktop or Cursor
 ```json
 {
   "query": "renewable energy optimization",
-  "limit": 5
+  "limit": 5,
+  "format": "json"
 }
 ```
 
-Returns formatted search results with file paths, chunk indices, and RRF scores.
+Returns structured search results (default `format`: `json`). Each hit contains the document path, stable chunk ID, character offsets into the source document, RRF score, and a snippet. Use `format: "text"` for the legacy human-readable output.
+
+Example result:
+```json
+[
+  {
+    "path": "/home/user/documents/report.md",
+    "chunk_id": "a1b2c3d4...",
+    "char_start": 1240,
+    "char_end": 1890,
+    "score": 0.0342,
+    "snippet": "renewable energy optimization..."
+  }
+]
+```
+
+Scope the search to a subtree with `path_prefix`:
+```json
+{
+  "query": "renewable energy optimization",
+  "limit": 5,
+  "path_prefix": "/home/user/documents/project-a"
+}
+```
 
 #### read_document
 ```json

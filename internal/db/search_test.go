@@ -198,3 +198,116 @@ func BenchmarkSearchVectorCosineBaseline(b *testing.B) {
 		}
 	}
 }
+
+// TestSearchBM25WithPath is a regression test for issue #254. The BM25 leg must
+// apply the path prefix in SQL so that results are restricted before the
+// limit is applied.
+func TestSearchBM25WithPath(t *testing.T) {
+	d := setupDB(t)
+
+	now := time.Now()
+	docs := []string{
+		"/home/user/docs/project-a/readme.md",
+		"/home/user/docs/project-a/spec.md",
+		"/home/user/docs/project-b/readme.md",
+	}
+	for _, p := range docs {
+		if err := d.SaveDocument(&Document{Path: p, Hash: "h-" + p, UpdatedAt: now}); err != nil {
+			t.Fatalf("SaveDocument: %v", err)
+		}
+	}
+
+	chunks := []*Chunk{
+		makeChunk("u-a-readme", docs[0], 0, "project alpha documentation", 10),
+		makeChunk("u-a-spec", docs[1], 0, "project alpha specification", 20),
+		makeChunk("u-b-readme", docs[2], 0, "project beta documentation", 30),
+	}
+	if err := d.SaveChunks(chunks); err != nil {
+		t.Fatalf("SaveChunks: %v", err)
+	}
+
+	all, err := d.SearchBM25("documentation", 10)
+	if err != nil {
+		t.Fatalf("SearchBM25: %v", err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("expected 2 documentation hits without filter, got %d", len(all))
+	}
+
+	scoped, err := d.SearchBM25WithPath("documentation", "/home/user/docs/project-a/", 10)
+	if err != nil {
+		t.Fatalf("SearchBM25WithPath: %v", err)
+	}
+	if len(scoped) != 1 {
+		t.Fatalf("expected 1 scoped hit, got %d", len(scoped))
+	}
+	if scoped[0].Chunk.DocumentPath != docs[0] {
+		t.Errorf("expected path %q, got %q", docs[0], scoped[0].Chunk.DocumentPath)
+	}
+
+	empty, err := d.SearchBM25WithPath("documentation", "/nonexistent/", 10)
+	if err != nil {
+		t.Fatalf("SearchBM25WithPath empty: %v", err)
+	}
+	if len(empty) != 0 {
+		t.Errorf("expected 0 hits for nonexistent prefix, got %d", len(empty))
+	}
+}
+
+// TestSearchVectorWithPath is a regression test for issue #254. The vector leg
+// must apply the path prefix before scoring so that the limit is applied to
+// scoped results.
+func TestSearchVectorWithPath(t *testing.T) {
+	d := setupDB(t)
+
+	now := time.Now()
+	docs := []string{
+		"/home/user/docs/project-a/readme.md",
+		"/home/user/docs/project-b/readme.md",
+	}
+	for _, p := range docs {
+		if err := d.SaveDocument(&Document{Path: p, Hash: "h-" + p, UpdatedAt: now}); err != nil {
+			t.Fatalf("SaveDocument: %v", err)
+		}
+	}
+
+	chunks := []*Chunk{
+		makeChunk("u-a-readme", docs[0], 0, "project alpha", 10),
+		makeChunk("u-b-readme", docs[1], 0, "project beta", 20),
+	}
+	if err := d.SaveChunks(chunks); err != nil {
+		t.Fatalf("SaveChunks: %v", err)
+	}
+
+	queryVec := make([]float32, 768)
+	for i := range queryVec {
+		queryVec[i] = float32(10+i) / 1000.0
+	}
+
+	all, err := d.SearchVector(queryVec, 10)
+	if err != nil {
+		t.Fatalf("SearchVector: %v", err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("expected 2 vector hits without filter, got %d", len(all))
+	}
+
+	scoped, err := d.SearchVectorWithPath(queryVec, "/home/user/docs/project-a/", 10)
+	if err != nil {
+		t.Fatalf("SearchVectorWithPath: %v", err)
+	}
+	if len(scoped) != 1 {
+		t.Fatalf("expected 1 scoped hit, got %d", len(scoped))
+	}
+	if scoped[0].Chunk.DocumentPath != docs[0] {
+		t.Errorf("expected path %q, got %q", docs[0], scoped[0].Chunk.DocumentPath)
+	}
+
+	empty, err := d.SearchVectorWithPath(queryVec, "/nonexistent/", 10)
+	if err != nil {
+		t.Fatalf("SearchVectorWithPath empty: %v", err)
+	}
+	if len(empty) != 0 {
+		t.Errorf("expected 0 hits for nonexistent prefix, got %d", len(empty))
+	}
+}

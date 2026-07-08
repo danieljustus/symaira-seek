@@ -53,12 +53,13 @@ func registerSearchDocuments(server *mcpserver.Server, dbClient db.Store, vector
 	server.RegisterTool(&mcpserver.Tool{
 		Name:        "search_documents",
 		Description: "Search the local document index for relevant content using hybrid keyword (BM25) and vector search. Use when the user asks about specific topics, files, or information that might be indexed.",
-		InputSchema: json.RawMessage(`{"type":"object","properties":{"query":{"type":"string","description":"Natural language search query"},"limit":{"type":"integer","description":"Maximum number of search results to return (default 5)"},"format":{"type":"string","description":"Output format: 'json' (structured results) or 'text' (human-readable). Default: 'json'."}},"required":["query"]}`),
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"query":{"type":"string","description":"Natural language search query"},"limit":{"type":"integer","description":"Maximum number of search results to return (default 5)"},"format":{"type":"string","description":"Output format: 'json' (structured results) or 'text' (human-readable). Default: 'json'."},"path_prefix":{"type":"string","description":"Optional document path prefix to restrict search results to a subtree"}},"required":["query"]}`),
 		Handler: func(ctx context.Context, input json.RawMessage) (any, error) {
 			var params struct {
-				Query  string `json:"query"`
-				Limit  int    `json:"limit"`
-				Format string `json:"format"`
+				Query      string `json:"query"`
+				Limit      int    `json:"limit"`
+				Format     string `json:"format"`
+				PathPrefix string `json:"path_prefix"`
 			}
 			if err := json.Unmarshal(input, &params); err != nil {
 				return nil, &symerrors.ValidationError{Field: "params", Message: err.Error()}
@@ -70,7 +71,9 @@ func registerSearchDocuments(server *mcpserver.Server, dbClient db.Store, vector
 				params.Limit = 5
 			}
 
-			results, err := engine.SearchHybridWithOptions(dbClient, vectorStore, embedder, params.Query, params.Limit, searchOpts)
+			opts := searchOpts
+			opts.PathFilter = params.PathPrefix
+			results, err := engine.SearchHybridWithOptions(dbClient, vectorStore, embedder, params.Query, params.Limit, opts)
 			if err != nil {
 				return nil, &symerrors.SearchError{Query: params.Query, Err: err}
 			}

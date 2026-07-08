@@ -132,6 +132,8 @@ type Store interface {
 	GetStats() (*Stats, error)
 	SearchBM25(queryStr string, limit int) ([]*SearchResult, error)
 	SearchVector(queryVec []float32, limit int) ([]*SearchResult, error)
+	SearchBM25WithPath(queryStr string, pathPrefix string, limit int) ([]*SearchResult, error)
+	SearchVectorWithPath(queryVec []float32, pathPrefix string, limit int) ([]*SearchResult, error)
 	DetectMixedEmbeddingSpaces() (map[string]int, error)
 	SetFolderContext(path, text string) error
 	GetFolderContexts() ([]FolderContext, error)

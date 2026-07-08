@@ -24,36 +24,49 @@ type quantCandidate struct {
 }
 
 func (db *DB) SearchVectorQuantized(queryVec []float32, limit int) ([]*SearchResult, error) {
+	return db.SearchVectorQuantizedWithPath(queryVec, "", limit)
+}
+
+func (db *DB) SearchVectorQuantizedWithPath(queryVec []float32, pathPrefix string, limit int) ([]*SearchResult, error) {
 	if limit <= 0 {
 		return nil, nil
 	}
 	cfg := db.quantConfig
 	if cfg == nil || !cfg.Enabled {
-		return db.SearchVector(queryVec, limit)
+		return db.SearchVectorWithPath(queryVec, pathPrefix, limit)
 	}
 
 	queryNorm := l2Norm(queryVec)
 	db.checkGeneration()
 
-	results, err := db.searchVectorQuantizedInner(queryVec, queryNorm, cfg, limit)
+	results, err := db.searchVectorQuantizedInnerWithPath(queryVec, queryNorm, pathPrefix, cfg, limit)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warning: quantized search failed, falling back to standard search: %v\n", err)
-		return db.SearchVector(queryVec, limit)
+		return db.SearchVectorWithPath(queryVec, pathPrefix, limit)
 	}
 	return results, nil
 }
 
 func (db *DB) searchVectorQuantizedInner(queryVec []float32, queryNorm float32, cfg *QuantConfig, limit int) ([]*SearchResult, error) {
+	return db.searchVectorQuantizedInnerWithPath(queryVec, queryNorm, "", cfg, limit)
+}
+
+func (db *DB) searchVectorQuantizedInnerWithPath(queryVec []float32, queryNorm float32, pathPrefix string, cfg *QuantConfig, limit int) ([]*SearchResult, error) {
 	codec, err := turboquant.NewCodec(len(queryVec), turboquant.BitWidth(cfg.BitWidth), cfg.Seed, 0)
 	if err != nil {
 		return nil, fmt.Errorf("create codec: %w", err)
 	}
 
-	rows, err := db.conn.Query(
-		`SELECT id, uuid, document_path, chunk_index, hash, norm, embedding_dim, embedding_model,
+	query := `SELECT id, uuid, document_path, chunk_index, hash, norm, embedding_dim, embedding_model,
 		        embedding_quant, embedding_quant_meta
-		 FROM chunks WHERE embedding_quant IS NOT NULL`,
-	)
+		 FROM chunks WHERE embedding_quant IS NOT NULL`
+	args := []any{}
+	if pathPrefix != "" {
+		query += " AND document_path LIKE ? || '%'"
+		args = append(args, pathPrefix)
+	}
+
+	rows, err := db.conn.Query(query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("quantized scan query: %w", err)
 	}
@@ -125,7 +138,7 @@ func (db *DB) searchVectorQuantizedInner(queryVec []float32, queryNorm float32, 
 		shortlistIDs[i] = c.id
 	}
 
-	return db.exactRerankShortlist(queryVec, queryNorm, shortlistIDs, limit)
+	return db.exactRerankShortlistWithPath(queryVec, queryNorm, pathPrefix, shortlistIDs, limit)
 }
 
 func (db *DB) buildQuantResults(candidates []quantCandidate, limit int) ([]*SearchResult, error) {
@@ -157,16 +170,26 @@ func (db *DB) buildQuantResults(candidates []quantCandidate, limit int) ([]*Sear
 }
 
 func (db *DB) exactRerankShortlist(queryVec []float32, queryNorm float32, shortlistIDs []int64, limit int) ([]*SearchResult, error) {
+	return db.exactRerankShortlistWithPath(queryVec, queryNorm, "", shortlistIDs, limit)
+}
+
+func (db *DB) exactRerankShortlistWithPath(queryVec []float32, queryNorm float32, pathPrefix string, shortlistIDs []int64, limit int) ([]*SearchResult, error) {
 	placeholders := make([]string, len(shortlistIDs))
-	args := make([]interface{}, len(shortlistIDs))
+	args := make([]interface{}, 0, len(shortlistIDs)+1)
 	for i, id := range shortlistIDs {
 		placeholders[i] = "?"
-		args[i] = id
+		args = append(args, id)
+	}
+
+	whereClause := fmt.Sprintf("id IN (%s)", strings.Join(placeholders, ","))
+	if pathPrefix != "" {
+		whereClause += " AND document_path LIKE ? || '%'"
+		args = append(args, pathPrefix)
 	}
 
 	query := fmt.Sprintf(
-		"SELECT id, uuid, document_path, chunk_index, embedding, hash, norm, embedding_dim, embedding_model FROM chunks WHERE id IN (%s)",
-		strings.Join(placeholders, ","),
+		"SELECT id, uuid, document_path, chunk_index, embedding, hash, norm, embedding_dim, embedding_model FROM chunks WHERE %s",
+		whereClause,
 	)
 
 	fetchRows, err := db.conn.Query(query, args...)
