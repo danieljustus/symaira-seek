@@ -2,7 +2,6 @@ package engine
 
 import (
 	"encoding/json"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -35,8 +34,11 @@ func TestNewEmbeddingsGeneratorWithOllamaConfig_AppliesConfig(t *testing.T) {
 	if eg.RetryBackoff != cfg.RetryBackoff {
 		t.Errorf("expected RetryBackoff %v, got %v", cfg.RetryBackoff, eg.RetryBackoff)
 	}
-	if eg.httpClient.Timeout != cfg.Timeout {
-		t.Errorf("expected httpClient.Timeout %v, got %v", cfg.Timeout, eg.httpClient.Timeout)
+	if eg.ollama == nil {
+		t.Fatal("expected the ollamakit client to be initialized")
+	}
+	if eg.ollama.BaseURL() != "http://example.test" {
+		t.Errorf("expected ollamakit base URL %q, got %q", "http://example.test", eg.ollama.BaseURL())
 	}
 }
 
@@ -73,15 +75,32 @@ func TestNewEmbeddingsGeneratorWithOllamaConfig_PositiveRetryCountHonored(t *tes
 	}
 }
 
-func TestDoOllamaRequest_SuccessOnFirstTry(t *testing.T) {
-	var calls int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		atomic.AddInt32(&calls, 1)
+// embedServer returns an httptest server that answers Ollama's /api/embed
+// endpoint. handler receives the decoded input texts and returns the
+// vectors to send back (one per input, in order).
+func embedServer(t *testing.T, handler func(inputs []string) (status int, vecs [][]float32)) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Model string   `json:"model"`
+			Input []string `json:"input"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		status, vecs := handler(req.Input)
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{
-			"embedding": []float32{0.1, 0.2, 0.3},
-		})
+		w.WriteHeader(status)
+		if status >= 200 && status < 300 {
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"embeddings": vecs})
+		}
 	}))
+}
+
+func TestQueryOllama_SuccessOnFirstTry(t *testing.T) {
+	var calls int32
+	srv := embedServer(t, func(inputs []string) (int, [][]float32) {
+		atomic.AddInt32(&calls, 1)
+		return http.StatusOK, [][]float32{{0.1, 0.2, 0.3}}
+	})
 	defer srv.Close()
 
 	eg := NewEmbeddingsGeneratorWithOllamaConfig(OllamaConfig{
@@ -90,34 +109,26 @@ func TestDoOllamaRequest_SuccessOnFirstTry(t *testing.T) {
 		RetryCount:   2,
 		RetryBackoff: 10 * time.Millisecond,
 	})
-	var res struct {
-		Embedding []float32 `json:"embedding"`
-	}
-	if err := eg.doOllamaRequest(srv.URL, []byte(`{}`), &res); err != nil {
+	vec, err := eg.queryOllama("hello")
+	if err != nil {
 		t.Fatalf("expected success, got %v", err)
 	}
 	if got := atomic.LoadInt32(&calls); got != 1 {
 		t.Errorf("expected 1 call, got %d", got)
 	}
-	if len(res.Embedding) != 3 {
-		t.Errorf("expected 3-dim embedding, got %d", len(res.Embedding))
+	if len(vec) != 3 {
+		t.Errorf("expected 3-dim embedding, got %d", len(vec))
 	}
 }
 
-func TestDoOllamaRequest_RetriesOn5xx(t *testing.T) {
+func TestQueryOllama_Retries5xx(t *testing.T) {
 	var calls int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		n := atomic.AddInt32(&calls, 1)
-		if n < 3 {
-			w.WriteHeader(http.StatusBadGateway)
-			io.WriteString(w, "transient")
-			return
+	srv := embedServer(t, func(inputs []string) (int, [][]float32) {
+		if atomic.AddInt32(&calls, 1) < 3 {
+			return http.StatusBadGateway, nil
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{
-			"embedding": []float32{0.5},
-		})
-	}))
+		return http.StatusOK, [][]float32{{0.5}}
+	})
 	defer srv.Close()
 
 	eg := NewEmbeddingsGeneratorWithOllamaConfig(OllamaConfig{
@@ -126,23 +137,24 @@ func TestDoOllamaRequest_RetriesOn5xx(t *testing.T) {
 		RetryCount:   2,
 		RetryBackoff: 1 * time.Millisecond,
 	})
-	var res struct {
-		Embedding []float32 `json:"embedding"`
-	}
-	if err := eg.doOllamaRequest(srv.URL, []byte(`{}`), &res); err != nil {
+	vec, err := eg.queryOllama("hello")
+	if err != nil {
 		t.Fatalf("expected eventual success, got %v", err)
 	}
 	if got := atomic.LoadInt32(&calls); got != 3 {
 		t.Errorf("expected 3 calls (2 retries), got %d", got)
 	}
+	if len(vec) != 1 {
+		t.Errorf("expected 1-dim embedding, got %d", len(vec))
+	}
 }
 
-func TestDoOllamaRequest_GivesUpAfterMaxRetries(t *testing.T) {
+func TestQueryOllama_GivesUpAfterMaxRetries(t *testing.T) {
 	var calls int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := embedServer(t, func(inputs []string) (int, [][]float32) {
 		atomic.AddInt32(&calls, 1)
-		w.WriteHeader(http.StatusInternalServerError)
-	}))
+		return http.StatusInternalServerError, nil
+	})
 	defer srv.Close()
 
 	eg := NewEmbeddingsGeneratorWithOllamaConfig(OllamaConfig{
@@ -151,10 +163,7 @@ func TestDoOllamaRequest_GivesUpAfterMaxRetries(t *testing.T) {
 		RetryCount:   2,
 		RetryBackoff: 1 * time.Millisecond,
 	})
-	var res struct {
-		Embedding []float32 `json:"embedding"`
-	}
-	if err := eg.doOllamaRequest(srv.URL, []byte(`{}`), &res); err == nil {
+	if _, err := eg.queryOllama("hello"); err == nil {
 		t.Fatal("expected exhaustion error")
 	}
 	if got := atomic.LoadInt32(&calls); got != 3 {
@@ -162,13 +171,12 @@ func TestDoOllamaRequest_GivesUpAfterMaxRetries(t *testing.T) {
 	}
 }
 
-func TestDoOllamaRequest_DoesNotRetry4xx(t *testing.T) {
+func TestQueryOllama_DoesNotRetryModelNotFound(t *testing.T) {
 	var calls int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := embedServer(t, func(inputs []string) (int, [][]float32) {
 		atomic.AddInt32(&calls, 1)
-		w.WriteHeader(http.StatusBadRequest)
-		io.WriteString(w, "client error")
-	}))
+		return http.StatusNotFound, nil
+	})
 	defer srv.Close()
 
 	eg := NewEmbeddingsGeneratorWithOllamaConfig(OllamaConfig{
@@ -177,19 +185,15 @@ func TestDoOllamaRequest_DoesNotRetry4xx(t *testing.T) {
 		RetryCount:   3,
 		RetryBackoff: 1 * time.Millisecond,
 	})
-	var res struct {
-		Embedding []float32 `json:"embedding"`
-	}
-	err := eg.doOllamaRequest(srv.URL, []byte(`{}`), &res)
-	if err == nil {
-		t.Fatal("expected error on 4xx")
+	if _, err := eg.queryOllama("hello"); err == nil {
+		t.Fatal("expected error for missing model")
 	}
 	if got := atomic.LoadInt32(&calls); got != 1 {
-		t.Errorf("expected exactly 1 call (no retry on 4xx), got %d", got)
+		t.Errorf("expected exactly 1 call (no retry on model-not-found), got %d", got)
 	}
 }
 
-func TestDoOllamaRequest_RetriesOnNetworkError(t *testing.T) {
+func TestQueryOllama_RetriesOnNetworkError(t *testing.T) {
 	eg := NewEmbeddingsGeneratorWithOllamaConfig(OllamaConfig{
 		URL:          "http://127.0.0.1:1/api/embeddings",
 		Model:        "test",
@@ -197,122 +201,34 @@ func TestDoOllamaRequest_RetriesOnNetworkError(t *testing.T) {
 		RetryBackoff: 1 * time.Millisecond,
 		Timeout:      200 * time.Millisecond,
 	})
-	var res struct {
-		Embedding []float32 `json:"embedding"`
-	}
-	if err := eg.doOllamaRequest(eg.OllamaURL, []byte(`{}`), &res); err == nil {
+	if _, err := eg.queryOllama("hello"); err == nil {
 		t.Fatal("expected connection error")
 	}
 }
 
-func TestQueryOllama_Retries5xx(t *testing.T) {
-	var calls int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if atomic.AddInt32(&calls, 1) == 1 {
-			w.WriteHeader(http.StatusServiceUnavailable)
-			return
-		}
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{
-			"embedding": []float32{0.7, 0.8, 0.9},
-		})
-	}))
-	defer srv.Close()
-
-	eg := NewEmbeddingsGeneratorWithOllamaConfig(OllamaConfig{
-		URL:          srv.URL,
-		Model:        "m",
-		RetryCount:   2,
-		RetryBackoff: 1 * time.Millisecond,
-	})
-	vec, err := eg.queryOllama("hello")
-	if err != nil {
-		t.Fatalf("expected success, got %v", err)
-	}
-	if len(vec) != 3 {
-		t.Errorf("expected 3-dim vector, got %d", len(vec))
-	}
-}
-
-// TestIsStopWordUsesPackageMap is a regression test for issue #47.
-// The stop-word set must be consulted from the package-level map
-// rather than rebuilt on every call. The set must still classify
-// known stop words (English and German) and reject ordinary tokens.
-// TestBatchURLDerivation verifies that batch embedding requests target
-// /api/embed when the configured URL is /api/embeddings (issue #67).
-func TestBatchURLDerivation(t *testing.T) {
-	tests := []struct {
-		name     string
-		config   string
-		expected string
-	}{
-		{
-			name:     "standard endpoint",
-			config:   "http://localhost:11434/api/embeddings",
-			expected: "http://localhost:11434/api/embed",
-		},
-		{
-			name:     "non-standard endpoint unchanged",
-			config:   "http://localhost:11434/custom",
-			expected: "http://localhost:11434/custom",
-		},
-		{
-			name:     "already embed endpoint",
-			config:   "http://localhost:11434/api/embed",
-			expected: "http://localhost:11434/api/embed",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			eg := NewEmbeddingsGeneratorWithOllamaConfig(OllamaConfig{URL: tt.config})
-			if got := eg.batchURL(); got != tt.expected {
-				t.Errorf("batchURL() = %q, want %q", got, tt.expected)
-			}
-		})
-	}
-}
-
-// TestGenerateVectors_BatchUsesCorrectEndpoint verifies that batch embedding
-// requests go to /api/embed, not /api/embeddings (issue #67).
-func TestGenerateVectors_BatchUsesCorrectEndpoint(t *testing.T) {
-	var singleHits, batchHits int32
-
-	// Create 768-dim vectors for the test
+// TestGenerateVectors_BatchSendsOneRequest verifies that a multi-text batch
+// is sent to Ollama's /api/embed endpoint as a single request, not one
+// request per text (issue #67).
+func TestGenerateVectors_BatchSendsOneRequest(t *testing.T) {
+	var batchHits int32
 	vec768 := make([]float32, 768)
-	for i := range vec768 {
-		vec768[i] = float32(i) / 768.0
-	}
 	vec768b := make([]float32, 768)
-	for i := range vec768b {
-		vec768b[i] = float32(i+1) / 768.0
-	}
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/api/embeddings":
-			atomic.AddInt32(&singleHits, 1)
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{
-				"embedding": vec768,
-			})
-		case "/api/embed":
-			atomic.AddInt32(&batchHits, 1)
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{
-				"embeddings": [][]float32{vec768, vec768b},
-			})
-		default:
-			http.NotFound(w, r)
+	srv := embedServer(t, func(inputs []string) (int, [][]float32) {
+		atomic.AddInt32(&batchHits, 1)
+		if len(inputs) != 2 {
+			t.Errorf("expected batch of 2 inputs, got %d", len(inputs))
 		}
-	}))
+		return http.StatusOK, [][]float32{vec768, vec768b}
+	})
 	defer srv.Close()
 
 	eg := NewEmbeddingsGeneratorWithOllamaConfig(OllamaConfig{
-		URL:   srv.URL + "/api/embeddings",
+		URL:   srv.URL,
 		Model: "test",
 	})
 
-	texts := []string{"alpha", "beta"}
-	vecs := eg.GenerateVectors(texts)
-
+	vecs := eg.GenerateVectors([]string{"alpha", "beta"})
 	if len(vecs) != 2 {
 		t.Fatalf("expected 2 vectors, got %d", len(vecs))
 	}
@@ -321,44 +237,13 @@ func TestGenerateVectors_BatchUsesCorrectEndpoint(t *testing.T) {
 			t.Errorf("vector %d: expected 768 dims, got %d", i, len(v))
 		}
 	}
-
 	if got := atomic.LoadInt32(&batchHits); got != 1 {
-		t.Errorf("expected 1 batch request to /api/embed, got %d", got)
-	}
-	if got := atomic.LoadInt32(&singleHits); got != 0 {
-		t.Errorf("expected 0 single requests to /api/embeddings, got %d", got)
-	}
-}
-
-// TestAllConstructorsHaveRedirectProtection verifies that every public
-// constructor produces an HTTP client that refuses to follow redirects
-// (issue #68).
-func TestAllConstructorsHaveRedirectProtection(t *testing.T) {
-	constructors := []struct {
-		name string
-		eg   *EmbeddingsGenerator
-	}{
-		{"NewEmbeddingsGenerator", NewEmbeddingsGenerator()},
-		{"NewEmbeddingsGeneratorWithConfig", NewEmbeddingsGeneratorWithConfig("http://localhost:11434/api/embeddings", "test")},
-		{"NewEmbeddingsGeneratorWithOllamaConfig", NewEmbeddingsGeneratorWithOllamaConfig(OllamaConfig{})},
-	}
-
-	for _, tc := range constructors {
-		t.Run(tc.name, func(t *testing.T) {
-			if tc.eg.httpClient.CheckRedirect == nil {
-				t.Error("CheckRedirect is nil — redirect protection is missing")
-			}
-			// Verify it returns ErrUseLastResponse
-			err := tc.eg.httpClient.CheckRedirect(nil, nil)
-			if err != http.ErrUseLastResponse {
-				t.Errorf("expected ErrUseLastResponse, got %v", err)
-			}
-		})
+		t.Errorf("expected 1 batch request, got %d", got)
 	}
 }
 
 // TestRedirectNotFollowed verifies that the embedder does not follow
-// a 301 redirect (issue #68).
+// a 301 redirect (issue #68) — enforced by ollamakit itself.
 func TestRedirectNotFollowed(t *testing.T) {
 	var redirectHits int32
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -419,10 +304,10 @@ func TestIsStopWordUsesPackageMap(t *testing.T) {
 // returns 5xx, then falls back to the local hash vector (issue #162).
 func TestGenerateVectorNoRetry_SkipsRetries(t *testing.T) {
 	var calls int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := embedServer(t, func(inputs []string) (int, [][]float32) {
 		atomic.AddInt32(&calls, 1)
-		w.WriteHeader(http.StatusInternalServerError)
-	}))
+		return http.StatusInternalServerError, nil
+	})
 	defer srv.Close()
 
 	var sleepCount int32
@@ -477,10 +362,10 @@ func TestGenerateVectorNoRetry_FastReturnWhenUnreachable(t *testing.T) {
 // preserving indexing-time retry behavior (issue #162).
 func TestGenerateVector_StillRetriesOnFailure(t *testing.T) {
 	var calls int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := embedServer(t, func(inputs []string) (int, [][]float32) {
 		atomic.AddInt32(&calls, 1)
-		w.WriteHeader(http.StatusInternalServerError)
-	}))
+		return http.StatusInternalServerError, nil
+	})
 	defer srv.Close()
 
 	var sleepCount int32
@@ -506,15 +391,15 @@ func TestGenerateVector_StillRetriesOnFailure(t *testing.T) {
 	}
 }
 
-// TestDoOllamaRequestWithRetries_ZeroRetriesMakesSingleAttempt verifies that
-// calling doOllamaRequestWithRetries with maxRetries=0 makes exactly one
-// HTTP request with no sleep (issue #162).
-func TestDoOllamaRequestWithRetries_ZeroRetriesMakesSingleAttempt(t *testing.T) {
+// TestEmbedWithRetries_ZeroRetriesMakesSingleAttempt verifies that calling
+// embedWithRetries with maxRetries=0 makes exactly one HTTP request with no
+// sleep (issue #162).
+func TestEmbedWithRetries_ZeroRetriesMakesSingleAttempt(t *testing.T) {
 	var calls int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := embedServer(t, func(inputs []string) (int, [][]float32) {
 		atomic.AddInt32(&calls, 1)
-		w.WriteHeader(http.StatusInternalServerError)
-	}))
+		return http.StatusInternalServerError, nil
+	})
 	defer srv.Close()
 
 	eg := NewEmbeddingsGeneratorWithOllamaConfig(OllamaConfig{
@@ -528,11 +413,7 @@ func TestDoOllamaRequestWithRetries_ZeroRetriesMakesSingleAttempt(t *testing.T) 
 		atomic.AddInt32(&sleepCount, 1)
 	}
 
-	var res struct {
-		Embedding []float32 `json:"embedding"`
-	}
-	err := eg.doOllamaRequestWithRetries(srv.URL, []byte(`{}`), &res, 0)
-	if err == nil {
+	if _, err := eg.embedWithRetries([]string{"hello"}, 0); err == nil {
 		t.Fatal("expected error from 500 response")
 	}
 	if got := atomic.LoadInt32(&calls); got != 1 {
@@ -544,12 +425,9 @@ func TestDoOllamaRequestWithRetries_ZeroRetriesMakesSingleAttempt(t *testing.T) 
 }
 
 func TestDim_CachesFirstOllamaResponse(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{
-			"embedding": make([]float32, 384),
-		})
-	}))
+	srv := embedServer(t, func(inputs []string) (int, [][]float32) {
+		return http.StatusOK, [][]float32{make([]float32, 384)}
+	})
 	defer srv.Close()
 
 	eg := NewEmbeddingsGeneratorWithOllamaConfig(OllamaConfig{
@@ -575,19 +453,13 @@ func TestDim_CachesFirstOllamaResponse(t *testing.T) {
 
 func TestDim_DifferentDimensionTriggersFallback(t *testing.T) {
 	var callCount int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := embedServer(t, func(inputs []string) (int, [][]float32) {
 		n := atomic.AddInt32(&callCount, 1)
-		w.Header().Set("Content-Type", "application/json")
 		if n <= 2 {
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{
-				"embedding": make([]float32, 384),
-			})
-		} else {
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{
-				"embedding": make([]float32, 512),
-			})
+			return http.StatusOK, [][]float32{make([]float32, 384)}
 		}
-	}))
+		return http.StatusOK, [][]float32{make([]float32, 512)}
+	})
 	defer srv.Close()
 
 	eg := NewEmbeddingsGeneratorWithOllamaConfig(OllamaConfig{
