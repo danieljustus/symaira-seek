@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -773,5 +774,79 @@ func TestIndexDirectory(t *testing.T) {
 	stats3, _ := dbClient.GetStats()
 	if stats3.DocumentCount != 1 {
 		t.Errorf("expected 1 document after orphan cleanup, got %d", stats3.DocumentCount)
+	}
+}
+
+// TestDeriveChunkIDDeterministic is a regression test for issue #252.
+// Chunk IDs must be deterministic functions of document path, content hash,
+// and character start offset so that unchanged chunks keep their IDs across
+// reindex runs.
+func TestDeriveChunkIDDeterministic(t *testing.T) {
+	id1 := deriveChunkID("/docs/a.md", "hash1", 42)
+	id2 := deriveChunkID("/docs/a.md", "hash1", 42)
+	if id1 != id2 {
+		t.Errorf("expected deterministic IDs for identical inputs, got %q and %q", id1, id2)
+	}
+
+	if deriveChunkID("/docs/a.md", "hash1", 42) == deriveChunkID("/docs/a.md", "hash2", 42) {
+		t.Error("different content hashes must produce different IDs")
+	}
+	if deriveChunkID("/docs/a.md", "hash1", 42) == deriveChunkID("/docs/a.md", "hash1", 43) {
+		t.Error("different char starts must produce different IDs")
+	}
+	if deriveChunkID("/docs/a.md", "hash1", 42) == deriveChunkID("/docs/b.md", "hash1", 42) {
+		t.Error("different document paths must produce different IDs")
+	}
+
+	// Sanity: output must be a valid UUID string.
+	if len(id1) != 36 {
+		t.Errorf("expected UUID string length 36, got %d (%q)", len(id1), id1)
+	}
+}
+
+// TestBuildChunksStableIDs is a regression test for issue #252. Reindexing an
+// unchanged document must produce the same chunk IDs. Editing a chunk must change
+// that chunk's ID while leaving textually and positionally unchanged chunks
+// with their original IDs.
+func TestBuildChunksStableIDs(t *testing.T) {
+	embedder := &fakeEmbedder{dim: 768}
+	path := "/docs/stable.md"
+
+	// Build content that splits deterministically into two chunks: the first
+	 // chunk is 1000 'a's, the second chunk is the trailing 200 'a's plus the
+	 // final 200 'b's (with 200-char overlap). Changing only the 'b' suffix
+	 // affects only the second chunk.
+	content := strings.Repeat("a", 1000) + strings.Repeat("b", 200)
+
+	chunks1 := buildChunks(embedder, path, content)
+	if len(chunks1) < 2 {
+		t.Fatalf("expected at least 2 chunks, got %d", len(chunks1))
+	}
+
+	chunks2 := buildChunks(embedder, path, content)
+	if len(chunks2) != len(chunks1) {
+		t.Fatalf("expected same chunk count on reindex, got %d and %d", len(chunks1), len(chunks2))
+	}
+
+	for i := range chunks1 {
+		if chunks1[i].UUID != chunks2[i].UUID {
+			t.Errorf("chunk %d: expected stable UUID on reindex, got %q then %q", i, chunks1[i].UUID, chunks2[i].UUID)
+		}
+	}
+
+	// Modify only the trailing 'b' suffix. The first chunk remains exactly the
+	// same 1000 'a's, so its ID must be unchanged. The second chunk's content
+	// changes, so its ID must change.
+	modifiedContent := strings.Repeat("a", 1000) + strings.Repeat("c", 200)
+	chunks3 := buildChunks(embedder, path, modifiedContent)
+	if len(chunks3) < len(chunks1) {
+		t.Fatalf("expected at least as many chunks after edit, got %d", len(chunks3))
+	}
+
+	if chunks3[0].UUID != chunks1[0].UUID {
+		t.Errorf("unchanged first chunk should keep its ID, got %q then %q", chunks1[0].UUID, chunks3[0].UUID)
+	}
+	if chunks3[len(chunks3)-1].UUID == chunks1[len(chunks1)-1].UUID {
+		t.Error("modified trailing chunk should get a new ID")
 	}
 }
