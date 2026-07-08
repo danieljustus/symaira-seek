@@ -1,21 +1,22 @@
 package engine
 
 import (
-	"bytes"
 	"container/list"
+	"context"
 	"crypto/sha256"
-	"encoding/json"
+	"errors"
 	"fmt"
 	"hash/fnv"
-	"io"
 	"math"
-	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
 	"time"
 
 	"golang.org/x/sync/singleflight"
+
+	"github.com/danieljustus/symaira-corekit/ollamakit"
 )
 
 const (
@@ -36,7 +37,7 @@ type EmbeddingsGenerator struct {
 	RetryBackoff time.Duration
 	configDim    int // from config; 0 means auto-detect from first response
 	sleepFn      func(time.Duration) // injectable for tests; defaults to time.Sleep
-	httpClient   *http.Client
+	ollama       *ollamakit.Client
 	cache        map[string]*list.Element
 	cacheOrder   *list.List
 	cacheMu      sync.Mutex
@@ -51,22 +52,41 @@ type cacheEntry struct {
 }
 
 func newEmbeddingsGenerator() *EmbeddingsGenerator {
-	return &EmbeddingsGenerator{
+	eg := &EmbeddingsGenerator{
 		OllamaURL:    "http://localhost:11434/api/embeddings",
 		Model:        "nomic-embed-text",
 		Timeout:      defaultOllamaTimeout,
 		RetryCount:   defaultOllamaRetries,
 		RetryBackoff: defaultOllamaBackoff,
 		sleepFn:      time.Sleep,
-		httpClient: &http.Client{
-			Timeout: defaultOllamaTimeout,
-			CheckRedirect: func(req *http.Request, via []*http.Request) error {
-				return http.ErrUseLastResponse
-			},
-		},
-		cache:      make(map[string]*list.Element),
-		cacheOrder: list.New(),
+		cache:        make(map[string]*list.Element),
+		cacheOrder:   list.New(),
 	}
+	eg.rebuildOllamaClient()
+	return eg
+}
+
+// rebuildOllamaClient (re)constructs the shared ollamakit client from the
+// generator's current OllamaURL/Model/Timeout. Must be called whenever any
+// of those fields change after construction.
+func (eg *EmbeddingsGenerator) rebuildOllamaClient() {
+	eg.ollama = ollamakit.New(ollamakit.Config{
+		BaseURL: ollamaBaseURL(eg.OllamaURL),
+		Model:   eg.Model,
+		Timeout: eg.Timeout,
+	})
+}
+
+// ollamaBaseURL strips a configured Ollama endpoint path (e.g.
+// "http://localhost:11434/api/embeddings" or ".../api/embed") down to the
+// scheme+host root ollamakit.Config.BaseURL expects. Malformed input is
+// passed through unchanged so ollamakit's own defaulting takes over.
+func ollamaBaseURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return raw
+	}
+	return u.Scheme + "://" + u.Host
 }
 
 const defaultEmbeddingDim = 768
@@ -154,6 +174,7 @@ func NewEmbeddingsGeneratorWithConfig(ollamaURL, model string) *EmbeddingsGenera
 	eg := newEmbeddingsGenerator()
 	eg.OllamaURL = ollamaURL
 	eg.Model = model
+	eg.rebuildOllamaClient()
 	return eg
 }
 
@@ -169,7 +190,7 @@ func NewEmbeddingsGeneratorWithOllamaConfig(cfg OllamaConfig) *EmbeddingsGenerat
 	eg.Timeout = cfg.Timeout
 	eg.RetryCount = cfg.RetryCount
 	eg.RetryBackoff = cfg.RetryBackoff
-	eg.httpClient.Timeout = cfg.Timeout
+	eg.rebuildOllamaClient()
 	return eg
 }
 
@@ -222,16 +243,6 @@ func (eg *EmbeddingsGenerator) generateVectorImpl(text string, maxRetries int) [
 	fallback := GenerateLocalHashVector(text, expectedDim)
 	eg.cachePut(key, fallback)
 	return fallback
-}
-
-// batchURL returns the Ollama endpoint for batch embedding requests.
-// The legacy /api/embeddings endpoint only supports single prompts;
-// batch requests must use the newer /api/embed endpoint instead.
-func (eg *EmbeddingsGenerator) batchURL() string {
-	if strings.HasSuffix(eg.OllamaURL, "/api/embeddings") {
-		return eg.OllamaURL[:len(eg.OllamaURL)-len("/api/embeddings")] + "/api/embed"
-	}
-	return eg.OllamaURL
 }
 
 func (eg *EmbeddingsGenerator) cachePut(key string, value []float32) {
@@ -360,53 +371,24 @@ func (eg *EmbeddingsGenerator) queryOllama(text string) ([]float32, error) {
 // queryOllamaWithRetries sends a single embedding request to Ollama,
 // retrying up to maxRetries times on transient failures.
 func (eg *EmbeddingsGenerator) queryOllamaWithRetries(text string, maxRetries int) ([]float32, error) {
-	reqBody, err := json.Marshal(map[string]string{
-		"model":  eg.Model,
-		"prompt": text,
-	})
+	vecs, err := eg.embedWithRetries([]string{text}, maxRetries)
 	if err != nil {
 		return nil, err
 	}
-
-	var res struct {
-		Embedding []float32 `json:"embedding"`
-	}
-	if err := eg.doOllamaRequestWithRetries(eg.OllamaURL, reqBody, &res, maxRetries); err != nil {
-		return nil, err
-	}
-	return res.Embedding, nil
+	return vecs[0], nil
 }
 
 // queryOllamaBatch sends a batch embedding request to Ollama.
-// Ollama's /api/embeddings endpoint supports a list in the "input" field
-// and returns "embeddings" as a list of vectors.
 func (eg *EmbeddingsGenerator) queryOllamaBatch(texts []string) ([][]float32, error) {
-	reqBody, err := json.Marshal(map[string]interface{}{
-		"model": eg.Model,
-		"input": texts,
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	var res struct {
-		Embeddings [][]float32 `json:"embeddings"`
-	}
-	if err := eg.doOllamaRequestWithRetries(eg.batchURL(), reqBody, &res, eg.RetryCount); err != nil {
-		return nil, err
-	}
-	return res.Embeddings, nil
+	return eg.embedWithRetries(texts, eg.RetryCount)
 }
 
-// doOllamaRequest sends an HTTP request to Ollama with the configured retry count.
-func (eg *EmbeddingsGenerator) doOllamaRequest(url string, reqBody []byte, result interface{}) error {
-	return eg.doOllamaRequestWithRetries(url, reqBody, result, eg.RetryCount)
-}
-
-// doOllamaRequestWithRetries is the core HTTP transport for Ollama embedding
-// requests. It retries up to maxRetries times on 5xx or network errors with
-// exponential backoff. A maxRetries of 0 means a single attempt with no sleep.
-func (eg *EmbeddingsGenerator) doOllamaRequestWithRetries(url string, reqBody []byte, result interface{}, maxRetries int) error {
+// embedWithRetries is the core transport for Ollama embedding requests via
+// ollamakit. It retries up to maxRetries times on unreachable-host or
+// unexpected-response errors with exponential backoff; a missing model is
+// not transient and returns immediately. A maxRetries of 0 means a single
+// attempt with no sleep.
+func (eg *EmbeddingsGenerator) embedWithRetries(texts []string, maxRetries int) ([][]float32, error) {
 	backoff := eg.RetryBackoff
 	if backoff <= 0 {
 		backoff = defaultOllamaBackoff
@@ -428,34 +410,31 @@ func (eg *EmbeddingsGenerator) doOllamaRequestWithRetries(url string, reqBody []
 			}
 		}
 
-		req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(reqBody))
-		if err != nil {
-			return err
+		vecs, err := eg.ollama.Embed(context.Background(), eg.Model, texts)
+		if err == nil {
+			return vecs, nil
 		}
-		req.Header.Set("Content-Type", "application/json")
-
-		resp, err := eg.httpClient.Do(req)
-		if err != nil {
-			lastErr = err
-			continue
+		if !isTransientOllamaError(err) {
+			return nil, err
 		}
-
-		if resp.StatusCode >= 500 {
-			lastErr = fmt.Errorf("ollama returned HTTP %d", resp.StatusCode)
-			io.Copy(io.Discard, resp.Body)
-			resp.Body.Close()
-			continue
-		}
-		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-			resp.Body.Close()
-			return fmt.Errorf("ollama returned HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
-		}
-
-		defer resp.Body.Close()
-		return json.NewDecoder(resp.Body).Decode(result)
+		lastErr = err
 	}
-	return fmt.Errorf("ollama: exhausted %d retries: %w", retries, lastErr)
+	return nil, fmt.Errorf("ollama: exhausted %d retries: %w", retries, lastErr)
+}
+
+// isTransientOllamaError reports whether err is worth retrying: the host
+// was unreachable, or Ollama returned a 5xx. A missing model or any other
+// non-5xx response (redirect, malformed request, ...) will not succeed on
+// retry, so those return immediately.
+func isTransientOllamaError(err error) bool {
+	if errors.Is(err, ollamakit.ErrUnreachable) {
+		return true
+	}
+	var respErr *ollamakit.ResponseError
+	if errors.As(err, &respErr) {
+		return respErr.StatusCode >= 500
+	}
+	return false
 }
 
 // GenerateLocalHashVector utilizes the "Hashing Trick" to produce a normalized
