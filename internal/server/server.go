@@ -124,6 +124,18 @@ func originValidation(next http.Handler) http.Handler {
 	})
 }
 
+// acceptsEventStream reports whether the request negotiates Server-Sent
+// Events framing via an `Accept: text/event-stream` header entry.
+func acceptsEventStream(r *http.Request) bool {
+	for _, part := range strings.Split(r.Header.Get("Accept"), ",") {
+		mediaType, _, _ := strings.Cut(part, ";")
+		if strings.TrimSpace(mediaType) == "text/event-stream" {
+			return true
+		}
+	}
+	return false
+}
+
 // contentTypeEnforcement wraps an http.Handler and rejects POST requests to
 // /index that lack Content-Type: application/json.
 func contentTypeEnforcement(next http.Handler) http.Handler {
@@ -191,9 +203,10 @@ func newServeMux(dbClient db.Store, vectorStore db.VectorStore, embedder engine.
 		json.NewEncoder(w).Encode(stats)
 	})
 
-	// 3. Hybrid search endpoint
-	mux.HandleFunc("/search", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
+	// 3. Hybrid search endpoint. SSE (/search/stream, or /search with
+	// Accept: text/event-stream) is only a framing convenience: the search
+	// runs to completion first, then the result set is replayed as events.
+	handleSearch := func(w http.ResponseWriter, r *http.Request) {
 		query := r.URL.Query().Get("q")
 		if query == "" {
 			http.Error(w, "missing query parameter 'q'", http.StatusBadRequest)
@@ -207,43 +220,31 @@ func newServeMux(dbClient db.Store, vectorStore db.VectorStore, embedder engine.
 			}
 		}
 
-		results, err := engine.SearchHybridWithOptions(dbClient, vectorStore, embedder, query, limit, searchOpts)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
+		stream := r.URL.Path == "/search/stream" || acceptsEventStream(r)
 
-		json.NewEncoder(w).Encode(results)
-	})
-
-	// 3a. SSE streaming search endpoint
-	mux.HandleFunc("/search/stream", func(w http.ResponseWriter, r *http.Request) {
-		query := r.URL.Query().Get("q")
-		if query == "" {
-			http.Error(w, "missing query parameter 'q'", http.StatusBadRequest)
-			return
-		}
-
-		limit := 5
-		if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
-			if parsed, err := strconv.Atoi(limitStr); err == nil && parsed > 0 {
-				limit = parsed
+		var flusher http.Flusher
+		if stream {
+			f, ok := w.(http.Flusher)
+			if !ok {
+				http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+				return
 			}
+			flusher = f
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.Header().Set("Cache-Control", "no-cache")
+			w.Header().Set("Connection", "keep-alive")
+		} else {
+			w.Header().Set("Content-Type", "application/json")
 		}
-
-		flusher, ok := w.(http.Flusher)
-		if !ok {
-			http.Error(w, "streaming unsupported", http.StatusInternalServerError)
-			return
-		}
-
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.Header().Set("Cache-Control", "no-cache")
-		w.Header().Set("Connection", "keep-alive")
 
 		results, err := engine.SearchHybridWithOptions(dbClient, vectorStore, embedder, query, limit, searchOpts)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		if !stream {
+			json.NewEncoder(w).Encode(results)
 			return
 		}
 
@@ -265,7 +266,9 @@ func newServeMux(dbClient db.Store, vectorStore db.VectorStore, embedder engine.
 		doneData, _ := json.Marshal(map[string]int{"count": len(results)})
 		fmt.Fprintf(w, "event: done\ndata: %s\n\n", doneData)
 		flusher.Flush()
-	})
+	}
+	mux.HandleFunc("/search", handleSearch)
+	mux.HandleFunc("/search/stream", handleSearch)
 
 	// 4. Index folder endpoint
 	indexLimiter := newRateLimiter(indexCooldown)

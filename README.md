@@ -425,7 +425,8 @@ Start the REST API on port `8788`:
 ### Endpoints
 - **GET** `/health`: Check status (`{"status": "ok"}`).
 - **GET** `/status`: Returns document counts, chunk counts, and database file size.
-- **GET** `/search?q=query&limit=5`: Query the hybrid search engine.
+- **GET** `/search?q=query&limit=5`: Query the hybrid search engine. Send `Accept: text/event-stream` to receive the results as Server-Sent Events instead of a JSON array.
+- **GET** `/search/stream?q=query&limit=5`: Same search with SSE framing (`result` events, then a `done` event with the result count). SSE here is a framing convenience over a completed search — the hybrid search runs to completion first, so there is no latency advantage over plain `/search`.
 - **POST** `/index` with body `{"path": "/absolute/path"}`: Synchronously crawl and index a folder.
 
 ### Endpoint Examples
