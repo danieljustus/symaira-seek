@@ -174,6 +174,15 @@ func (m *mockEmbedder) GenerateVectors(texts []string) [][]float32 {
 	return vecs
 }
 
+func (m *mockEmbedder) GenerateVectorsWithModel(texts []string) []engine.EmbeddingResult {
+	vectors := m.GenerateVectors(texts)
+	result := make([]engine.EmbeddingResult, len(vectors))
+	for i, v := range vectors {
+		result[i] = engine.EmbeddingResult{Vector: v, Model: m.ModelName()}
+	}
+	return result
+}
+
 func (m *mockEmbedder) GenerateVectorNoRetry(text string) []float32 {
 	if m.generateVectorNoRetryFn != nil {
 		return m.generateVectorNoRetryFn(text)

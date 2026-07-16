@@ -150,6 +150,14 @@ func (f *fakeEmbedder) GenerateVectors(texts []string) [][]float32 {
 	return out
 }
 
+func (f *fakeEmbedder) GenerateVectorsWithModel(texts []string) []EmbeddingResult {
+	out := make([]EmbeddingResult, len(texts))
+	for i, t := range texts {
+		out[i] = EmbeddingResult{Vector: f.GenerateVector(t), Model: f.ModelName()}
+	}
+	return out
+}
+
 func (f *fakeEmbedder) GenerateVectorNoRetry(text string) []float32 {
 	return f.GenerateVector(text)
 }

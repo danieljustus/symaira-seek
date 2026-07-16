@@ -49,6 +49,7 @@ type EmbeddingsGenerator struct {
 type cacheEntry struct {
 	key   string
 	value []float32
+	model string
 }
 
 func newEmbeddingsGenerator() *EmbeddingsGenerator {
@@ -91,6 +92,12 @@ func ollamaBaseURL(raw string) string {
 
 const defaultEmbeddingDim = 768
 
+// localHashModelName is the embedding_model value stored for chunks that were
+// embedded with the deterministic local hash fallback instead of the configured
+// Ollama model. Keeping it distinct lets DetectMixedEmbeddingSpaces flag the
+// mixed-space corruption.
+const localHashModelName = "local-hash"
+
 // Dim returns the cached embedding dimension. If no Ollama response has been
 // received yet and no config-driven dimension was set, it returns the legacy
 // default of 768 for backwards compatibility.
@@ -117,12 +124,24 @@ func NewEmbeddingsGenerator() *EmbeddingsGenerator {
 	return newEmbeddingsGenerator()
 }
 
+// EmbeddingResult pairs a vector with the name of the model that produced it.
+// When the local hash fallback is used the Model field reports a distinct
+// name (e.g. "local-hash") so callers can detect mixed embedding spaces.
+type EmbeddingResult struct {
+	Vector []float32
+	Model  string
+}
+
 // Embedder is the public surface of an embedding generator. Callers depend
 // on the contract, not on the concrete *EmbeddingsGenerator struct, so the
 // HTTP client / cache / mutex plumbing stays encapsulated.
 type Embedder interface {
 	GenerateVector(text string) []float32
 	GenerateVectors(texts []string) [][]float32
+	// GenerateVectorsWithModel returns one result per input text, preserving the
+	// actual embedding provenance. This lets the indexer record the real model
+	// for each chunk, including the local hash fallback name.
+	GenerateVectorsWithModel(texts []string) []EmbeddingResult
 	// GenerateVectorNoRetry produces an embedding vector for the given text
 	// without retrying on Ollama failures. If Ollama is unreachable or
 	// returns an error, the local hash fallback is used immediately. This
@@ -199,7 +218,7 @@ func NewEmbeddingsGeneratorWithOllamaConfig(cfg OllamaConfig) *EmbeddingsGenerat
 // Queries Ollama first with the configured retry/backoff, falling back to
 // local deterministic hashing if offline.
 func (eg *EmbeddingsGenerator) GenerateVector(text string) []float32 {
-	return eg.generateVectorImpl(text, eg.RetryCount)
+	return eg.generateVectorImpl(text, eg.RetryCount).Vector
 }
 
 // GenerateVectorNoRetry produces a 768-dimensional embedding vector without
@@ -207,17 +226,18 @@ func (eg *EmbeddingsGenerator) GenerateVector(text string) []float32 {
 // the local hash fallback is used immediately. Designed for interactive search
 // paths where latency matters more than embedding quality (issue #162).
 func (eg *EmbeddingsGenerator) GenerateVectorNoRetry(text string) []float32 {
-	return eg.generateVectorImpl(text, 0)
+	return eg.generateVectorImpl(text, 0).Vector
 }
 
-func (eg *EmbeddingsGenerator) generateVectorImpl(text string, maxRetries int) []float32 {
+func (eg *EmbeddingsGenerator) generateVectorImpl(text string, maxRetries int) EmbeddingResult {
 	key := hashKey(text)
 
 	eg.cacheMu.Lock()
 	if elem, ok := eg.cache[key]; ok {
 		eg.cacheOrder.MoveToFront(elem)
+		entry := elem.Value.(*cacheEntry)
 		eg.cacheMu.Unlock()
-		return elem.Value.(*cacheEntry).value
+		return EmbeddingResult{Vector: entry.value, Model: entry.model}
 	}
 	eg.cacheMu.Unlock()
 
@@ -228,24 +248,23 @@ func (eg *EmbeddingsGenerator) generateVectorImpl(text string, maxRetries int) [
 	if err == nil {
 		if !hasKnownDim {
 			eg.cacheDimOnce(len(vec))
-			eg.cachePut(key, vec)
-			return vec
+			eg.cachePut(key, vec, eg.Model)
+			return EmbeddingResult{Vector: vec, Model: eg.Model}
 		}
 		eg.cacheDimOnce(len(vec))
-		if len(vec) != expectedDim {
-			fmt.Fprintf(os.Stderr, "engine: embedding dimension mismatch: expected %d, got %d; falling back to local hash vector\n", expectedDim, len(vec))
-		} else {
-			eg.cachePut(key, vec)
-			return vec
+		if len(vec) == expectedDim {
+			eg.cachePut(key, vec, eg.Model)
+			return EmbeddingResult{Vector: vec, Model: eg.Model}
 		}
+		fmt.Fprintf(os.Stderr, "engine: embedding dimension mismatch: expected %d, got %d; falling back to local hash vector\n", expectedDim, len(vec))
 	}
 
 	fallback := GenerateLocalHashVector(text, expectedDim)
-	eg.cachePut(key, fallback)
-	return fallback
+	eg.cachePut(key, fallback, localHashModelName)
+	return EmbeddingResult{Vector: fallback, Model: localHashModelName}
 }
 
-func (eg *EmbeddingsGenerator) cachePut(key string, value []float32) {
+func (eg *EmbeddingsGenerator) cachePut(key string, value []float32, model string) {
 	eg.cacheMu.Lock()
 	defer eg.cacheMu.Unlock()
 
@@ -258,11 +277,11 @@ func (eg *EmbeddingsGenerator) cachePut(key string, value []float32) {
 		if oldest != nil {
 			entry := oldest.Value.(*cacheEntry)
 			delete(eg.cache, entry.key)
-			eg.cacheOrder.Remove(oldest)
+			_ = eg.cacheOrder.Remove(oldest)
 		}
 	}
 
-	elem := eg.cacheOrder.PushFront(&cacheEntry{key: key, value: value})
+	elem := eg.cacheOrder.PushFront(&cacheEntry{key: key, value: value, model: model})
 	eg.cache[key] = elem
 }
 
@@ -280,13 +299,28 @@ func (eg *EmbeddingsGenerator) cacheDimOnce(actualDim int) {
 // to individual queries and local hashing per text.
 // Returns a slice with one embedding per input text, in the same order.
 func (eg *EmbeddingsGenerator) GenerateVectors(texts []string) [][]float32 {
+	results := eg.generateVectorsImpl(texts)
+	vectors := make([][]float32, len(results))
+	for i, r := range results {
+		vectors[i] = r.Vector
+	}
+	return vectors
+}
+
+// GenerateVectorsWithModel returns embeddings together with the actual model
+// that produced each vector. Fallback vectors are tagged with localHashModelName.
+func (eg *EmbeddingsGenerator) GenerateVectorsWithModel(texts []string) []EmbeddingResult {
+	return eg.generateVectorsImpl(texts)
+}
+
+func (eg *EmbeddingsGenerator) generateVectorsImpl(texts []string) []EmbeddingResult {
 	if len(texts) == 0 {
 		return nil
 	}
 
 	hasKnownDim := eg.configDim > 0 || eg.dim > 0
 	expectedDim := eg.effectiveDim()
-	results := make([][]float32, len(texts))
+	results := make([]EmbeddingResult, len(texts))
 
 	// Collect uncached texts and their indexes
 	type uncached struct {
@@ -300,7 +334,8 @@ func (eg *EmbeddingsGenerator) GenerateVectors(texts []string) [][]float32 {
 		key := hashKey(t)
 		if elem, ok := eg.cache[key]; ok {
 			eg.cacheOrder.MoveToFront(elem)
-			results[i] = elem.Value.(*cacheEntry).value
+			entry := elem.Value.(*cacheEntry)
+			results[i] = EmbeddingResult{Vector: entry.value, Model: entry.model}
 		} else {
 			uncachedList = append(uncachedList, uncached{idx: i, text: t})
 		}
@@ -343,11 +378,14 @@ func (eg *EmbeddingsGenerator) GenerateVectors(texts []string) [][]float32 {
 			}
 			if len(vec) != expectedDim {
 				fmt.Fprintf(os.Stderr, "engine: batch embedding dimension mismatch for text %q: expected %d, got %d; using local hash fallback\n", u.text, expectedDim, len(vec))
-				results[u.idx] = GenerateLocalHashVector(u.text, expectedDim)
+				results[u.idx] = EmbeddingResult{
+					Vector: GenerateLocalHashVector(u.text, expectedDim),
+					Model:  localHashModelName,
+				}
 			} else {
-				results[u.idx] = vec
+				results[u.idx] = EmbeddingResult{Vector: vec, Model: eg.Model}
 			}
-			eg.cachePut(key, results[u.idx])
+			eg.cachePut(key, results[u.idx].Vector, results[u.idx].Model)
 		}
 		return results
 	}
@@ -357,7 +395,7 @@ func (eg *EmbeddingsGenerator) GenerateVectors(texts []string) [][]float32 {
 		fmt.Fprintf(os.Stderr, "engine: batch embedding failed (%v), falling back to per-text requests\n", batchErr)
 	}
 	for _, u := range uncachedList {
-		results[u.idx] = eg.GenerateVector(u.text)
+		results[u.idx] = eg.generateVectorImpl(u.text, eg.RetryCount)
 	}
 	return results
 }
