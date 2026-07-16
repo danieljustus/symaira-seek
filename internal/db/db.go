@@ -57,6 +57,9 @@ type SearchResult struct {
 	VectorRank  int     `json:"vector_rank"`
 	RRFScore    float32 `json:"rrf_score"`
 	CosineScore float32 `json:"cosine_score"`
+	// VectorMode reports how the query vector was produced. It is set by the
+	// engine search path and echoed into structured JSON/MCP output.
+	VectorMode string `json:"vector_mode,omitempty"`
 }
 
 // StructuredSearchResult is the consumer-facing JSON shape shared by the CLI
@@ -64,12 +67,13 @@ type SearchResult struct {
 // callers need to cite or navigate to a source passage, omitting the full
 // embedding vector.
 type StructuredSearchResult struct {
-	Path      string  `json:"path"`
-	ChunkID   string  `json:"chunk_id"`
-	CharStart *int    `json:"char_start,omitempty"`
-	CharEnd   *int    `json:"char_end,omitempty"`
-	Score     float32 `json:"score"`
-	Snippet   string  `json:"snippet"`
+	Path       string  `json:"path"`
+	ChunkID    string  `json:"chunk_id"`
+	CharStart  *int    `json:"char_start,omitempty"`
+	CharEnd    *int    `json:"char_end,omitempty"`
+	Score      float32 `json:"score"`
+	Snippet    string  `json:"snippet"`
+	VectorMode string  `json:"vector_mode,omitempty"`
 }
 
 // Structured converts a SearchResult into the shared consumer-facing shape.
@@ -79,12 +83,13 @@ func (r *SearchResult) Structured() *StructuredSearchResult {
 		return nil
 	}
 	return &StructuredSearchResult{
-		Path:      r.Chunk.DocumentPath,
-		ChunkID:   r.Chunk.UUID,
-		CharStart: r.Chunk.CharStart,
-		CharEnd:   r.Chunk.CharEnd,
-		Score:     r.RRFScore,
-		Snippet:   r.Chunk.Content,
+		Path:       r.Chunk.DocumentPath,
+		ChunkID:    r.Chunk.UUID,
+		CharStart:  r.Chunk.CharStart,
+		CharEnd:    r.Chunk.CharEnd,
+		Score:      r.RRFScore,
+		Snippet:    r.Chunk.Content,
+		VectorMode: r.VectorMode,
 	}
 }
 

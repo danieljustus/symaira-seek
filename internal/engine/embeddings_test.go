@@ -507,3 +507,39 @@ func TestModelName_ReturnsConfiguredModel(t *testing.T) {
 		t.Errorf("expected ModelName() = %q, got %q", "mxbai-embed-large", got)
 	}
 }
+
+// TestGenerateVectorsWithModel_ReportsFallbackProvenance verifies that the
+// model reported for each vector reflects the actual provenance, with fallback
+// vectors carrying localHashModelName (issue #268).
+func TestGenerateVectorsWithModel_ReportsFallbackProvenance(t *testing.T) {
+	vec768 := make([]float32, 768)
+	vec384 := make([]float32, 384)
+
+	srv := embedServer(t, func(inputs []string) (int, [][]float32) {
+		if len(inputs) != 2 {
+			t.Errorf("expected batch of 2 inputs, got %d", len(inputs))
+		}
+		return http.StatusOK, [][]float32{vec768, vec384}
+	})
+	defer srv.Close()
+
+	eg := NewEmbeddingsGeneratorWithOllamaConfig(OllamaConfig{
+		URL:   srv.URL,
+		Model: "test-model",
+		Dim:   768,
+	})
+
+	results := eg.GenerateVectorsWithModel([]string{"alpha", "beta"})
+	if len(results) != 2 {
+		t.Fatalf("expected 2 results, got %d", len(results))
+	}
+	if results[0].Model != "test-model" {
+		t.Errorf("expected first result model %q, got %q", "test-model", results[0].Model)
+	}
+	if results[1].Model != localHashModelName {
+		t.Errorf("expected second result model %q, got %q", localHashModelName, results[1].Model)
+	}
+	if len(results[1].Vector) != 768 {
+		t.Errorf("expected fallback vector dim 768, got %d", len(results[1].Vector))
+	}
+}

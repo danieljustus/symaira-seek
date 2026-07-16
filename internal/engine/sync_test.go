@@ -189,9 +189,19 @@ func (c *countingEmbedder) GenerateVectors(texts []string) [][]float32 {
 	return (&fakeEmbedder{dim: c.dim}).GenerateVectors(texts)
 }
 
+func (c *countingEmbedder) GenerateVectorsWithModel(texts []string) []EmbeddingResult {
+	c.calls++
+	return (&fakeEmbedder{dim: c.dim}).GenerateVectorsWithModel(texts)
+}
+
 func (c *countingEmbedder) GenerateVectorNoRetry(text string) []float32 {
 	c.calls++
 	return (&fakeEmbedder{dim: c.dim}).GenerateVectorNoRetry(text)
+}
+
+func (c *countingEmbedder) GenerateVectorNoRetryWithModel(text string) EmbeddingResult {
+	c.calls++
+	return (&fakeEmbedder{dim: c.dim}).GenerateVectorNoRetryWithModel(text)
 }
 
 func (c *countingEmbedder) Dim() int {
@@ -848,5 +858,88 @@ func TestBuildChunksStableIDs(t *testing.T) {
 	}
 	if chunks3[len(chunks3)-1].UUID == chunks1[len(chunks1)-1].UUID {
 		t.Error("modified trailing chunk should get a new ID")
+	}
+}
+
+// mixedModelEmbedder returns a deterministic embedding and reports the
+// configured model for even-indexed texts and the local hash fallback model
+// for odd-indexed texts. It lets buildChunks tests verify per-chunk provenance
+// without an Ollama dependency.
+type mixedModelEmbedder struct {
+	dim int
+}
+
+func (m *mixedModelEmbedder) GenerateVector(text string) []float32 {
+	vec := make([]float32, m.dim)
+	for i, b := range []byte(text) {
+		vec[i%m.dim] += float32(b) / 255.0
+	}
+	return vec
+}
+
+func (m *mixedModelEmbedder) GenerateVectors(texts []string) [][]float32 {
+	out := make([][]float32, len(texts))
+	for i, t := range texts {
+		out[i] = m.GenerateVector(t)
+	}
+	return out
+}
+
+func (m *mixedModelEmbedder) GenerateVectorsWithModel(texts []string) []EmbeddingResult {
+	out := make([]EmbeddingResult, len(texts))
+	for i, t := range texts {
+		model := m.ModelName()
+		if i%2 == 1 {
+			model = localHashModelName
+		}
+		out[i] = EmbeddingResult{Vector: m.GenerateVector(t), Model: model}
+	}
+	return out
+}
+
+func (m *mixedModelEmbedder) GenerateVectorNoRetry(text string) []float32 {
+	return m.GenerateVector(text)
+}
+
+func (m *mixedModelEmbedder) GenerateVectorNoRetryWithModel(text string) EmbeddingResult {
+	return EmbeddingResult{Vector: m.GenerateVector(text), Model: m.ModelName()}
+}
+
+func (m *mixedModelEmbedder) Dim() int {
+	return m.dim
+}
+
+func (m *mixedModelEmbedder) ModelName() string {
+	return "ollama-model"
+}
+
+// TestBuildChunks_RecordsActualEmbeddingModel verifies that each chunk is
+// stamped with the model that actually produced its vector, so mixed spaces
+// can be detected later (issue #268).
+func TestBuildChunks_RecordsActualEmbeddingModel(t *testing.T) {
+	embedder := &mixedModelEmbedder{dim: 768}
+	content := strings.Repeat("alpha ", 200) + " " + strings.Repeat("beta ", 200)
+
+	chunks := buildChunks(embedder, "doc.md", content)
+	if len(chunks) < 2 {
+		t.Fatalf("expected at least 2 chunks, got %d", len(chunks))
+	}
+
+	var ollamaCount, fallbackCount int
+	for _, c := range chunks {
+		switch c.Model {
+		case "ollama-model":
+			ollamaCount++
+		case localHashModelName:
+			fallbackCount++
+		default:
+			t.Errorf("unexpected model %q for chunk %d", c.Model, c.ChunkIndex)
+		}
+	}
+	if ollamaCount == 0 {
+		t.Error("expected at least one ollama-model chunk")
+	}
+	if fallbackCount == 0 {
+		t.Error("expected at least one local-hash chunk")
 	}
 }

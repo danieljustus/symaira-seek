@@ -48,7 +48,31 @@ func SearchHybridWithOptions(dbClient db.Store, vectorStore db.VectorStore, embe
 	}
 
 	// 1. Generate query vector (no retry — fast fallback when Ollama is offline, issue #162)
-	queryVec := embedder.GenerateVectorNoRetry(query)
+	queryResult := embedder.GenerateVectorNoRetryWithModel(query)
+	queryVec := queryResult.Vector
+
+	// 1b. Warn when the query vector fell back to the local hash while the index
+	// was built with an Ollama model; mark the structured output so the UI and
+	// MCP consumers can surface the same signal (issue #270).
+	vectorMode := ""
+	if queryResult.Model == localHashModelName {
+		indexIsOllama := false
+		indexIsFallback := false
+		for key := range spaces {
+			parts := strings.SplitN(key, "/", 2)
+			if len(parts) == 2 {
+				if parts[1] == localHashModelName {
+					indexIsFallback = true
+				} else {
+					indexIsOllama = true
+				}
+			}
+		}
+		if indexIsOllama && !indexIsFallback {
+			fmt.Fprintf(os.Stderr, "warning: query embedding fell back to local hash while the index uses an Ollama model; semantic scores may be unreliable\n")
+			vectorMode = "fallback"
+		}
+	}
 
 	// 1a. Optional HyDE query expansion: generate a hypothetical document
 	// passage via Ollama chat and average it with the original query vector.
@@ -162,6 +186,10 @@ func SearchHybridWithOptions(dbClient db.Store, vectorStore db.VectorStore, embe
 	if opts.RerankCfg.Enabled {
 		reranker := NewReranker(opts.RerankCfg)
 		combined = reranker.RerankResults(query, combined)
+	}
+
+	for _, res := range combined {
+		res.VectorMode = vectorMode
 	}
 
 	return combined, nil
