@@ -148,6 +148,11 @@ type Embedder interface {
 	// is intended for interactive search paths where latency matters more
 	// than embedding quality (issue #162).
 	GenerateVectorNoRetry(text string) []float32
+	// GenerateVectorNoRetryWithModel is the provenance-aware variant of
+	// GenerateVectorNoRetry. It returns the actual model used for the query
+	// vector so the search path can warn when the query fell back while the
+	// index was built with an Ollama model (issue #270).
+	GenerateVectorNoRetryWithModel(text string) EmbeddingResult
 	Dim() int
 	ModelName() string
 }
@@ -227,6 +232,12 @@ func (eg *EmbeddingsGenerator) GenerateVector(text string) []float32 {
 // paths where latency matters more than embedding quality (issue #162).
 func (eg *EmbeddingsGenerator) GenerateVectorNoRetry(text string) []float32 {
 	return eg.generateVectorImpl(text, 0).Vector
+}
+
+// GenerateVectorNoRetryWithModel is the provenance-aware variant of
+// GenerateVectorNoRetry. It returns the actual model used for the query vector.
+func (eg *EmbeddingsGenerator) GenerateVectorNoRetryWithModel(text string) EmbeddingResult {
+	return eg.generateVectorImpl(text, 0)
 }
 
 func (eg *EmbeddingsGenerator) generateVectorImpl(text string, maxRetries int) EmbeddingResult {

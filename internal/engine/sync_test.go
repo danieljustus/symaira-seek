@@ -199,6 +199,11 @@ func (c *countingEmbedder) GenerateVectorNoRetry(text string) []float32 {
 	return (&fakeEmbedder{dim: c.dim}).GenerateVectorNoRetry(text)
 }
 
+func (c *countingEmbedder) GenerateVectorNoRetryWithModel(text string) EmbeddingResult {
+	c.calls++
+	return (&fakeEmbedder{dim: c.dim}).GenerateVectorNoRetryWithModel(text)
+}
+
 func (c *countingEmbedder) Dim() int {
 	return c.dim
 }
@@ -894,6 +899,10 @@ func (m *mixedModelEmbedder) GenerateVectorsWithModel(texts []string) []Embeddin
 
 func (m *mixedModelEmbedder) GenerateVectorNoRetry(text string) []float32 {
 	return m.GenerateVector(text)
+}
+
+func (m *mixedModelEmbedder) GenerateVectorNoRetryWithModel(text string) EmbeddingResult {
+	return EmbeddingResult{Vector: m.GenerateVector(text), Model: m.ModelName()}
 }
 
 func (m *mixedModelEmbedder) Dim() int {

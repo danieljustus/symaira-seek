@@ -177,6 +177,10 @@ func (f *fakeEmbedder) GenerateVectorNoRetry(text string) []float32 {
 	return f.GenerateVector(text)
 }
 
+func (f *fakeEmbedder) GenerateVectorNoRetryWithModel(text string) engine.EmbeddingResult {
+	return engine.EmbeddingResult{Vector: f.GenerateVector(text), Model: f.ModelName()}
+}
+
 func (f *fakeEmbedder) Dim() int {
 	return 768
 }

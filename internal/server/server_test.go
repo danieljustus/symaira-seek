@@ -190,6 +190,10 @@ func (m *mockEmbedder) GenerateVectorNoRetry(text string) []float32 {
 	return make([]float32, 768)
 }
 
+func (m *mockEmbedder) GenerateVectorNoRetryWithModel(text string) engine.EmbeddingResult {
+	return engine.EmbeddingResult{Vector: m.GenerateVectorNoRetry(text), Model: m.ModelName()}
+}
+
 func (m *mockEmbedder) Dim() int {
 	return 768
 }

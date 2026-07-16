@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"io"
 	"math"
 	"os"
 	"path/filepath"
@@ -160,6 +161,10 @@ func (f *fakeEmbedder) GenerateVectorsWithModel(texts []string) []EmbeddingResul
 
 func (f *fakeEmbedder) GenerateVectorNoRetry(text string) []float32 {
 	return f.GenerateVector(text)
+}
+
+func (f *fakeEmbedder) GenerateVectorNoRetryWithModel(text string) EmbeddingResult {
+	return EmbeddingResult{Vector: f.GenerateVector(text), Model: f.ModelName()}
 }
 
 func (f *fakeEmbedder) Dim() int {
@@ -575,4 +580,168 @@ func (p *pathFilterVectorStore) Search(_ context.Context, queryVec []float32, li
 }
 func (p *pathFilterVectorStore) SearchWithPath(_ context.Context, queryVec []float32, pathPrefix string, limit int) ([]*db.SearchResult, error) {
 	return p.searchFn(queryVec, pathPrefix, limit)
+}
+
+// fallbackQueryEmbedder behaves like fakeEmbedder for indexing but reports the
+// local hash fallback for the query vector used in search.
+type fallbackQueryEmbedder struct {
+	fakeEmbedder
+}
+
+func (f *fallbackQueryEmbedder) GenerateVectorNoRetryWithModel(text string) EmbeddingResult {
+	return EmbeddingResult{Vector: f.fakeEmbedder.GenerateVectorNoRetry(text), Model: localHashModelName}
+}
+
+// fallbackSpaceStore is a minimal in-memory store that reports a single
+// Ollama-embedded space and returns the configured vector results.
+type fallbackSpaceStore struct {
+	db.Store
+	spaces  map[string]int
+	results []*db.SearchResult
+}
+
+func (f *fallbackSpaceStore) DetectMixedEmbeddingSpaces() (map[string]int, error) {
+	return f.spaces, nil
+}
+
+func (f *fallbackSpaceStore) SearchBM25(query string, limit int) ([]*db.SearchResult, error) { return nil, nil }
+func (f *fallbackSpaceStore) SearchBM25WithPath(query string, pathPrefix string, limit int) ([]*db.SearchResult, error) {
+	return nil, nil
+}
+func (f *fallbackSpaceStore) SearchVector(queryVec []float32, limit int) ([]*db.SearchResult, error) {
+	return f.results, nil
+}
+func (f *fallbackSpaceStore) SearchVectorWithPath(queryVec []float32, pathPrefix string, limit int) ([]*db.SearchResult, error) {
+	return f.SearchVector(queryVec, limit)
+}
+func (f *fallbackSpaceStore) Upsert(_ context.Context, _ []*db.Chunk) error { return nil }
+func (f *fallbackSpaceStore) Delete(_ context.Context, _ string) error      { return nil }
+func (f *fallbackSpaceStore) Search(_ context.Context, _ []float32, _ int) ([]*db.SearchResult, error) {
+	return f.results, nil
+}
+func (f *fallbackSpaceStore) SearchWithPath(_ context.Context, _ []float32, _ string, _ int) ([]*db.SearchResult, error) {
+	return f.results, nil
+}
+
+// TestSearchHybrid_FallbackQueryAgainstOllamaIndex_WarnsAndMarksVectorMode verifies
+// that a query fallback against an Ollama-embedded index emits a stderr warning
+// and sets VectorMode to "fallback" on every result (issue #270).
+func TestSearchHybrid_FallbackQueryAgainstOllamaIndex_WarnsAndMarksVectorMode(t *testing.T) {
+	store := &fallbackSpaceStore{
+		spaces: map[string]int{"768/ollama-model": 1},
+		results: []*db.SearchResult{
+			{Chunk: &db.Chunk{UUID: "c1", DocumentPath: "doc.md", Content: "test content"}, CosineScore: 0.5},
+		},
+	}
+	embedder := &fallbackQueryEmbedder{fakeEmbedder{dim: 768}}
+
+	oldStderr := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("failed to create pipe: %v", err)
+	}
+	os.Stderr = w
+
+	results, err := SearchHybrid(store, store, embedder, "query", 5)
+
+	w.Close()
+	os.Stderr = oldStderr
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var buf strings.Builder
+	if _, copyErr := io.Copy(&buf, r); copyErr != nil {
+		t.Fatalf("failed to read stderr: %v", copyErr)
+	}
+	stderr := buf.String()
+	if !strings.Contains(stderr, "query embedding fell back") {
+		t.Errorf("expected stderr warning, got %q", stderr)
+	}
+	if len(results) == 0 {
+		t.Fatal("expected at least one result")
+	}
+	for _, res := range results {
+		if res.VectorMode != "fallback" {
+			t.Errorf("expected VectorMode=fallback, got %q", res.VectorMode)
+		}
+	}
+}
+
+// TestSearchHybrid_FallbackQueryAgainstFallbackIndex_NoWarning verifies that no
+// warning is emitted when both the query and the index use the local hash
+// fallback, because the spaces are consistent (issue #270).
+func TestSearchHybrid_FallbackQueryAgainstFallbackIndex_NoWarning(t *testing.T) {
+	store := &fallbackSpaceStore{
+		spaces: map[string]int{"768/local-hash": 1},
+		results: []*db.SearchResult{
+			{Chunk: &db.Chunk{UUID: "c1", DocumentPath: "doc.md", Content: "test content"}, CosineScore: 0.5},
+		},
+	}
+	embedder := &fallbackQueryEmbedder{fakeEmbedder{dim: 768}}
+
+	oldStderr := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("failed to create pipe: %v", err)
+	}
+	os.Stderr = w
+
+	results, err := SearchHybrid(store, store, embedder, "query", 5)
+
+	w.Close()
+	os.Stderr = oldStderr
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var buf strings.Builder
+	if _, copyErr := io.Copy(&buf, r); copyErr != nil {
+		t.Fatalf("failed to read stderr: %v", copyErr)
+	}
+	if strings.Contains(buf.String(), "query embedding fell back") {
+		t.Errorf("unexpected stderr warning, got %q", buf.String())
+	}
+	if len(results) > 0 && results[0].VectorMode != "" {
+		t.Errorf("expected empty VectorMode for consistent fallback space, got %q", results[0].VectorMode)
+	}
+}
+
+// TestSearchHybrid_OllamaQueryAgainstOllamaIndex_NoWarning verifies the normal
+// path: an Ollama query vector against an Ollama index produces no warning and
+// leaves VectorMode empty.
+func TestSearchHybrid_OllamaQueryAgainstOllamaIndex_NoWarning(t *testing.T) {
+	store := &fallbackSpaceStore{
+		spaces: map[string]int{"768/ollama-model": 1},
+		results: []*db.SearchResult{
+			{Chunk: &db.Chunk{UUID: "c1", DocumentPath: "doc.md", Content: "test content"}, CosineScore: 0.5},
+		},
+	}
+	embedder := &fakeEmbedder{dim: 768}
+
+	oldStderr := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("failed to create pipe: %v", err)
+	}
+	os.Stderr = w
+
+	results, err := SearchHybrid(store, store, embedder, "query", 5)
+
+	w.Close()
+	os.Stderr = oldStderr
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var buf strings.Builder
+	if _, copyErr := io.Copy(&buf, r); copyErr != nil {
+		t.Fatalf("failed to read stderr: %v", copyErr)
+	}
+	if strings.Contains(buf.String(), "query embedding fell back") {
+		t.Errorf("unexpected stderr warning, got %q", buf.String())
+	}
+	if len(results) > 0 && results[0].VectorMode != "" {
+		t.Errorf("expected empty VectorMode for Ollama query+index, got %q", results[0].VectorMode)
+	}
 }
