@@ -165,8 +165,20 @@ func (f *fakeEmbedder) GenerateVectors(texts []string) [][]float32 {
 	return result
 }
 
+func (f *fakeEmbedder) GenerateVectorsWithModel(texts []string) []engine.EmbeddingResult {
+	result := make([]engine.EmbeddingResult, len(texts))
+	for i := range texts {
+		result[i] = engine.EmbeddingResult{Vector: make([]float32, 768), Model: f.ModelName()}
+	}
+	return result
+}
+
 func (f *fakeEmbedder) GenerateVectorNoRetry(text string) []float32 {
 	return f.GenerateVector(text)
+}
+
+func (f *fakeEmbedder) GenerateVectorNoRetryWithModel(text string) engine.EmbeddingResult {
+	return engine.EmbeddingResult{Vector: f.GenerateVector(text), Model: f.ModelName()}
 }
 
 func (f *fakeEmbedder) Dim() int {

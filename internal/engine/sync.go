@@ -472,7 +472,7 @@ func buildChunks(embedder Embedder, source, content string) []*db.Chunk {
 	for i, s := range spans {
 		textChunks[i] = s.Text
 	}
-	embeddings := embedder.GenerateVectors(textChunks)
+	embeddings := embedder.GenerateVectorsWithModel(textChunks)
 
 	chunks := make([]*db.Chunk, 0, len(textChunks))
 	for idx, tc := range textChunks {
@@ -484,10 +484,10 @@ func buildChunks(embedder Embedder, source, content string) []*db.Chunk {
 			DocumentPath: source,
 			ChunkIndex:   idx,
 			Content:      tc,
-			Embedding:    embeddings[idx],
+			Embedding:    embeddings[idx].Vector,
 			Hash:         chunkHash,
-			Dim:          len(embeddings[idx]),
-			Model:        embedder.ModelName(),
+			Dim:          len(embeddings[idx].Vector),
+			Model:        embeddings[idx].Model,
 			CharStart:    &start,
 			CharEnd:      &end,
 		})
@@ -522,6 +522,16 @@ func commitIndex(dbClient db.Store, path string, chunks []*db.Chunk, doc *db.Doc
 		}
 	}
 
-	fmt.Fprintf(os.Stderr, "Indexed: %s (%d chunks)\n", path, len(chunks))
+	fallbackCount := 0
+	for _, c := range chunks {
+		if c.Model == localHashModelName {
+			fallbackCount++
+		}
+	}
+	if fallbackCount > 0 {
+		fmt.Fprintf(os.Stderr, "Indexed: %s (%d chunks, %d fallback)\n", path, len(chunks), fallbackCount)
+	} else {
+		fmt.Fprintf(os.Stderr, "Indexed: %s (%d chunks)\n", path, len(chunks))
+	}
 	return nil
 }
