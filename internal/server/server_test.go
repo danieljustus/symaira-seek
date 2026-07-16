@@ -1065,6 +1065,81 @@ func TestMux_SearchStreamEndpoint_SearchError(t *testing.T) {
 	}
 }
 
+func TestMux_SearchEndpoint_AcceptEventStreamNegotiatesSSE(t *testing.T) {
+	store := &mockStore{
+		searchBM25Fn: func(query string, limit int) ([]*db.SearchResult, error) {
+			return []*db.SearchResult{
+				{
+					Chunk:    &db.Chunk{UUID: "u1", Content: "negotiated stream result"},
+					BM25Rank: 1,
+					RRFScore: 0.15,
+				},
+			}, nil
+		},
+		searchVectorFn: func(queryVec []float32, limit int) ([]*db.SearchResult, error) {
+			return nil, nil
+		},
+	}
+	embedder := &mockEmbedder{}
+	srv := newTestServer(t, store, store, embedder)
+
+	resp := doRequest(t, "GET", srv.URL+"/search?q=negotiate", "", map[string]string{
+		"Accept": "application/json, text/event-stream;q=0.9",
+	})
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /search (Accept: text/event-stream): status %d, want 200", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "text/event-stream" {
+		t.Errorf("Content-Type = %q, want text/event-stream", ct)
+	}
+
+	body, _ := io.ReadAll(resp.Body)
+	s := string(body)
+	if !strings.Contains(s, "event: result") {
+		t.Error("expected event: result in negotiated SSE stream")
+	}
+	if !strings.Contains(s, "event: done") || !strings.Contains(s, `"count":1`) {
+		t.Errorf("expected done event with count 1, got: %s", s)
+	}
+}
+
+func TestMux_SearchEndpoint_DefaultStaysJSON(t *testing.T) {
+	store := &mockStore{
+		searchBM25Fn: func(query string, limit int) ([]*db.SearchResult, error) {
+			return []*db.SearchResult{
+				{
+					Chunk:    &db.Chunk{UUID: "u1", Content: "json result"},
+					BM25Rank: 1,
+					RRFScore: 0.15,
+				},
+			}, nil
+		},
+		searchVectorFn: func(queryVec []float32, limit int) ([]*db.SearchResult, error) {
+			return nil, nil
+		},
+	}
+	embedder := &mockEmbedder{}
+	srv := newTestServer(t, store, store, embedder)
+
+	resp := doRequest(t, "GET", srv.URL+"/search?q=json", "", map[string]string{
+		"Accept": "application/json",
+	})
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /search (Accept: application/json): status %d, want 200", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", ct)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if strings.Contains(string(body), "event:") {
+		t.Error("JSON response must not contain SSE event framing")
+	}
+}
+
 func TestMux_IndexEndpoint_MethodNotAllowed(t *testing.T) {
 	store := &mockStore{}
 	embedder := &mockEmbedder{}
