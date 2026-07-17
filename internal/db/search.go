@@ -2,6 +2,7 @@ package db
 
 import (
 	"container/heap"
+	"database/sql"
 	"fmt"
 	"math"
 	"sort"
@@ -175,31 +176,12 @@ func scoreShortlist(h *SearchResultHeap, limit int, queryVec []float32, queryNor
 	}
 }
 
-func (db *DB) searchVectorFilteredWithPath(queryVec []float32, queryNorm float32, pathPrefix string, candidateIDs []int64, limit int) ([]*SearchResult, error) {
-	placeholders := make([]string, len(candidateIDs))
-	args := make([]interface{}, 0, len(candidateIDs)+1)
-	for i, id := range candidateIDs {
-		placeholders[i] = "?"
-		args = append(args, id)
-	}
-
-	whereClause := fmt.Sprintf("id IN (%s)", strings.Join(placeholders, ","))
-	if pathPrefix != "" {
-		whereClause += " AND document_path LIKE ? || '%'"
-		args = append(args, pathPrefix)
-	}
-
-	query := fmt.Sprintf(
-		"SELECT id, uuid, document_path, chunk_index, embedding, hash, norm, binary_signature, embedding_dim, embedding_model FROM chunks WHERE %s",
-		whereClause,
-	)
-
-	rows, err := db.conn.Query(query, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
+// scanAndScore is the single scan → shortlist → heap-score → hydrate
+// implementation shared by all vector search entry points; rows must come from
+// a searchVectorScanSelect-shaped query. useHamming=false scores every row
+// exactly (cosine baseline). collectIndex, when non-nil, collects each row's
+// {ID, Embedding} pair for IVF index building by the caller.
+func (db *DB) scanAndScore(rows *sql.Rows, queryVec []float32, queryNorm float32, limit int, useHamming bool, collectIndex *[]*Chunk) ([]*SearchResult, error) {
 	var allRows []rowEntry
 	for rows.Next() {
 		var e rowEntry
@@ -211,21 +193,28 @@ func (db *DB) searchVectorFilteredWithPath(queryVec []float32, queryNorm float32
 			e.sigBytes = *sigPtr
 		}
 		e.chunk.Norm = e.norm
+
+		if collectIndex != nil {
+			e.chunk.Embedding = BytesToFloat32Slice(e.embBytes)
+			*collectIndex = append(*collectIndex, &Chunk{ID: e.chunk.ID, Embedding: e.chunk.Embedding})
+		}
+
 		allRows = append(allRows, e)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
 
-	querySig := SignBinarySignature(queryVec)
-	shortlist := hammingShortlist(allRows, querySig, limit)
+	shortlist := allRows
+	if useHamming {
+		querySig := SignBinarySignature(queryVec)
+		shortlist = hammingShortlist(allRows, querySig, limit)
+	}
 
 	h := &SearchResultHeap{}
 	for i := range shortlist {
 		e := &shortlist[i]
-		c := &e.chunk
-
-		scoreShortlist(h, limit, queryVec, queryNorm, c, e.embBytes, e.norm)
+		scoreShortlist(h, limit, queryVec, queryNorm, &e.chunk, e.embBytes, e.norm)
 	}
 
 	sort.SliceStable(*h, func(i, j int) bool {
@@ -241,6 +230,29 @@ func (db *DB) searchVectorFilteredWithPath(queryVec []float32, queryNorm float32
 		return nil, err
 	}
 	return results, nil
+}
+
+func (db *DB) searchVectorFilteredWithPath(queryVec []float32, queryNorm float32, pathPrefix string, candidateIDs []int64, limit int) ([]*SearchResult, error) {
+	placeholders := make([]string, len(candidateIDs))
+	args := make([]interface{}, 0, len(candidateIDs)+1)
+	for i, id := range candidateIDs {
+		placeholders[i] = "?"
+		args = append(args, id)
+	}
+
+	whereClause := fmt.Sprintf("id IN (%s)", strings.Join(placeholders, ","))
+	if pathPrefix != "" {
+		whereClause += " AND document_path LIKE ? || '%'"
+		args = append(args, pathPrefix)
+	}
+
+	rows, err := db.conn.Query(searchVectorScanSelect+" WHERE "+whereClause, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	return db.scanAndScore(rows, queryVec, queryNorm, limit, true, nil)
 }
 
 func (db *DB) searchVectorFullScanWithPath(queryVec []float32, queryNorm float32, pathPrefix string, limit int) ([]*SearchResult, error) {
@@ -260,62 +272,23 @@ func (db *DB) searchVectorFullScanWithPath(queryVec []float32, queryNorm float32
 	// Only build the IVF index from a full, unfiltered scan so the index covers
 	// the entire corpus and remains useful for future queries regardless of path
 	// scope.
-	needIndex := pathPrefix == "" && (db.vectorIndex == nil || !db.vectorIndex.IsReady())
 	var indexChunks []*Chunk
-
-	var allRows []rowEntry
-	for rows.Next() {
-		var e rowEntry
-		var sigPtr *[]byte
-		if err := rows.Scan(&e.chunk.ID, &e.chunk.UUID, &e.chunk.DocumentPath, &e.chunk.ChunkIndex, &e.embBytes, &e.chunk.Hash, &e.norm, &sigPtr, &e.chunk.Dim, &e.chunk.Model); err != nil {
-			return nil, err
-		}
-		if sigPtr != nil {
-			e.sigBytes = *sigPtr
-		}
-		e.chunk.Norm = e.norm
-
-		if needIndex {
-			e.chunk.Embedding = BytesToFloat32Slice(e.embBytes)
-			indexChunks = append(indexChunks, &Chunk{ID: e.chunk.ID, Embedding: e.chunk.Embedding})
-		}
-
-		allRows = append(allRows, e)
+	var collectIndex *[]*Chunk
+	if pathPrefix == "" && (db.vectorIndex == nil || !db.vectorIndex.IsReady()) {
+		collectIndex = &indexChunks
 	}
-	if err := rows.Err(); err != nil {
+
+	results, err := db.scanAndScore(rows, queryVec, queryNorm, limit, true, collectIndex)
+	if err != nil {
 		return nil, err
 	}
 
-	if needIndex && len(indexChunks) >= indexBuildThreshold {
+	if len(indexChunks) >= indexBuildThreshold {
 		if db.vectorIndex == nil {
 			db.vectorIndex = NewVectorIndex()
 		}
 		db.vectorIndex.Build(indexChunks)
 		db.saveVectorIndex()
-	}
-
-	querySig := SignBinarySignature(queryVec)
-	shortlist := hammingShortlist(allRows, querySig, limit)
-
-	h := &SearchResultHeap{}
-	for i := range shortlist {
-		e := &shortlist[i]
-		c := &e.chunk
-
-		scoreShortlist(h, limit, queryVec, queryNorm, c, e.embBytes, e.norm)
-	}
-
-	sort.SliceStable(*h, func(i, j int) bool {
-		return (*h)[i].CosineScore > (*h)[j].CosineScore
-	})
-	results := ([]*SearchResult)(*h)
-
-	for i, r := range results {
-		r.VectorRank = i + 1
-	}
-
-	if err := db.hydrateContent(results); err != nil {
-		return nil, err
 	}
 	return results, nil
 }
@@ -330,36 +303,7 @@ func (db *DB) searchVectorFullScanCosine(queryVec []float32, queryNorm float32, 
 	}
 	defer rows.Close()
 
-	h := &SearchResultHeap{}
-	for rows.Next() {
-		var c Chunk
-		var embBytes []byte
-		var norm float32
-		var sigPtr *[]byte
-		if err := rows.Scan(&c.ID, &c.UUID, &c.DocumentPath, &c.ChunkIndex, &embBytes, &c.Hash, &norm, &sigPtr, &c.Dim, &c.Model); err != nil {
-			return nil, err
-		}
-		c.Norm = norm
-
-		scoreShortlist(h, limit, queryVec, queryNorm, &c, embBytes, norm)
-	}
-
-	sort.SliceStable(*h, func(i, j int) bool {
-		return (*h)[i].CosineScore > (*h)[j].CosineScore
-	})
-	results := ([]*SearchResult)(*h)
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-
-	for i, r := range results {
-		r.VectorRank = i + 1
-	}
-
-	if err := db.hydrateContent(results); err != nil {
-		return nil, err
-	}
-	return results, nil
+	return db.scanAndScore(rows, queryVec, queryNorm, limit, false, nil)
 }
 
 // hydrateContent fills in Chunk.Content for the given results using a single
