@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/BurntSushi/toml"
@@ -210,113 +211,214 @@ func Save(path string, cfg *Config) error {
 	return nil
 }
 
-// SetValue validates and sets a single config key, then saves to disk.
-func SetValue(cfgFile string, key, value string, cfg *Config) error {
-	switch key {
-	case "ollama_url":
-		if value == "" {
-			return fmt.Errorf("--set-value is required for key %q", key)
+// configKey describes one settable config key: set validates the raw
+// --set-value string and assigns the parsed value; desc documents the key.
+// configKeys is the single source for SetValue dispatch and the supported-keys
+// error text, so a new key needs exactly one entry; its order is the
+// documented key order.
+type configKey struct {
+	name string
+	desc string
+	set  func(cfg *Config, key, value string) error
+}
+
+var configKeys = []configKey{
+	{name: "ollama_url", desc: "Ollama embeddings endpoint URL", set: func(cfg *Config, key, value string) error {
+		if err := requireValue(key, value); err != nil {
+			return err
 		}
 		cfg.OllamaURL = value
-	case "model":
-		if value == "" {
-			return fmt.Errorf("--set-value is required for key %q", key)
+		return nil
+	}},
+	{name: "model", desc: "Embedding model name", set: func(cfg *Config, key, value string) error {
+		if err := requireValue(key, value); err != nil {
+			return err
 		}
 		cfg.Model = value
-	case "embedding_dim":
+		return nil
+	}},
+	{name: "embedding_dim", desc: "Embedding dimension (0 = auto-detect)", set: func(cfg *Config, key, value string) error {
 		n, err := strconv.Atoi(value)
 		if err != nil || n < 0 {
 			return fmt.Errorf("invalid %s value %q (must be a non-negative integer; 0 means auto-detect)", key, value)
 		}
 		cfg.EmbeddingDim = n
-	case "timeout_seconds":
-		n, err := strconv.Atoi(value)
-		if err != nil || n <= 0 {
-			return fmt.Errorf("invalid %s value %q (must be a positive integer)", key, value)
+		return nil
+	}},
+	{name: "timeout_seconds", desc: "Embedding request timeout in seconds", set: func(cfg *Config, key, value string) error {
+		n, err := parsePositiveInt(key, value)
+		if err != nil {
+			return err
 		}
 		cfg.TimeoutSeconds = n
-	case "retry_count":
-		n, err := strconv.Atoi(value)
-		if err != nil || n < 0 {
-			return fmt.Errorf("invalid %s value %q (must be a non-negative integer)", key, value)
+		return nil
+	}},
+	{name: "retry_count", desc: "Embedding request retry count", set: func(cfg *Config, key, value string) error {
+		n, err := parseNonNegativeInt(key, value)
+		if err != nil {
+			return err
 		}
 		cfg.RetryCount = n
-	case "retry_backoff_ms":
-		n, err := strconv.Atoi(value)
-		if err != nil || n <= 0 {
-			return fmt.Errorf("invalid %s value %q (must be a positive integer)", key, value)
+		return nil
+	}},
+	{name: "retry_backoff_ms", desc: "Backoff between embedding retries in milliseconds", set: func(cfg *Config, key, value string) error {
+		n, err := parsePositiveInt(key, value)
+		if err != nil {
+			return err
 		}
 		cfg.RetryBackoffMS = n
-	case "index_cooldown_seconds":
-		n, err := strconv.Atoi(value)
-		if err != nil || n <= 0 {
-			return fmt.Errorf("invalid %s value %q (must be a positive integer)", key, value)
+		return nil
+	}},
+	{name: "index_cooldown_seconds", desc: "Cooldown between index runs in seconds", set: func(cfg *Config, key, value string) error {
+		n, err := parsePositiveInt(key, value)
+		if err != nil {
+			return err
 		}
 		cfg.IndexCooldownSeconds = n
-	case "vector_backend":
-		if value == "" {
-			return fmt.Errorf("--set-value is required for key %q", key)
+		return nil
+	}},
+	{name: "vector_backend", desc: `Vector storage backend (only "sqlite" supported)`, set: func(cfg *Config, key, value string) error {
+		if err := requireValue(key, value); err != nil {
+			return err
 		}
 		if value != "sqlite" {
-			return fmt.Errorf("invalid vector_backend %q (only \"sqlite\" is currently supported)", value)
+			return fmt.Errorf("invalid %s %q (only %q is currently supported)", key, value, "sqlite")
 		}
 		cfg.VectorBackend = value
-	case "vector_quantization":
-		if value == "" {
-			return fmt.Errorf("--set-value is required for key %q", key)
+		return nil
+	}},
+	{name: "vector_quantization", desc: `Vector quantization mode ("off" or "turbo-prod")`, set: func(cfg *Config, key, value string) error {
+		if err := requireValue(key, value); err != nil {
+			return err
 		}
 		if value != "off" && value != "turbo-prod" {
-			return fmt.Errorf("invalid vector_quantization %q (supported: \"off\", \"turbo-prod\")", value)
+			return fmt.Errorf("invalid %s %q (supported: %q, %q)", key, value, "off", "turbo-prod")
 		}
 		cfg.VectorQuantization = value
-	case "vector_quant_bits":
+		return nil
+	}},
+	{name: "vector_quant_bits", desc: "Quantization bit width (2, 3, or 4)", set: func(cfg *Config, key, value string) error {
 		n, err := strconv.Atoi(value)
 		if err != nil || (n != 2 && n != 3 && n != 4) {
 			return fmt.Errorf("invalid %s value %q (must be 2, 3, or 4)", key, value)
 		}
 		cfg.VectorQuantBits = n
-	case "vector_quantized_shortlist":
-		n, err := strconv.Atoi(value)
-		if err != nil || n <= 0 {
-			return fmt.Errorf("invalid %s value %q (must be a positive integer)", key, value)
+		return nil
+	}},
+	{name: "vector_quantized_shortlist", desc: "Approximate shortlist size for quantized search", set: func(cfg *Config, key, value string) error {
+		n, err := parsePositiveInt(key, value)
+		if err != nil {
+			return err
 		}
 		cfg.VectorQuantizedShortlist = n
-	case "vector_exact_rerank":
-		b, err := strconv.ParseBool(value)
+		return nil
+	}},
+	{name: "vector_exact_rerank", desc: "Exact cosine rerank on the quantized shortlist", set: func(cfg *Config, key, value string) error {
+		b, err := parseBoolValue(key, value)
 		if err != nil {
-			return fmt.Errorf("invalid %s value %q (must be true or false)", key, value)
+			return err
 		}
 		cfg.VectorExactRerank = b
-	case "rerank_query":
-		b, err := strconv.ParseBool(value)
+		return nil
+	}},
+	{name: "rerank_query", desc: "Enable Ollama re-ranking of search results", set: func(cfg *Config, key, value string) error {
+		b, err := parseBoolValue(key, value)
 		if err != nil {
-			return fmt.Errorf("invalid %s value %q (must be true or false)", key, value)
+			return err
 		}
 		cfg.RerankQuery = b
-	case "rerank_model":
+		return nil
+	}},
+	{name: "rerank_model", desc: "Chat model for re-ranking (empty = reuse embedding model)", set: func(cfg *Config, _ string, value string) error {
 		cfg.RerankModel = value
-	case "rerank_timeout_seconds":
-		n, err := strconv.Atoi(value)
-		if err != nil || n <= 0 {
-			return fmt.Errorf("invalid %s value %q (must be a positive integer)", key, value)
+		return nil
+	}},
+	{name: "rerank_timeout_seconds", desc: "Per-request timeout for re-ranking", set: func(cfg *Config, key, value string) error {
+		n, err := parsePositiveInt(key, value)
+		if err != nil {
+			return err
 		}
 		cfg.RerankTimeoutSeconds = n
-	case "expand_query":
-		b, err := strconv.ParseBool(value)
+		return nil
+	}},
+	{name: "expand_query", desc: "Enable HyDE query expansion via Ollama chat", set: func(cfg *Config, key, value string) error {
+		b, err := parseBoolValue(key, value)
 		if err != nil {
-			return fmt.Errorf("invalid %s value %q (must be true or false)", key, value)
+			return err
 		}
 		cfg.ExpandQuery = b
-	case "expand_model":
+		return nil
+	}},
+	{name: "expand_model", desc: "Chat model for expansion (empty = reuse embedding model)", set: func(cfg *Config, _ string, value string) error {
 		cfg.ExpandModel = value
-	case "expand_timeout_seconds":
-		n, err := strconv.Atoi(value)
-		if err != nil || n <= 0 {
-			return fmt.Errorf("invalid %s value %q (must be a positive integer)", key, value)
+		return nil
+	}},
+	{name: "expand_timeout_seconds", desc: "Per-request timeout for expansion", set: func(cfg *Config, key, value string) error {
+		n, err := parsePositiveInt(key, value)
+		if err != nil {
+			return err
 		}
 		cfg.ExpandTimeoutSeconds = n
-	default:
-		return fmt.Errorf("unknown config key %q (supported: ollama_url, model, embedding_dim, timeout_seconds, retry_count, retry_backoff_ms, index_cooldown_seconds, vector_backend, vector_quantization, vector_quant_bits, vector_quantized_shortlist, vector_exact_rerank, rerank_query, rerank_model, rerank_timeout_seconds, expand_query, expand_model, expand_timeout_seconds)", key)
+		return nil
+	}},
+}
+
+func findConfigKey(name string) *configKey {
+	for i := range configKeys {
+		if configKeys[i].name == name {
+			return &configKeys[i]
+		}
+	}
+	return nil
+}
+
+func supportedConfigKeys() string {
+	names := make([]string, len(configKeys))
+	for i, k := range configKeys {
+		names[i] = k.name
+	}
+	return strings.Join(names, ", ")
+}
+
+func requireValue(key, value string) error {
+	if value == "" {
+		return fmt.Errorf("--set-value is required for key %q", key)
+	}
+	return nil
+}
+
+func parsePositiveInt(key, value string) (int, error) {
+	n, err := strconv.Atoi(value)
+	if err != nil || n <= 0 {
+		return 0, fmt.Errorf("invalid %s value %q (must be a positive integer)", key, value)
+	}
+	return n, nil
+}
+
+func parseNonNegativeInt(key, value string) (int, error) {
+	n, err := strconv.Atoi(value)
+	if err != nil || n < 0 {
+		return 0, fmt.Errorf("invalid %s value %q (must be a non-negative integer)", key, value)
+	}
+	return n, nil
+}
+
+func parseBoolValue(key, value string) (bool, error) {
+	b, err := strconv.ParseBool(value)
+	if err != nil {
+		return false, fmt.Errorf("invalid %s value %q (must be true or false)", key, value)
+	}
+	return b, nil
+}
+
+// SetValue validates and sets a single config key, then saves to disk.
+func SetValue(cfgFile string, key, value string, cfg *Config) error {
+	entry := findConfigKey(key)
+	if entry == nil {
+		return fmt.Errorf("unknown config key %q (supported: %s)", key, supportedConfigKeys())
+	}
+	if err := entry.set(cfg, key, value); err != nil {
+		return err
 	}
 	return Save(cfgFile, cfg)
 }
