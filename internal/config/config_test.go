@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -944,5 +945,72 @@ func TestSave_EncodeError_BrokenPipe(t *testing.T) {
 	}
 	if !strings.Contains(saveErr.Error(), "failed to encode config") {
 		t.Errorf("unexpected error: %v", saveErr)
+	}
+}
+
+func TestSetValue_UnknownKeyListsRegistryKeysInOrder(t *testing.T) {
+	cfg := DefaultConfig()
+	cfgFile := filepath.Join(t.TempDir(), "config.toml")
+
+	err := SetValue(cfgFile, "not-a-key", "x", cfg)
+	if err == nil {
+		t.Fatal("expected error for unknown key")
+	}
+
+	wantNames := []string{
+		"ollama_url", "model", "embedding_dim", "timeout_seconds", "retry_count",
+		"retry_backoff_ms", "index_cooldown_seconds", "vector_backend",
+		"vector_quantization", "vector_quant_bits", "vector_quantized_shortlist",
+		"vector_exact_rerank", "rerank_query", "rerank_model",
+		"rerank_timeout_seconds", "expand_query", "expand_model",
+		"expand_timeout_seconds",
+	}
+	want := fmt.Sprintf("unknown config key %q (supported: %s)", "not-a-key", strings.Join(wantNames, ", "))
+	if err.Error() != want {
+		t.Errorf("unknown-key error drifted from registry order/wording:\n got: %s\nwant: %s", err.Error(), want)
+	}
+}
+
+func TestConfigKeys_RegistryEntriesComplete(t *testing.T) {
+	seen := make(map[string]bool, len(configKeys))
+	for _, k := range configKeys {
+		if k.name == "" {
+			t.Error("registry entry with empty name")
+		}
+		if seen[k.name] {
+			t.Errorf("duplicate registry entry %q", k.name)
+		}
+		seen[k.name] = true
+		if k.desc == "" {
+			t.Errorf("registry entry %q has no description", k.name)
+		}
+		if k.set == nil {
+			t.Errorf("registry entry %q has no set function", k.name)
+		}
+	}
+}
+
+func TestConfigKeys_CoversAllConfigFields(t *testing.T) {
+	registryNames := make(map[string]bool, len(configKeys))
+	for _, k := range configKeys {
+		registryNames[k.name] = true
+	}
+
+	tomlTags := make(map[string]bool)
+	cfgType := reflect.TypeOf(Config{})
+	for i := 0; i < cfgType.NumField(); i++ {
+		tag := cfgType.Field(i).Tag.Get("toml")
+		if tag == "" || tag == "-" {
+			continue
+		}
+		tomlTags[tag] = true
+		if !registryNames[tag] {
+			t.Errorf("Config field %s (toml %q) has no configKeys entry", cfgType.Field(i).Name, tag)
+		}
+	}
+	for name := range registryNames {
+		if !tomlTags[name] {
+			t.Errorf("configKeys entry %q does not match any Config toml field", name)
+		}
 	}
 }
