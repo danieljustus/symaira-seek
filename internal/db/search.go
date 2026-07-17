@@ -128,27 +128,38 @@ type rowEntry struct {
 // the top candidates for cosine rescoring. When the Hamming pre-filter
 // provides no discrimination (all distances equal, querySig nil, or the
 // shortlist covers all rows), it returns all rows so exact cosine scoring is
-// preserved.
+// preserved. Distances are precomputed once per row and rows are ordered
+// through an index permutation, so the XOR/popcount runs exactly n times
+// instead of O(n log n) times per query.
 func hammingShortlist(allRows []rowEntry, querySig []byte, limit int) []rowEntry {
 	hammingSize := limit * binarySignatureCandidateMultiplier
 	if hammingSize > len(allRows) {
 		hammingSize = len(allRows)
 	}
 
-	hammingEffective := false
-	if querySig != nil && len(allRows) > 1 && hammingSize < len(allRows) {
-		sort.SliceStable(allRows, func(i, j int) bool {
-			return hammingDistFallback(querySig, allRows[i].sigBytes) < hammingDistFallback(querySig, allRows[j].sigBytes)
-		})
-		minDist := hammingDistFallback(querySig, allRows[0].sigBytes)
-		maxDist := hammingDistFallback(querySig, allRows[hammingSize-1].sigBytes)
-		hammingEffective = (minDist != maxDist)
+	if querySig == nil || len(allRows) <= 1 || hammingSize >= len(allRows) {
+		return allRows
 	}
 
-	if hammingEffective {
-		return allRows[:hammingSize]
+	dists := make([]int, len(allRows))
+	order := make([]int, len(allRows))
+	for i := range allRows {
+		dists[i] = hammingDistFallback(querySig, allRows[i].sigBytes)
+		order[i] = i
 	}
-	return allRows
+	sort.SliceStable(order, func(a, b int) bool {
+		return dists[order[a]] < dists[order[b]]
+	})
+
+	sorted := make([]rowEntry, len(allRows))
+	for i := range sorted {
+		sorted[i] = allRows[order[i]]
+	}
+
+	if dists[order[0]] == dists[order[hammingSize-1]] {
+		return sorted
+	}
+	return sorted[:hammingSize]
 }
 
 func scoreShortlist(h *SearchResultHeap, limit int, queryVec []float32, queryNorm float32, chunk *Chunk, embBytes []byte, norm float32) {
