@@ -122,13 +122,24 @@ jobs:
             echo "::warning::NOTARY_API_KEY secret is not set. Skipping notarization."
             exit 0
           fi
+          # App Store Connect API key auth (--key/--key-id/--issuer).
+          # The secret may hold the .p8 PEM raw or base64-encoded.
+          KEY_FILE="$RUNNER_TEMP/AuthKey_${NOTARY_API_KEY_ID}.p8"
+          if printf '%s' "${NOTARY_API_KEY}" | grep -q "BEGIN PRIVATE KEY"; then
+            printf '%s\n' "${NOTARY_API_KEY}" > "$KEY_FILE"
+          else
+            printf '%s' "${NOTARY_API_KEY}" | base64 --decode > "$KEY_FILE"
+          fi
+          chmod 600 "$KEY_FILE"
+
           echo "Notarizing Symseek.dmg..."
           xcrun notarytool submit client/build/Symseek.dmg \
-            --apple-id "${NOTARY_API_KEY_ID}" \
-            --team-id "${NOTARY_API_ISSUER}" \
-            --password "${NOTARY_API_KEY}" \
+            --key "$KEY_FILE" \
+            --key-id "${NOTARY_API_KEY_ID}" \
+            --issuer "${NOTARY_API_ISSUER}" \
             --wait
-          
+          rm -f "$KEY_FILE"
+
           echo "Stapling notarization ticket to DMG..."
           xcrun stapler staple client/build/Symseek.dmg
 
