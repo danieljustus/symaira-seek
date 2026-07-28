@@ -26,6 +26,9 @@
 # Agent/developer workspace files
 AGENTS.md
 
+# Git worktrees
+.worktrees/
+
 # Local agent session state
 .omo/
 
