@@ -76,6 +76,7 @@ struct DashboardView: View {
                             }
                             .buttonStyle(.borderedProminent)
                             .tint(.red.opacity(0.8))
+                            .accessibilityLabel("Stop the search server")
                         } else {
                             Text("Search server is currently inactive.")
                                 .font(.system(.caption, design: .monospaced))
@@ -89,10 +90,12 @@ struct DashboardView: View {
                             .buttonStyle(.borderedProminent)
                             .tint(Color.symairaGold)
                             .foregroundStyle(Color.symairaBg)
+                            .accessibilityLabel("Start the search server")
                         }
                     }
                 }
                 .symairaCard()
+                .accessibilityElement(children: .contain)
                 
                 // Stat Grid
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 180))], spacing: 16) {
@@ -130,6 +133,7 @@ struct DashboardView: View {
                         .foregroundStyle(Color.symairaTextSecondary)
                 }
                 .symairaCard()
+                .accessibilityElement(children: .contain)
             }
             .padding()
         }
@@ -218,6 +222,8 @@ struct StatCard: View {
             }
         }
         .symairaCard()
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(title): \(value), \(description)")
     }
 }
 

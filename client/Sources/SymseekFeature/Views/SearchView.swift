@@ -61,6 +61,7 @@ struct SearchView: View {
                                 .foregroundStyle(Color.symairaMuted)
                         }
                         .buttonStyle(.plain)
+                        .accessibilityLabel("Clear search query")
                     }
                 }
                 .padding(10)
@@ -283,6 +284,10 @@ struct SearchResultRow: View {
         .cornerRadius(8)
         .padding(.horizontal, 12)
         .padding(.vertical, 4)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Search result: \(URL(fileURLWithPath: result.chunk.document_path).lastPathComponent)")
+        .accessibilityAddTraits(.isButton)
+        .accessibilityValue(isSelected ? "Selected" : "")
     }
 }
 
@@ -313,6 +318,7 @@ struct ResultDetailView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(Color.symairaGold)
+                .accessibilityLabel("Open file in default application")
             }
             .padding()
             .background(Color.symairaBgDarker)
@@ -405,6 +411,8 @@ struct MetricCard: View {
         .background(Color.symairaCard)
         .cornerRadius(8)
         .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.symairaBorder, lineWidth: 1))
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(title): \(value), \(subtitle)")
     }
 }
 
