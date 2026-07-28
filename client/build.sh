@@ -29,6 +29,9 @@ mkdir -p "$APP_DIR/Contents/Resources"
 # Copy Info.plist
 cp client/Sources/SymseekApp/Info.plist "$APP_DIR/Contents/"
 
+# Create PkgInfo file (required for macOS WindowServer registration)
+echo -n 'APPL????' > "$APP_DIR/Contents/PkgInfo"
+
 # Copy Swift GUI executable
 cp "$SWIFT_BIN_DIR/symseek-gui" "$APP_DIR/Contents/MacOS/"
 
