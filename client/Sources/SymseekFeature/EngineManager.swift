@@ -61,6 +61,14 @@ public final class EngineManager {
     public func start(port: Int = 8080) async {
         guard !isRunning else { return }
 
+        // First, check if a daemon is already running on the target port.
+        // This handles the case where a brew-installed symseek daemon is
+        // already serving (e.g. /opt/homebrew/bin/symseek serve).
+        if await checkExistingDaemon(port: port) {
+            appendLog("[engine] Detected running daemon on port \(port), adopting it")
+            return
+        }
+
         state = .starting
         appendLog("[engine] Starting symseek REST server on port \(port)…")
 
@@ -88,6 +96,66 @@ public final class EngineManager {
         logs.append(message)
         if logs.count > maxLogs {
             logs.removeFirst(logs.count - maxLogs)
+        }
+    }
+
+    /// Try to detect an already-running symseek daemon by making a status
+    /// request to the given port.  Returns `true` and transitions the
+    /// engine state to `.running` if a daemon responds.
+    private func checkExistingDaemon(port: Int) async -> Bool {
+        let url = URL(string: "http://127.0.0.1:\(port)/status")!
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 1.5
+
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let httpResponse = response as? HTTPURLResponse,
+                  httpResponse.statusCode == 200,
+                  !data.isEmpty else {
+                return false
+            }
+            // Daemon responded — adopt it.
+            currentPort = port
+            state = .running(port: port)
+            return true
+        } catch {
+            // No daemon on this port — also try the CLI status command as
+            // a fallback in case the daemon listens on a different port.
+            return await checkViaCLI()
+        }
+    }
+
+    /// Fallback: run `symseek status` via CLI to discover a running daemon
+    /// whose port we might not have guessed.  Parses the output for
+    /// known status indicators.
+    private func checkViaCLI() async -> Bool {
+        guard let binaryURL = locateBinary() else { return false }
+
+        let proc = Process()
+        proc.executableURL = binaryURL
+        proc.arguments = ["status"]
+
+        let pipe = Pipe()
+        proc.standardOutput = pipe
+        proc.standardError = Pipe()
+
+        do {
+            try proc.run()
+            proc.waitUntilExit()
+
+            guard proc.terminationStatus == 0 else { return false }
+
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            guard let output = String(data: data, encoding: .utf8),
+                  !output.isEmpty else { return false }
+
+            // A successful "symseek status" with data means the daemon is
+            // reachable.  Default to port 8080 (most common for brew).
+            currentPort = 8080
+            state = .running(port: 8080)
+            return true
+        } catch {
+            return false
         }
     }
 

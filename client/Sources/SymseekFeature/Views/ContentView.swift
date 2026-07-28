@@ -17,7 +17,7 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 6) {
                 // Branding Logo/Title
                 HStack(spacing: 8) {
-                    Image(systemName: "bolt.ring")
+                    Image(systemName: "bolt.shield.fill")
                         .font(.title2)
                         .foregroundStyle(Color.symairaGold)
                     
