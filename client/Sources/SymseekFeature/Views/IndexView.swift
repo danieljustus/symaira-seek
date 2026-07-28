@@ -47,6 +47,7 @@ struct IndexView: View {
                     }
                     .buttonStyle(.bordered)
                     .disabled(model.isIndexing)
+                    .accessibilityLabel("Browse for folder to index")
                 }
                 
                 // Watch Mode Toggle
@@ -96,6 +97,7 @@ struct IndexView: View {
                         }
                         .buttonStyle(.borderedProminent)
                         .tint(.red.opacity(0.8))
+                        .accessibilityLabel("Stop indexing process")
                     } else {
                         Text("Ready to index.")
                             .font(.system(.caption, design: .monospaced))
@@ -108,6 +110,7 @@ struct IndexView: View {
                         .tint(Color.symairaGold)
                         .foregroundStyle(Color.symairaBg)
                         .disabled(model.selectedFolder.isEmpty)
+                        .accessibilityLabel("Start indexing")
                     }
                 }
             }
@@ -128,6 +131,7 @@ struct IndexView: View {
                     .buttonStyle(.plain)
                     .foregroundStyle(Color.symairaMuted)
                     .font(.caption)
+                    .accessibilityLabel("Clear console logs")
                 }
                 
                 ScrollViewReader { proxy in

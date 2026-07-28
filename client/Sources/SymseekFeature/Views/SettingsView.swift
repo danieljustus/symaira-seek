@@ -333,6 +333,7 @@ struct SettingsView: View {
                         .buttonStyle(.borderedProminent)
                         .tint(Color.symairaGold)
                         .foregroundStyle(Color.symairaBg)
+                        .accessibilityLabel("Apply settings")
                         
                         if !model.saveStatus.isEmpty {
                             Text(model.saveStatus)
