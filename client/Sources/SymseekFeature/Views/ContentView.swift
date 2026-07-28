@@ -39,18 +39,30 @@ struct ContentView: View {
                     SidebarButton(title: "Dashboard", icon: "square.grid.2x2.fill", isSelected: selectedTab == .dashboard) {
                         selectedTab = .dashboard
                     }
+                    .accessibilityLabel("Dashboard")
+                    .accessibilityAddTraits(.isButton)
+                    .accessibilityValue(selectedTab == .dashboard ? "Selected" : "")
                     
                     SidebarButton(title: "Search Matches", icon: "magnifyingglass", isSelected: selectedTab == .search) {
                         selectedTab = .search
                     }
+                    .accessibilityLabel("Search Matches")
+                    .accessibilityAddTraits(.isButton)
+                    .accessibilityValue(selectedTab == .search ? "Selected" : "")
                     
                     SidebarButton(title: "Index & Watch", icon: "folder.fill.badge.plus", isSelected: selectedTab == .indexing) {
                         selectedTab = .indexing
                     }
+                    .accessibilityLabel("Index and Watch")
+                    .accessibilityAddTraits(.isButton)
+                    .accessibilityValue(selectedTab == .indexing ? "Selected" : "")
                     
                     SidebarButton(title: "Settings", icon: "gearshape.fill", isSelected: selectedTab == .settings) {
                         selectedTab = .settings
                     }
+                    .accessibilityLabel("Settings")
+                    .accessibilityAddTraits(.isButton)
+                    .accessibilityValue(selectedTab == .settings ? "Selected" : "")
                 }
                 
                 Spacer()
@@ -132,5 +144,8 @@ struct SidebarButton: View {
         .onHover { hover in
             isHovered = hover
         }
+        .accessibilityLabel(title)
+        .accessibilityAddTraits(.isButton)
+        .accessibilityValue(isSelected ? "Selected" : "")
     }
 }
