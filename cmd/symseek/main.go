@@ -100,11 +100,15 @@ func newRootCmd() *cobra.Command {
 				return err
 			}
 
+			// Extract query terms for snippet builder
+			queryTerms := strings.Fields(query)
+
 			// JSON output — never launch TUI in JSON mode.
 			if jsonFlag {
 				structured := make([]*db.StructuredSearchResult, 0, len(results))
 				for _, r := range results {
 					if s := r.Structured(); s != nil {
+						s.Snippet = engine.BuildSnippet(s.Snippet, queryTerms, engine.DefaultSnippetBound)
 						structured = append(structured, s)
 					}
 				}
@@ -118,7 +122,7 @@ func newRootCmd() *cobra.Command {
 				return tui.Run(query, results)
 			}
 
-			writeSearchHuman(os.Stdout, results)
+			writeSearchHuman(os.Stdout, results, queryTerms)
 			return nil
 		},
 	}
@@ -392,18 +396,17 @@ func startMCPServer() error {
 	return mcp.StartServer(cfg.OllamaConfig(), cfg.QuantDBConfig(), cfg.RerankConfig(), cfg.ExpandConfig())
 }
 
-func writeSearchHuman(w io.Writer, results []*db.SearchResult) {
+func writeSearchHuman(w io.Writer, results []*db.SearchResult, queryTerms []string) {
 	if len(results) == 0 {
 		fmt.Fprintln(w, "No matching documents found.")
 		return
 	}
 	for idx, r := range results {
+		snippet := engine.BuildSnippet(r.Chunk.Content, queryTerms, engine.DefaultSnippetBound)
 		fmt.Fprintf(w, "[%d] Path: %s (Chunk Index: %d)\n", idx+1, r.Chunk.DocumentPath, r.Chunk.ChunkIndex)
 		fmt.Fprintf(w, "    Score: RRF=%.4f Cosine=%.4f (Ranks: BM25=%d Vector=%d)\n", r.RRFScore, r.CosineScore, r.BM25Rank, r.VectorRank)
-		fmt.Fprintln(w, "    --- Content ---")
-		for _, line := range strings.Split(r.Chunk.Content, "\n") {
-			fmt.Fprintf(w, "    %s\n", line)
-		}
+		fmt.Fprintln(w, "    --- Snippet ---")
+		fmt.Fprintf(w, "    %s\n", strings.ReplaceAll(snippet, "\n", "\n    "))
 		fmt.Fprintln(w, "    ----------------")
 		fmt.Fprintln(w)
 	}

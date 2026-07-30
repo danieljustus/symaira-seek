@@ -243,8 +243,17 @@ func newServeMux(dbClient db.Store, vectorStore db.VectorStore, embedder engine.
 			return
 		}
 
+		queryTerms := strings.Fields(query)
+
 		if !stream {
-			json.NewEncoder(w).Encode(results)
+			structured := make([]*db.StructuredSearchResult, 0, len(results))
+			for _, r := range results {
+				if s := r.Structured(); s != nil {
+					s.Snippet = engine.BuildSnippet(s.Snippet, queryTerms, engine.DefaultSnippetBound)
+					structured = append(structured, s)
+				}
+			}
+			json.NewEncoder(w).Encode(structured)
 			return
 		}
 
@@ -255,12 +264,15 @@ func newServeMux(dbClient db.Store, vectorStore db.VectorStore, embedder engine.
 			default:
 			}
 
-			data, err := json.Marshal(res)
-			if err != nil {
-				continue
+			if s := res.Structured(); s != nil {
+				s.Snippet = engine.BuildSnippet(s.Snippet, queryTerms, engine.DefaultSnippetBound)
+				data, err := json.Marshal(s)
+				if err != nil {
+					continue
+				}
+				fmt.Fprintf(w, "event: result\ndata: %s\n\n", data)
+				flusher.Flush()
 			}
-			fmt.Fprintf(w, "event: result\ndata: %s\n\n", data)
-			flusher.Flush()
 		}
 
 		doneData, _ := json.Marshal(map[string]int{"count": len(results)})

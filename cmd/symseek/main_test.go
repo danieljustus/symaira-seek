@@ -134,7 +134,7 @@ func TestRootCmd_VersionSubcommandStillWorks(t *testing.T) {
 
 func TestWriteSearchHuman_EmptyResults(t *testing.T) {
 	var buf bytes.Buffer
-	writeSearchHuman(&buf, nil)
+	writeSearchHuman(&buf, nil, nil)
 	if !strings.Contains(buf.String(), "No matching documents found.") {
 		t.Errorf("expected empty-results message, got %q", buf.String())
 	}
@@ -155,7 +155,7 @@ func TestWriteSearchHuman_OneResultRendersToWriter(t *testing.T) {
 			VectorRank:  2,
 		},
 	}
-	writeSearchHuman(&buf, results)
+	writeSearchHuman(&buf, results, []string{"first", "second"})
 
 	out := buf.String()
 	if !strings.Contains(out, "/docs/a.md") {
@@ -195,7 +195,7 @@ func TestWriteSearchHuman_MultipleResults(t *testing.T) {
 			VectorRank:  2,
 		},
 	}
-	writeSearchHuman(&buf, results)
+	writeSearchHuman(&buf, results, []string{"first", "second"})
 
 	out := buf.String()
 	if !strings.Contains(out, "/docs/a.md") {
@@ -227,7 +227,7 @@ func TestWriteSearchHuman_ScoresFormatting(t *testing.T) {
 			VectorRank:  5,
 		},
 	}
-	writeSearchHuman(&buf, results)
+	writeSearchHuman(&buf, results, []string{"test"})
 
 	out := buf.String()
 	if !strings.Contains(out, "RRF=0.1235") {

@@ -79,29 +79,33 @@ func registerSearchDocuments(server *mcpserver.Server, dbClient db.Store, vector
 				return nil, &symerrors.SearchError{Query: params.Query, Err: err}
 			}
 
-			switch strings.ToLower(params.Format) {
-			case "text":
-				return renderSearchText(results, dbClient)
-			default:
-				structured := make([]*db.StructuredSearchResult, 0, len(results))
-				for _, r := range results {
-					if s := r.Structured(); s != nil {
-						structured = append(structured, s)
-					}
+			// Extract individual terms from the query for snippet focus.
+		queryTerms := strings.Fields(params.Query)
+
+		switch strings.ToLower(params.Format) {
+		case "text":
+			return renderSearchText(results, dbClient, queryTerms)
+		default:
+			structured := make([]*db.StructuredSearchResult, 0, len(results))
+			for _, r := range results {
+				if s := r.Structured(); s != nil {
+					s.Snippet = engine.BuildSnippet(s.Snippet, queryTerms, engine.DefaultSnippetBound)
+					structured = append(structured, s)
 				}
-				data, err := json.Marshal(structured)
-				if err != nil {
-					return nil, fmt.Errorf("marshal search results: %w", err)
-				}
-				return string(data), nil
 			}
+			data, err := json.Marshal(structured)
+			if err != nil {
+				return nil, fmt.Errorf("marshal search results: %w", err)
+			}
+			return string(data), nil
+		}
 		},
 	})
 }
 
 // renderSearchText returns the legacy human-readable text representation of
 // search results, including folder context annotations when available.
-func renderSearchText(results []*db.SearchResult, dbClient db.Store) (string, error) {
+func renderSearchText(results []*db.SearchResult, dbClient db.Store, queryTerms []string) (string, error) {
 	type contextMatcher interface {
 		GetMatchingContext(path string) (*db.FolderContext, error)
 	}
@@ -112,13 +116,14 @@ func renderSearchText(results []*db.SearchResult, dbClient db.Store) (string, er
 
 	var textBuilder strings.Builder
 	for idx, r := range results {
+		snippet := engine.BuildSnippet(r.Chunk.Content, queryTerms, engine.DefaultSnippetBound)
 		textBuilder.WriteString(fmt.Sprintf("[%d] File: %s (Chunk %d, RRF Score: %.4f)\n", idx+1, r.Chunk.DocumentPath, r.Chunk.ChunkIndex, r.RRFScore))
 		if matcher != nil {
 			if fc, err := matcher.GetMatchingContext(r.Chunk.DocumentPath); err == nil && fc != nil {
 				textBuilder.WriteString(fmt.Sprintf("Context: %s — %s\n", fc.PathPrefix, fc.ContextText))
 			}
 		}
-		textBuilder.WriteString(r.Chunk.Content)
+		textBuilder.WriteString(snippet)
 		textBuilder.WriteString("\n\n")
 	}
 	return textBuilder.String(), nil
