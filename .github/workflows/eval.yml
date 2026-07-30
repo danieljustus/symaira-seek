@@ -1,0 +1,59 @@
+name: Weekly Eval
+
+on:
+  schedule:
+    # Run every Monday at 06:00 UTC.
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+    # Allow manual trigger from the Actions tab.
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.26.5'
+
+      - name: Run evaluation harness
+        id: bench
+        run: |
+          # Run with all three configs, emit JSON and save CSV.
+          go run ./cmd/symseek bench --all-configs --json > bench-results.json
+          go run ./cmd/symseek bench --all-configs > bench-summary.txt
+
+          # Also produce individual CSVs for each config.
+          echo "=== Vector Only ===" >> bench-summary.txt
+          go run ./cmd/symseek bench --json > bench-vector.json 2>&1 || true
+
+          echo "=== Step Summary ===" >> $GITHUB_STEP_SUMMARY
+          echo '## Retrieval-Quality Evaluation Results' >> $GITHUB_STEP_SUMMARY
+          echo '' >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          cat bench-summary.txt >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload results as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-results
+          path: |
+            bench-results.json
+            bench-summary.txt
+
+      - name: Write metrics summary to step summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo ''
+            echo '---'
+            echo '_This is a report-only evaluation. It never fails the default branch._'
+          } >> "$GITHUB_STEP_SUMMARY"
