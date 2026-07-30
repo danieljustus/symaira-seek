@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -88,7 +89,11 @@ func registerSearchDocuments(server *mcpserver.Server, dbClient db.Store, vector
 						structured = append(structured, s)
 					}
 				}
-				return structured, nil
+				data, err := json.Marshal(structured)
+				if err != nil {
+					return nil, fmt.Errorf("marshal search results: %w", err)
+				}
+				return string(data), nil
 			}
 		},
 	})
@@ -214,13 +219,26 @@ func registerListDocuments(server *mcpserver.Server, dbClient db.Store, _ engine
 	server.RegisterTool(&mcpserver.Tool{
 		Name:        "list_documents",
 		Description: "Browse the list of indexed documents. Use to explore what folders/files are currently in the index.",
-		InputSchema: json.RawMessage(`{"type":"object","properties":{"folder":{"type":"string","description":"Optional folder path prefix to filter the document list"}}}`),
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"folder":{"type":"string","description":"Optional folder path prefix to filter the document list"},"limit":{"type":"integer","description":"Maximum number of documents to return (default 50, max 500)"},"offset":{"type":"integer","description":"Number of documents to skip (default 0)"}}}`),
 		Handler: func(ctx context.Context, input json.RawMessage) (any, error) {
 			var params struct {
 				Folder string `json:"folder"`
+				Limit  int    `json:"limit"`
+				Offset int    `json:"offset"`
 			}
 			if err := json.Unmarshal(input, &params); err != nil {
 				return nil, &symerrors.ValidationError{Field: "params", Message: err.Error()}
+			}
+
+			if params.Limit <= 0 {
+				params.Limit = 50
+			}
+			const maxLimit = 500
+			if params.Limit > maxLimit {
+				params.Limit = maxLimit
+			}
+			if params.Offset < 0 {
+				params.Offset = 0
 			}
 
 			docs, err := dbClient.ListDocuments()
@@ -228,19 +246,63 @@ func registerListDocuments(server *mcpserver.Server, dbClient db.Store, _ engine
 				return nil, &symerrors.DatabaseError{Op: "list documents", Err: err}
 			}
 
-			var textBuilder strings.Builder
-			count := 0
+			// Filter by folder if specified.
+			var filtered []*db.Document
 			for _, d := range docs {
 				if params.Folder == "" || strings.HasPrefix(d.Path, params.Folder) {
-					textBuilder.WriteString(fmt.Sprintf("- %s (Last Indexed: %s)\n", d.Path, d.UpdatedAt.Format(time.RFC3339)))
-					count++
+					filtered = append(filtered, d)
 				}
 			}
 
-			if count == 0 {
-				textBuilder.WriteString("No documents matching filter found in index.")
+			// Deterministic ordering: sort by path.
+			slices.SortFunc(filtered, func(a, b *db.Document) int {
+				if a.Path < b.Path {
+					return -1
+				}
+				if a.Path > b.Path {
+					return 1
+				}
+				return 0
+			})
+
+			totalCount := len(filtered)
+
+			// Apply offset.
+			if params.Offset >= totalCount {
+				filtered = nil
+			} else {
+				filtered = filtered[params.Offset:]
 			}
-			return textBuilder.String(), nil
+
+			// Apply limit.
+			hasMore := len(filtered) > params.Limit
+			if len(filtered) > params.Limit {
+				filtered = filtered[:params.Limit]
+			}
+
+			type docEntry struct {
+				Path      string `json:"path"`
+				UpdatedAt string `json:"updated_at"`
+			}
+			entries := make([]docEntry, len(filtered))
+			for i, d := range filtered {
+				entries[i] = docEntry{Path: d.Path, UpdatedAt: d.UpdatedAt.Format(time.RFC3339)}
+			}
+
+			result := struct {
+				Count     int        `json:"count"`
+				HasMore   bool       `json:"has_more"`
+				Documents []docEntry `json:"documents"`
+			}{
+				Count:     totalCount,
+				HasMore:   hasMore,
+				Documents: entries,
+			}
+			data, err := json.Marshal(result)
+			if err != nil {
+				return nil, fmt.Errorf("marshal list results: %w", err)
+			}
+			return string(data), nil
 		},
 	})
 }
@@ -288,6 +350,24 @@ func registerGetContext(server *mcpserver.Server, dbClient db.Store, vectorStore
 				textBuilder.WriteString(r.Chunk.Content)
 				textBuilder.WriteString(sep)
 				runeCount += utf8.RuneCountInString(src) + chunkRunes + utf8.RuneCountInString(sep)
+			}
+
+			// Append index provenance block (best-effort).
+			if stats, statErr := dbClient.GetStats(); statErr == nil {
+				provenanceParts := make([]string, 0, 3)
+				if stats.LastIndexedAt.IsZero() {
+					provenanceParts = append(provenanceParts,
+						fmt.Sprintf("document_count=%d", stats.DocumentCount))
+				} else {
+					ageSeconds := int(time.Since(stats.LastIndexedAt).Seconds())
+					provenanceParts = append(provenanceParts,
+						fmt.Sprintf("document_count=%d", stats.DocumentCount),
+						fmt.Sprintf("indexed_at=%s", stats.LastIndexedAt.Format(time.RFC3339)),
+						fmt.Sprintf("age_seconds=%d", ageSeconds))
+				}
+				provenanceLine := fmt.Sprintf("\n---\nIndex provenance: %s\n",
+					strings.Join(provenanceParts, ", "))
+				textBuilder.WriteString(provenanceLine)
 			}
 			return textBuilder.String(), nil
 		},
