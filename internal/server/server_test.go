@@ -874,15 +874,18 @@ func TestMux_SearchEndpoint_Success(t *testing.T) {
 		t.Errorf("Content-Type = %q, want application/json", ct)
 	}
 
-	var results []*db.SearchResult
+	var results []*db.StructuredSearchResult
 	if err := json.NewDecoder(resp.Body).Decode(&results); err != nil {
 		t.Fatalf("failed to decode results: %v", err)
 	}
 	if len(results) != 1 {
 		t.Fatalf("len(results) = %d, want 1", len(results))
 	}
-	if results[0].Chunk.UUID != "u1" {
-		t.Errorf("results[0].Chunk.UUID = %q, want %q", results[0].Chunk.UUID, "u1")
+	if results[0].ChunkID != "u1" {
+		t.Errorf("results[0].ChunkID = %q, want %q", results[0].ChunkID, "u1")
+	}
+	if results[0].Snippet != "found it" {
+		t.Errorf("results[0].Snippet = %q, want %q", results[0].Snippet, "found it")
 	}
 }
 
@@ -905,7 +908,7 @@ func TestMux_SearchEndpoint_CustomLimit(t *testing.T) {
 		t.Fatalf("status %d, want 200", resp.StatusCode)
 	}
 
-	var results []*db.SearchResult
+	var results []*db.StructuredSearchResult
 	if err := json.NewDecoder(resp.Body).Decode(&results); err != nil {
 		t.Fatalf("failed to decode results: %v", err)
 	}
