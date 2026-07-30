@@ -88,7 +88,11 @@ func registerSearchDocuments(server *mcpserver.Server, dbClient db.Store, vector
 						structured = append(structured, s)
 					}
 				}
-				return structured, nil
+				data, err := json.Marshal(structured)
+				if err != nil {
+					return nil, fmt.Errorf("marshal search results: %w", err)
+				}
+				return string(data), nil
 			}
 		},
 	})

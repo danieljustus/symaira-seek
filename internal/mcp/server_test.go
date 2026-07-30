@@ -1803,7 +1803,7 @@ func TestSearchDocuments_StructuredJSON(t *testing.T) {
 	embed := &fakeEmbedder{}
 	server := newTestServer(store, store, embed)
 
-	got, isError, err := callToolResult(t, server, "search_documents", map[string]interface{}{
+		got, isError, err := callToolResult(t, server, "search_documents", map[string]interface{}{
 		"query": "api",
 		"limit": float64(5),
 	})
@@ -1814,14 +1814,14 @@ func TestSearchDocuments_StructuredJSON(t *testing.T) {
 		t.Fatalf("search_documents returned error: %v", got)
 	}
 
-	gotJSON, err := json.Marshal(got)
-	if err != nil {
-		t.Fatalf("failed to re-marshal tool result: %v", err)
+	gotStr, ok := got.(string)
+	if !ok {
+		t.Fatalf("expected string content, got %T: %v", got, got)
 	}
 
 	var results []*db.StructuredSearchResult
-	if err := json.Unmarshal(gotJSON, &results); err != nil {
-		t.Fatalf("expected valid JSON result, got %q: %v", gotJSON, err)
+	if err := json.Unmarshal([]byte(gotStr), &results); err != nil {
+		t.Fatalf("expected valid JSON string, got %q: %v", gotStr, err)
 	}
 	if len(results) != 1 {
 		t.Fatalf("expected 1 result, got %d", len(results))
