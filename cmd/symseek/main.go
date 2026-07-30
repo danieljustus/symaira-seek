@@ -20,6 +20,7 @@ import (
 	"github.com/danieljustus/symaira-corekit/logkit"
 	"github.com/danieljustus/symaira-corekit/updatecheck"
 	"github.com/danieljustus/symaira-corekit/versionkit"
+	"github.com/danieljustus/symaira-seek/internal/bench"
 	"github.com/danieljustus/symaira-seek/internal/config"
 	"github.com/danieljustus/symaira-seek/internal/db"
 	"github.com/danieljustus/symaira-seek/internal/engine"
@@ -317,6 +318,131 @@ func newRootCmd() *cobra.Command {
 	quantizeCmd.Flags().IntVar(&quantSeedFlag, "seed", 42, "Random rotation seed")
 	rootCmd.AddCommand(quantizeCmd)
 
+	// 5d. Bench (Evaluation Harness)
+	var benchJSON bool
+	var benchCorpus string
+	var benchJudgments string
+	var benchAllConfigs bool
+	var benchLimit int
+	benchCmd := &cobra.Command{
+		Use:   "bench",
+		Short: "Run retrieval-quality evaluation harness (Hit Rate / MRR / NDCG)",
+		Long: `Run the pinned-corpus retrieval-quality evaluation.
+
+Indexes the fixture corpus into a temporary database, runs all queries from
+the judgment set through SearchHybrid, and reports Hit Rate@k / MRR / NDCG@k
+metrics.
+
+By default runs in hybrid mode (BM25 + vector). With --all-configs, runs
+vector-only, hybrid, and hybrid+rerank configurations, each bounded by the
+targets from docs/research/README.md (§4.3.1):
+  - Hit Rate@10  > 95%
+  - MRR          > 0.70
+  - NDCG@10      > 0.75
+`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			embedder := engine.NewEmbeddingsGeneratorWithOllamaConfig(cfg.OllamaConfig())
+
+			if !benchAllConfigs {
+				// Single run: hybrid mode (default).
+				res, err := bench.RunAll(embedder, benchCorpus, benchJudgments, benchLimit,
+					engine.RerankConfig{Enabled: false},
+					engine.ExpandConfig{Enabled: false})
+				if err != nil {
+					return err
+				}
+
+				if benchJSON {
+					enc := json.NewEncoder(os.Stdout)
+					enc.SetIndent("", "  ")
+					return enc.Encode(res)
+				}
+
+				printBenchResults(os.Stdout, "Hybrid", res)
+				return nil
+			}
+
+			// Run all three configurations.
+			configRuns := []struct {
+				name      string
+				mode      bench.SearchMode
+				rerankCfg engine.RerankConfig
+				expandCfg engine.ExpandConfig
+			}{
+				{"Vector Only", bench.SearchVectorOnlyMode, engine.RerankConfig{Enabled: false}, engine.ExpandConfig{Enabled: false}},
+				{"Hybrid", bench.SearchHybridMode, engine.RerankConfig{Enabled: false}, engine.ExpandConfig{Enabled: false}},
+				{"Hybrid+Rerank", bench.SearchHybridMode, engine.RerankConfig{Enabled: true, URL: cfg.OllamaURL, Model: cfg.RerankModel, Timeout: time.Duration(cfg.RerankTimeoutSeconds) * time.Second}, engine.ExpandConfig{Enabled: false}},
+			}
+
+			type configResult struct {
+				name    string
+				results []*bench.Result
+			}
+
+			allResults := make([]configResult, 0, len(configRuns))
+			for _, cr := range configRuns {
+				// Load judgments and run each query through the harness with the
+				// configured mode (vector-only, hybrid, or hybrid+rerank).
+				judgments, err := bench.LoadJudgments(benchJudgments)
+				if err != nil {
+					return fmt.Errorf("loading judgments for %s: %w", cr.name, err)
+				}
+				var modeResults []*bench.Result
+				for _, j := range judgments {
+					cfg2 := bench.Config{
+						Query:       j.Query,
+						RelevantIDs: j.RelevantIDs,
+						CorpusDir:   benchCorpus,
+						SearchLimit: benchLimit,
+						Mode:        cr.mode,
+						SearchOpts: engine.SearchOptions{
+							RerankCfg: cr.rerankCfg,
+							ExpandCfg: cr.expandCfg,
+						},
+					}
+					r2, err2 := bench.Run(embedder, cfg2)
+					if err2 != nil {
+						return err2
+					}
+					modeResults = append(modeResults, r2)
+				}
+				allResults = append(allResults, configResult{name: cr.name, results: modeResults})
+			}
+
+			if benchJSON {
+				out := make(map[string][]*bench.Result)
+				for _, ar := range allResults {
+					out[ar.name] = ar.results
+				}
+				enc := json.NewEncoder(os.Stdout)
+				enc.SetIndent("", "  ")
+				return enc.Encode(out)
+			}
+
+			for _, ar := range allResults {
+				printBenchResults(os.Stdout, ar.name, ar.results)
+			}
+
+			// Print aggregate comparison table.
+			fmt.Fprintln(os.Stdout, "\n=== Aggregate Comparison ===")
+			fmt.Fprintf(os.Stdout, "%-20s | %10s %10s %10s %10s %10s\n",
+				"Config", "HR@1", "HR@3", "HR@10", "MRR", "NDCG@10")
+			fmt.Fprintln(os.Stdout, strings.Repeat("-", 85))
+			for _, ar := range allResults {
+				agg := bench.ComputeAggregate(ar.results)
+				fmt.Fprintf(os.Stdout, "%-20s | %10.4f %10.4f %10.4f %10.4f %10.4f\n",
+					ar.name, agg.HitRate1, agg.HitRate3, agg.HitRate10, agg.MRR, agg.NDCG10)
+			}
+			return nil
+		},
+	}
+	benchCmd.Flags().BoolVar(&benchJSON, "json", false, "Emit machine-readable JSON output")
+	benchCmd.Flags().StringVar(&benchCorpus, "corpus", "testdata/bench/corpus", "Path to corpus directory")
+	benchCmd.Flags().StringVar(&benchJudgments, "judgments", "testdata/bench/judgments.yaml", "Path to judgments YAML file")
+	benchCmd.Flags().BoolVar(&benchAllConfigs, "all-configs", false, "Run vector-only, hybrid, and hybrid+rerank configurations")
+	benchCmd.Flags().IntVar(&benchLimit, "limit", 10, "Search result limit")
+	rootCmd.AddCommand(benchCmd)
+
 	// 6. Version Command
 	var checkUpdate bool
 	var versionJSON bool
@@ -410,4 +536,29 @@ func writeSearchHuman(w io.Writer, results []*db.SearchResult, queryTerms []stri
 		fmt.Fprintln(w, "    ----------------")
 		fmt.Fprintln(w)
 	}
+}
+
+func printBenchResults(w io.Writer, configName string, results []*bench.Result) {
+	agg := bench.ComputeAggregate(results)
+
+	fmt.Fprintf(w, "\n=== Bench Results: %s ===\n", configName)
+	fmt.Fprintf(w, "Queries: %d\n", agg.Count)
+	fmt.Fprintf(w, "\n%-40s | %8s %8s %8s %8s %8s %8s\n",
+		"Query", "HR@1", "HR@3", "HR@5", "HR@10", "MRR", "NDCG@10")
+	fmt.Fprintln(w, strings.Repeat("-", 110))
+	for _, r := range results {
+		errMarker := ""
+		if r.Error != "" {
+			errMarker = " [ERR]"
+		}
+		display := r.Query
+		if len(display) > 38 {
+			display = display[:35] + "..."
+		}
+		fmt.Fprintf(w, "%-40s | %8.4f %8.4f %8.4f %8.4f %8.4f %8.4f%s\n",
+			display, r.HitRate1, r.HitRate3, r.HitRate5, r.HitRate10, r.MRR, r.NDCG10, errMarker)
+	}
+	fmt.Fprintln(w, strings.Repeat("-", 110))
+	fmt.Fprintf(w, "%-40s | %8.4f %8.4f %8.4f %8.4f %8.4f %8.4f\n",
+		"Mean", agg.HitRate1, agg.HitRate3, agg.HitRate5, agg.HitRate10, agg.MRR, agg.NDCG10)
 }
