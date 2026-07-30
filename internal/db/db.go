@@ -495,9 +495,10 @@ type FolderContext struct {
 }
 
 type Stats struct {
-	DocumentCount int   `json:"document_count"`
-	ChunkCount    int   `json:"chunk_count"`
-	DatabaseSize  int64 `json:"database_size_bytes"`
+	DocumentCount int       `json:"document_count"`
+	ChunkCount    int       `json:"chunk_count"`
+	DatabaseSize  int64     `json:"database_size_bytes"`
+	LastIndexedAt time.Time `json:"last_indexed_at,omitempty"`
 }
 
 func (db *DB) GetStats() (*Stats, error) {
@@ -522,6 +523,12 @@ func (db *DB) GetStats() (*Stats, error) {
 		return nil, err
 	}
 	s.DatabaseSize = pageCount * pageSize
+
+	// Best-effort: read the most recent document update as a proxy for
+	// last index time.  A zero/null value leaves LastIndexedAt as its
+	// zero value (omitted from JSON), so missing metadata degrades
+	// gracefully instead of failing the call.
+	_ = db.conn.QueryRow("SELECT MAX(updated_at) FROM documents").Scan(&s.LastIndexedAt)
 
 	return &s, nil
 }
