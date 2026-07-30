@@ -49,3 +49,32 @@ jobs:
 
       - name: Test
         run: go test -race ./...
+
+  schema-sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Extract and compare schema versions
+        shell: bash
+        run: |
+          GO_SCHEMA=$(grep -oP 'versionkit\.New\("symseek",\s*version,\s*\K\d+' cmd/symseek/main.go)
+          SWIFT_SCHEMA=$(grep -oP 'expectedSchemaVersion\s*=\s*\K\d+' client/Sources/SymseekFeature/SymseekModule.swift)
+
+          if [ -z "$GO_SCHEMA" ]; then
+            echo "::error::Failed to extract Go schema version from cmd/symseek/main.go"
+            exit 1
+          fi
+          if [ -z "$SWIFT_SCHEMA" ]; then
+            echo "::error::Failed to extract Swift schema version from client/Sources/SymseekFeature/SymseekModule.swift"
+            exit 1
+          fi
+
+          if [ "$GO_SCHEMA" != "$SWIFT_SCHEMA" ]; then
+            echo "::error::Schema version mismatch: Go=$GO_SCHEMA Swift=$SWIFT_SCHEMA"
+            exit 1
+          fi
+
+          echo "Schema version OK: Go=$GO_SCHEMA Swift=$SWIFT_SCHEMA"
