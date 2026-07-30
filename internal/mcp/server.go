@@ -351,6 +351,24 @@ func registerGetContext(server *mcpserver.Server, dbClient db.Store, vectorStore
 				textBuilder.WriteString(sep)
 				runeCount += utf8.RuneCountInString(src) + chunkRunes + utf8.RuneCountInString(sep)
 			}
+
+			// Append index provenance block (best-effort).
+			if stats, statErr := dbClient.GetStats(); statErr == nil {
+				provenanceParts := make([]string, 0, 3)
+				if stats.LastIndexedAt.IsZero() {
+					provenanceParts = append(provenanceParts,
+						fmt.Sprintf("document_count=%d", stats.DocumentCount))
+				} else {
+					ageSeconds := int(time.Since(stats.LastIndexedAt).Seconds())
+					provenanceParts = append(provenanceParts,
+						fmt.Sprintf("document_count=%d", stats.DocumentCount),
+						fmt.Sprintf("indexed_at=%s", stats.LastIndexedAt.Format(time.RFC3339)),
+						fmt.Sprintf("age_seconds=%d", ageSeconds))
+				}
+				provenanceLine := fmt.Sprintf("\n---\nIndex provenance: %s\n",
+					strings.Join(provenanceParts, ", "))
+				textBuilder.WriteString(provenanceLine)
+			}
 			return textBuilder.String(), nil
 		},
 	})
