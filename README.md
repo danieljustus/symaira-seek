@@ -8,6 +8,8 @@
 [![Go Version](https://img.shields.io/badge/go-1.26+-00ADD8?logo=go&logoColor=white)](https://go.dev/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
+![Symaira Seek social preview](docs/assets/social-preview.png)
+
 Symaira-Seek is a local-first, CGO-free document retrieval tool designed for AI agents and developers. It provides hybrid search (BM25 keyword search combined with vector semantic search) and fuses results using Reciprocal Rank Fusion (RRF).
 
 ## Why Symaira-Seek?
@@ -104,7 +106,7 @@ go build -o symseek cmd/symseek/main.go
 
 To inject a version string at build time, set `main.version` via `-ldflags`. The CI workflow derives the value from the current git tag (or a `0.0.0-dev+<short-sha>` fallback) and passes it automatically:
 ```bash
-VERSION="v2.3.4"
+VERSION="v2.3.5"
 go build -ldflags "-s -w -X main.version=${VERSION}" -o symseek cmd/symseek/main.go
 ./symseek version
 ```
