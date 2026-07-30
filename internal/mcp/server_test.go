@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/danieljustus/symaira-corekit/mcpserver"
 
@@ -812,20 +813,150 @@ func TestServerListDocumentsEmpty(t *testing.T) {
 	embed := &fakeEmbedder{}
 	server := newTestServer(store, store, embed)
 
-	params, _ := json.Marshal(map[string]interface{}{
-		"name":      "list_documents",
-		"arguments": map[string]interface{}{},
-	})
-	resp := pipeRequest(t, server, jsonRPCRequest{
-		JSONRPC: "2.0",
-		ID:      float64(1),
-		Method:  "tools/call",
-		Params:  params,
+	got, isError := callTool(t, server, "list_documents", map[string]interface{}{})
+	if isError {
+		t.Fatalf("unexpected error: %s", got)
+	}
+	var result struct {
+		Count     int  `json:"count"`
+		HasMore   bool `json:"has_more"`
+		Documents []struct {
+			Path string `json:"path"`
+		} `json:"documents"`
+	}
+	if err := json.Unmarshal([]byte(got), &result); err != nil {
+		t.Fatalf("failed to unmarshal response: %v\nraw: %s", err, got)
+	}
+	if result.Count != 0 {
+		t.Errorf("expected count 0, got %d", result.Count)
+	}
+	if result.HasMore {
+		t.Errorf("expected has_more false for empty result")
+	}
+	if len(result.Documents) != 0 {
+		t.Errorf("expected 0 documents, got %d", len(result.Documents))
+	}
+}
+
+func TestServerListDocumentsPagination(t *testing.T) {
+	docs := make([]*db.Document, 10)
+	for i := range docs {
+		docs[i] = &db.Document{
+			Path:      fmt.Sprintf("/home/user/doc-%02d.md", i),
+			UpdatedAt: time.Date(2026, 7, 30, 12, 0, i, 0, time.UTC),
+		}
+	}
+	store := &fakeStore{
+		listDocsFunc: func() ([]*db.Document, error) { return docs, nil },
+	}
+	embed := &fakeEmbedder{}
+	server := newTestServer(store, store, embed)
+
+	t.Run("default limit", func(t *testing.T) {
+		got, isError := callTool(t, server, "list_documents", map[string]interface{}{})
+		if isError {
+			t.Fatalf("unexpected error: %s", got)
+		}
+		var result struct {
+			Count     int  `json:"count"`
+			HasMore   bool `json:"has_more"`
+			Documents []struct {
+				Path string `json:"path"`
+			} `json:"documents"`
+		}
+		if err := json.Unmarshal([]byte(got), &result); err != nil {
+			t.Fatalf("unmarshal: %v\nraw: %s", err, got)
+		}
+		if result.Count != 10 {
+			t.Errorf("expected count 10, got %d", result.Count)
+		}
+		if result.HasMore {
+			t.Errorf("expected has_more false (10 docs <= default limit 50)")
+		}
+		if len(result.Documents) != 10 {
+			t.Errorf("expected 10 documents returned, got %d", len(result.Documents))
+		}
 	})
 
-	if resp.Error != nil {
-		t.Fatalf("unexpected error: %v", resp.Error)
-	}
+	t.Run("limit 3", func(t *testing.T) {
+		got, isError := callTool(t, server, "list_documents", map[string]interface{}{
+			"limit": float64(3),
+		})
+		if isError {
+			t.Fatalf("unexpected error: %s", got)
+		}
+		var result struct {
+			Count     int  `json:"count"`
+			HasMore   bool `json:"has_more"`
+			Documents []struct {
+				Path string `json:"path"`
+			} `json:"documents"`
+		}
+		if err := json.Unmarshal([]byte(got), &result); err != nil {
+			t.Fatalf("unmarshal: %v\nraw: %s", err, got)
+		}
+		if result.Count != 10 {
+			t.Errorf("expected count 10, got %d", result.Count)
+		}
+		if !result.HasMore {
+			t.Errorf("expected has_more true (3 < 10)")
+		}
+		if len(result.Documents) != 3 {
+			t.Errorf("expected 3 documents, got %d", len(result.Documents))
+		}
+	})
+
+	t.Run("offset 5", func(t *testing.T) {
+		got, isError := callTool(t, server, "list_documents", map[string]interface{}{
+			"limit":  float64(3),
+			"offset": float64(5),
+		})
+		if isError {
+			t.Fatalf("unexpected error: %s", got)
+		}
+		var result struct {
+			Count     int  `json:"count"`
+			HasMore   bool `json:"has_more"`
+			Documents []struct {
+				Path string `json:"path"`
+			} `json:"documents"`
+		}
+		if err := json.Unmarshal([]byte(got), &result); err != nil {
+			t.Fatalf("unmarshal: %v\nraw: %s", err, got)
+		}
+		if result.Count != 10 {
+			t.Errorf("expected count 10, got %d", result.Count)
+		}
+		if len(result.Documents) != 3 {
+			t.Errorf("expected 3 documents, got %d", len(result.Documents))
+		}
+	})
+
+	t.Run("offset beyond total", func(t *testing.T) {
+		got, isError := callTool(t, server, "list_documents", map[string]interface{}{
+			"limit":  float64(3),
+			"offset": float64(100),
+		})
+		if isError {
+			t.Fatalf("unexpected error: %s", got)
+		}
+		var result struct {
+			Count     int  `json:"count"`
+			HasMore   bool `json:"has_more"`
+			Documents []struct {
+				Path string `json:"path"`
+			} `json:"documents"`
+		}
+		if err := json.Unmarshal([]byte(got), &result); err != nil {
+			t.Fatalf("unmarshal: %v\nraw: %s", err, got)
+		}
+		if result.Count != 10 {
+			t.Errorf("expected count 10, got %d", result.Count)
+		}
+		if len(result.Documents) != 0 {
+			t.Errorf("expected 0 documents, got %d", len(result.Documents))
+		}
+	})
 }
 
 func TestServerGetContextWithResults(t *testing.T) {
