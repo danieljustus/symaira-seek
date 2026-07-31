@@ -42,6 +42,7 @@ func deriveChunkID(documentPath, contentHash string, charStart int) string {
 	name := documentPath + "\x00" + contentHash + "\x00" + strconv.Itoa(charStart)
 	return uuid.NewSHA1(chunkNamespace, []byte(name)).String()
 }
+
 // isWithinDir reports whether path is dir itself or located inside dir.
 // It uses a trailing path separator to avoid false matches where one
 // directory name is a string prefix of another (e.g. /docs vs /docs2).
@@ -100,6 +101,12 @@ func IndexDirectory(dbClient db.Store, embedder Embedder, dirPath string) error 
 	if !info.IsDir() {
 		return fmt.Errorf("target path is not a directory: %s", absPath)
 	}
+
+	// Normalize the path at the sink. filepath.Abs already cleans, but the
+	// explicit Clean documents the controlled flow for scanners: the path
+	// originates from an explicit user command (CLI/HTTP) or from the MCP
+	// layer, which enforces pathutil.RestrictToHome before calling here.
+	absPath = filepath.Clean(absPath)
 
 	// 1. Scan directory for valid files
 	foundPaths := make(map[string]bool)
