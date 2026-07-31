@@ -28,42 +28,43 @@ type Config struct {
 	VectorBackend        string `json:"vector_backend" toml:"vector_backend"`
 
 	// Quantized vector search (opt-in, off by default).
-	VectorQuantization       string `json:"vector_quantization" toml:"vector_quantization"`             // "off" | "turbo-prod"
-	VectorQuantBits          int    `json:"vector_quant_bits" toml:"vector_quant_bits"`                 // 2, 3, or 4
+	VectorQuantization       string `json:"vector_quantization" toml:"vector_quantization"`               // "off" | "turbo-prod"
+	VectorQuantBits          int    `json:"vector_quant_bits" toml:"vector_quant_bits"`                   // 2, 3, or 4
 	VectorQuantizedShortlist int    `json:"vector_quantized_shortlist" toml:"vector_quantized_shortlist"` // approximate shortlist size
-	VectorExactRerank        bool   `json:"vector_exact_rerank" toml:"vector_exact_rerank"`             // exact cosine rerank on shortlist
+	VectorExactRerank        bool   `json:"vector_exact_rerank" toml:"vector_exact_rerank"`               // exact cosine rerank on shortlist
 
 	// LLM re-ranking (opt-in, off by default).
-	RerankQuery          bool   `json:"rerank_query" toml:"rerank_query"`                       // enable Ollama re-ranking of search results
-	RerankModel          string `json:"rerank_model" toml:"rerank_model"`                       // chat model for re-ranking; empty = reuse embedding model
-	RerankTimeoutSeconds int    `json:"rerank_timeout_seconds" toml:"rerank_timeout_seconds"`   // per-request timeout for reranking
+	RerankQuery          bool   `json:"rerank_query" toml:"rerank_query"`                     // enable Ollama re-ranking of search results
+	RerankModel          string `json:"rerank_model" toml:"rerank_model"`                     // chat model for re-ranking; empty = reuse embedding model
+	RerankTimeoutSeconds int    `json:"rerank_timeout_seconds" toml:"rerank_timeout_seconds"` // per-request timeout for reranking
 
 	// HyDE query expansion (opt-in, off by default).
-	ExpandQuery          bool   `json:"expand_query" toml:"expand_query"`                       // enable HyDE query expansion via Ollama chat
-	ExpandModel          string `json:"expand_model" toml:"expand_model"`                       // chat model for expansion; empty = reuse embedding model
-	ExpandTimeoutSeconds int    `json:"expand_timeout_seconds" toml:"expand_timeout_seconds"`   // per-request timeout for expansion
+	ExpandQuery          bool   `json:"expand_query" toml:"expand_query"`                     // enable HyDE query expansion via Ollama chat
+	ExpandModel          string `json:"expand_model" toml:"expand_model"`                     // chat model for expansion; empty = reuse embedding model
+	ExpandTimeoutSeconds int    `json:"expand_timeout_seconds" toml:"expand_timeout_seconds"` // per-request timeout for expansion
 }
 
 // DefaultConfig returns the default configuration values.
 func DefaultConfig() *Config {
 	return &Config{
-		OllamaURL:                 "http://localhost:11434/api/embeddings",
-		Model:                     "nomic-embed-text",
-		TimeoutSeconds:            120,
-		RetryCount:                2,
-		RetryBackoffMS:            500,
-		IndexCooldownSeconds:      5,
-		VectorBackend:             "sqlite",
-		VectorQuantization:        "off",
-		VectorQuantBits:           4,
-		VectorQuantizedShortlist:  200,
-		VectorExactRerank:         true,
-		RerankQuery:               false,
-		RerankModel:               "",
-		RerankTimeoutSeconds:      120,
-		ExpandQuery:               false,
-		ExpandModel:               "",
-		ExpandTimeoutSeconds:      120,
+		OllamaURL:                "http://localhost:11434/api/embeddings",
+		Model:                    "qwen3-embedding:0.6b",
+		EmbeddingDim:             768, // Matryoshka pin: qwen3-embedding:0.6b is truncated to 768 dims (issue #302)
+		TimeoutSeconds:           120,
+		RetryCount:               2,
+		RetryBackoffMS:           500,
+		IndexCooldownSeconds:     5,
+		VectorBackend:            "sqlite",
+		VectorQuantization:       "off",
+		VectorQuantBits:          4,
+		VectorQuantizedShortlist: 200,
+		VectorExactRerank:        true,
+		RerankQuery:              false,
+		RerankModel:              "",
+		RerankTimeoutSeconds:     120,
+		ExpandQuery:              false,
+		ExpandModel:              "",
+		ExpandTimeoutSeconds:     120,
 	}
 }
 

@@ -1,13 +1,17 @@
 package engine
 
 import (
+	"bytes"
 	"container/list"
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"io"
 	"math"
+	"net/http"
 	"net/url"
 	"os"
 	"strings"
@@ -35,7 +39,7 @@ type EmbeddingsGenerator struct {
 	Timeout      time.Duration
 	RetryCount   int
 	RetryBackoff time.Duration
-	configDim    int // from config; 0 means auto-detect from first response
+	configDim    int                 // from config; 0 means auto-detect from first response
 	sleepFn      func(time.Duration) // injectable for tests; defaults to time.Sleep
 	ollama       *ollamakit.Client
 	cache        map[string]*list.Element
@@ -55,7 +59,8 @@ type cacheEntry struct {
 func newEmbeddingsGenerator() *EmbeddingsGenerator {
 	eg := &EmbeddingsGenerator{
 		OllamaURL:    "http://localhost:11434/api/embeddings",
-		Model:        "nomic-embed-text",
+		Model:        "qwen3-embedding:0.6b",
+		configDim:    defaultEmbeddingDim, // Matryoshka pin: keep 768 dims (issue #302)
 		Timeout:      defaultOllamaTimeout,
 		RetryCount:   defaultOllamaRetries,
 		RetryBackoff: defaultOllamaBackoff,
@@ -176,7 +181,7 @@ func (c OllamaConfig) applyDefaults() OllamaConfig {
 		c.URL = "http://localhost:11434/api/embeddings"
 	}
 	if c.Model == "" {
-		c.Model = "nomic-embed-text"
+		c.Model = "qwen3-embedding:0.6b"
 	}
 	if c.Timeout <= 0 {
 		c.Timeout = defaultOllamaTimeout
@@ -432,6 +437,62 @@ func (eg *EmbeddingsGenerator) queryOllamaBatch(texts []string) ([][]float32, er
 	return eg.embedWithRetries(texts, eg.RetryCount)
 }
 
+// embedRequestWithDim mirrors ollamakit's embed request but additionally pins
+// the output dimension (Matryoshka truncation) via Ollama's `dimensions`
+// body parameter. ollamakit (corekit v0.8.0) does not expose that parameter
+// yet; once it does, this local transport can be removed.
+type embedRequestWithDim struct {
+	Model      string   `json:"model"`
+	Input      []string `json:"input"`
+	Dimensions int      `json:"dimensions,omitempty"`
+}
+
+// embedResponse is the Ollama /api/embed response body.
+type embedResponse struct {
+	Embeddings [][]float32 `json:"embeddings"`
+}
+
+// embedWithDim posts to Ollama's /api/embed with a pinned output dimension.
+// Errors are wrapped in the same shapes ollamakit produces (ErrUnreachable /
+// ResponseError) so the shared transient-error classification keeps working.
+func (eg *EmbeddingsGenerator) embedWithDim(ctx context.Context, texts []string, dim int) ([][]float32, error) {
+	u := strings.TrimSuffix(ollamaBaseURL(eg.OllamaURL), "/") + "/api/embed"
+	body, err := json.Marshal(embedRequestWithDim{Model: eg.Model, Input: texts, Dimensions: dim})
+	if err != nil {
+		return nil, fmt.Errorf("engine: encode embed request: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("engine: build embed request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+
+	client := &http.Client{Timeout: eg.Timeout}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("ollamakit: %w: %v", ollamakit.ErrUnreachable, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, ollamakit.ErrModelNotFound
+	}
+	if resp.StatusCode >= 300 {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+		return nil, &ollamakit.ResponseError{StatusCode: resp.StatusCode, Body: strings.TrimSpace(string(b))}
+	}
+
+	var er embedResponse
+	if err := json.NewDecoder(resp.Body).Decode(&er); err != nil {
+		return nil, fmt.Errorf("engine: decode embed response: %w", err)
+	}
+	if len(er.Embeddings) != len(texts) {
+		return nil, fmt.Errorf("engine: expected %d embeddings, got %d", len(texts), len(er.Embeddings))
+	}
+	return er.Embeddings, nil
+}
+
 // embedWithRetries is the core transport for Ollama embedding requests via
 // ollamakit. It retries up to maxRetries times on unreachable-host or
 // unexpected-response errors with exponential backoff; a missing model is
@@ -459,7 +520,15 @@ func (eg *EmbeddingsGenerator) embedWithRetries(texts []string, maxRetries int) 
 			}
 		}
 
-		vecs, err := eg.ollama.Embed(context.Background(), eg.Model, texts)
+		var vecs [][]float32
+		var err error
+		if eg.configDim > 0 {
+			// A configured embedding_dim pins the output dimension
+			// (Matryoshka truncation) via the dimensions body parameter.
+			vecs, err = eg.embedWithDim(context.Background(), texts, eg.configDim)
+		} else {
+			vecs, err = eg.ollama.Embed(context.Background(), eg.Model, texts)
+		}
 		if err == nil {
 			return vecs, nil
 		}

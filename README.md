@@ -35,7 +35,9 @@ It exposes multiple interfaces:
 - **Vector Search**: Cosine similarity calculations on normalized 768-dimensional float32 arrays
 - **Result Fusion**: Reciprocal Rank Fusion (RRF) with parameter $k=60$
 - **Embeddings**: Dual-mode generation:
-  - **Local Ollama Integration**: Uses the `nomic-embed-text` model.
+  - **Local Ollama Integration**: Uses the `qwen3-embedding:0.6b` model
+    (Matryoshka-pinned to 768 dimensions, see
+    [embedding evaluation](docs/research/embedding-model-evaluation.md)).
   - **Deterministic Local Fallback**: Fallback word-hash vector generator to allow 100% offline usage.
 
 ---
@@ -212,8 +214,8 @@ The file is rewritten with mode `0600` on every write. Supported keys:
 | Key | Description | Default |
 | --- | --- | --- |
 | `ollama_url` | Ollama embeddings endpoint URL | `http://localhost:11434/api/embeddings` |
-| `model` | Embedding model name | `nomic-embed-text` |
-| `embedding_dim` | Embedding dimension (0 = auto-detect from model) | `0` |
+| `model` | Embedding model name | `qwen3-embedding:0.6b` |
+| `embedding_dim` | Embedding dimension (0 = auto-detect from model) | `768` |
 | `timeout_seconds` | Per-request Ollama timeout (seconds) | `120` |
 | `retry_count` | Number of Ollama retries on failure | `2` |
 | `retry_backoff_ms` | Initial retry backoff (milliseconds) | `500` |
@@ -229,6 +231,25 @@ The file is rewritten with mode `0600` on every write. Supported keys:
 | `expand_query` | Enable HyDE query expansion via Ollama chat | `false` |
 | `expand_model` | Chat model for expansion (empty = reuse embedding model) | `""` |
 | `expand_timeout_seconds` | Per-request timeout for query expansion | `120` |
+
+**Changing the embedding model** (e.g. after upgrading to a new default):
+
+```bash
+./symseek config --set-key model --set-value qwen3-embedding:0.6b
+./symseek config --set-key embedding_dim --set-value 768   # keep 768 dims
+```
+
+The embedding model is stored per chunk. Switching models (or dimensions)
+changes the embedding space, so existing indexes must be re-built once:
+
+```bash
+./symseek index /path/to/folder
+```
+
+Until the re-index completes, hybrid search refuses to mix old and new
+embeddings (mixed-embedding-space guard) with a clear error message. See
+[docs/research/embedding-model-evaluation.md](docs/research/embedding-model-evaluation.md)
+for the model comparison behind the default.
 
 ### Quantized Vector Search (Opt-In)
 

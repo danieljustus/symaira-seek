@@ -22,7 +22,13 @@ jobs:
         with:
           go-version: '1.26.5'
 
-      - name: Run evaluation harness
+      - name: Install Ollama and embedding models
+        run: |
+          curl -fsSL https://ollama.com/install.sh | sh
+          ollama pull nomic-embed-text
+          ollama pull qwen3-embedding:0.6b
+
+      - name: Run evaluation harness (English corpus)
         id: bench
         run: |
           # Run with all three configs, emit JSON and save CSV.
@@ -40,6 +46,23 @@ jobs:
           cat bench-summary.txt >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
 
+      - name: Run evaluation harness (German corpus)
+        id: bench-de
+        run: |
+          # German semantic retrieval evaluation (issue #302): paraphrase
+          # queries with no keyword overlap, hybrid mode.
+          go run ./cmd/symseek bench \
+            --corpus testdata/bench/corpus-de \
+            --judgments testdata/bench/judgments-de.yaml --json > bench-results-de.json
+          go run ./cmd/symseek bench \
+            --corpus testdata/bench/corpus-de \
+            --judgments testdata/bench/judgments-de.yaml > bench-summary-de.txt
+
+          echo "=== German Evaluation ===" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          cat bench-summary-de.txt >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
       - name: Upload results as artifact
         uses: actions/upload-artifact@v4
         with:
@@ -47,6 +70,8 @@ jobs:
           path: |
             bench-results.json
             bench-summary.txt
+            bench-results-de.json
+            bench-summary-de.txt
 
       - name: Write metrics summary to step summary
         if: always()
