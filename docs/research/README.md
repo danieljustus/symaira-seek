@@ -43,7 +43,9 @@ The core architecture the report recommends already exists in this repo:
 - **CGO-free** SQLite (`modernc.org/sqlite`) with WAL mode — statically linkable
   on every target. This constraint deliberately rules out native ANN libraries
   (hnswlib/FAISS/sqlite-vss); see `ARCHITECTURE_PLAN.md`.
-- **Dual embeddings**: local Ollama (`nomic-embed-text`, 768-dim) with a
+- **Dual embeddings**: local Ollama (`qwen3-embedding:0.6b`, 768-dim via
+  Matryoshka pinning, see
+  [embedding-model-evaluation](embedding-model-evaluation.md)) with a
   deterministic pure-Go hash-vector fallback for fully offline operation.
 - **Three interfaces**: CLI, MCP (stdio/JSON-RPC), and a localhost HTTP REST
   daemon (incl. **SSE** streaming).
@@ -183,6 +185,11 @@ models), validate stored-vs-configured dimension to prevent mixing, and formaliz
 provider selection (the `Embedder` interface already allows alternates). Pairs
 naturally with binary quantization (#136). Local-first stays the default
 (Insight 8) — this is about local flexibility, not pushing cloud embedding APIs.
+
+> **Partial implementation (2026-07, #302):** `embedding_dim` is now forwarded
+> to Ollama's `dimensions` parameter (Matryoshka truncation) and the default
+> model switched to `qwen3-embedding:0.6b` at 768 dims — see
+> [embedding-model-evaluation](embedding-model-evaluation.md).
 
 ### Polling fallback for network drives
 **Issue: #143** · report §2.5.1, Insight 9

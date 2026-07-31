@@ -6,10 +6,12 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	"github.com/danieljustus/symaira-seek/internal/db"
 	"github.com/danieljustus/symaira-seek/internal/engine"
+	"github.com/google/uuid"
 )
 
 // SearchMode selects which retrieval backend to evaluate.
@@ -69,6 +71,26 @@ func openTempDB() (*db.DB, string, error) {
 	return database, homeDir, nil
 }
 
+// chunkNamespace mirrors engine.sync.go's deterministic UUID namespace so
+// bench chunk IDs are stable across runs and follow the same identity rules
+// as indexed chunks. See deriveChunkID below.
+var chunkNamespace = uuid.NewSHA1(uuid.NameSpaceURL, []byte("https://github.com/danieljustus/symaira-seek/chunk"))
+
+// deriveChunkID returns a deterministic UUIDv5 for a bench chunk, mirroring
+// engine.deriveChunkID (documentPath \x00 contentHash \x00 charStart). The
+// harness stores exactly one whole-file chunk per document at offset 0, so
+// the inputs are the document path, its content hash, and 0.
+func deriveChunkID(documentPath, contentHash string, charStart int) string {
+	name := documentPath + "\x00" + contentHash + "\x00" + strconv.Itoa(charStart)
+	return uuid.NewSHA1(chunkNamespace, []byte(name)).String()
+}
+
+// intPtr returns a pointer to the given int (char offsets are stored as
+// nullable pointers in db.Chunk).
+func intPtr(v int) *int {
+	return &v
+}
+
 // Run executes a single evaluation: indexes the corpus, runs SearchHybrid for
 // the configured query, and scores the result against ground truth.
 func Run(embedder engine.Embedder, cfg Config) (*Result, error) {
@@ -99,11 +121,16 @@ func Run(embedder engine.Embedder, cfg Config) (*Result, error) {
 		}
 
 		chunk := &db.Chunk{
+			UUID:         deriveChunkID(doc.Path, doc.Hash, 0),
 			DocumentPath: doc.Path,
 			ChunkIndex:   0,
 			Content:      string(data),
 			Embedding:    embedder.GenerateVector(string(data)),
 			Hash:         doc.Hash,
+			Dim:          embedder.Dim(),
+			Model:        embedder.ModelName(),
+			CharStart:    intPtr(0),
+			CharEnd:      intPtr(len(data)),
 		}
 		if err := dbClient.SaveChunks([]*db.Chunk{chunk}); err != nil {
 			return nil, fmt.Errorf("saving chunk for %s: %w", doc.Path, err)
@@ -224,13 +251,13 @@ func WriteCSV(w io.Writer, results []*Result) error {
 
 // Aggregate computes mean metrics across all results.
 type Aggregate struct {
-	Count    int
-	HitRate1 float64
-	HitRate3 float64
-	HitRate5 float64
+	Count     int
+	HitRate1  float64
+	HitRate3  float64
+	HitRate5  float64
 	HitRate10 float64
-	MRR      float64
-	NDCG10   float64
+	MRR       float64
+	NDCG10    float64
 }
 
 // ComputeAggregate returns the mean of each metric across results.

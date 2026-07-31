@@ -543,3 +543,105 @@ func TestGenerateVectorsWithModel_ReportsFallbackProvenance(t *testing.T) {
 		t.Errorf("expected fallback vector dim 768, got %d", len(results[1].Vector))
 	}
 }
+
+// TestConfiguredDim_SendsDimensionsParameter verifies that a configured
+// embedding_dim is sent as Ollama's `dimensions` body parameter so the
+// Matryoshka-truncated output matches the configured dimension (issue #302).
+func TestConfiguredDim_SendsDimensionsParameter(t *testing.T) {
+	var gotDim int
+	var gotPath string
+	vec768 := make([]float32, 768)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		var req struct {
+			Dimensions int `json:"dimensions"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		gotDim = req.Dimensions
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"embeddings": [][]float32{vec768}})
+	}))
+	defer srv.Close()
+
+	eg := NewEmbeddingsGeneratorWithOllamaConfig(OllamaConfig{
+		URL:   srv.URL,
+		Model: "qwen3-embedding:0.6b",
+		Dim:   768,
+	})
+
+	vec := eg.GenerateVector("Hallo Welt")
+	if len(vec) != 768 {
+		t.Errorf("expected 768-dim vector, got %d", len(vec))
+	}
+	if gotDim != 768 {
+		t.Errorf("expected dimensions=768 in request, got %d", gotDim)
+	}
+	if gotPath != "/api/embed" {
+		t.Errorf("expected request to /api/embed, got %q", gotPath)
+	}
+}
+
+// TestAutoDetectDim_OmitsDimensionsParameter verifies that without a
+// configured embedding_dim the request carries no dimensions parameter and
+// the dimension is auto-detected from the response (default behaviour).
+func TestAutoDetectDim_OmitsDimensionsParameter(t *testing.T) {
+	var sawDim bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		_, sawDim = req["dimensions"]
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"embeddings": [][]float32{{0.1, 0.2}}})
+	}))
+	defer srv.Close()
+
+	eg := NewEmbeddingsGeneratorWithOllamaConfig(OllamaConfig{
+		URL:   srv.URL,
+		Model: "nomic-embed-text",
+	})
+
+	vec := eg.GenerateVector("Hallo Welt")
+	if len(vec) != 2 {
+		t.Errorf("expected 2-dim auto-detected vector, got %d", len(vec))
+	}
+	if sawDim {
+		t.Error("expected no dimensions parameter without configured embedding_dim")
+	}
+	if eg.Dim() != 2 {
+		t.Errorf("expected auto-detected Dim()=2, got %d", eg.Dim())
+	}
+}
+
+// TestConfiguredDim_RetriesOn5xx verifies the dimensions transport honours
+// the retry contract for transient failures.
+func TestConfiguredDim_RetriesOn5xx(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&calls, 1) < 3 {
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"embeddings": [][]float32{{0.1, 0.2, 0.3}}})
+	}))
+	defer srv.Close()
+
+	eg := NewEmbeddingsGeneratorWithOllamaConfig(OllamaConfig{
+		URL:          srv.URL,
+		Model:        "qwen3-embedding:0.6b",
+		Dim:          3,
+		RetryCount:   2,
+		RetryBackoff: 10 * time.Millisecond,
+	})
+
+	vec, err := eg.queryOllamaWithRetries("test", 2)
+	if err != nil {
+		t.Fatalf("expected success after retries, got %v", err)
+	}
+	if len(vec) != 3 {
+		t.Errorf("expected 3-dim vector, got %d", len(vec))
+	}
+	if got := atomic.LoadInt32(&calls); got != 3 {
+		t.Errorf("expected 3 calls, got %d", got)
+	}
+}
