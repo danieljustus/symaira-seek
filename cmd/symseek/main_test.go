@@ -261,7 +261,7 @@ func TestInitConfig_DefaultPath(t *testing.T) {
 	if cfg.OllamaURL != "http://localhost:11434/api/embeddings" {
 		t.Errorf("expected default OllamaURL, got %q", cfg.OllamaURL)
 	}
-	if cfg.Model != "nomic-embed-text" {
+	if cfg.Model != "qwen3-embedding:0.6b" {
 		t.Errorf("expected default model, got %q", cfg.Model)
 	}
 }
