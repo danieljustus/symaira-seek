@@ -1318,16 +1318,6 @@ func TestMux_SearchStreamEndpoint_SlowEmbedder_FirstEventIsStatus(t *testing.T) 
 	}
 }
 
-// firstLine returns the first non-empty line of s, or "<empty>" if none.
-func firstLine(s string) string {
-	for _, line := range strings.Split(s, "\n") {
-		if line != "" {
-			return line
-		}
-	}
-	return "<empty>"
-}
-
 func TestMux_SearchStreamEndpoint_SearchError(t *testing.T) {
 	store := &mockStore{
 		searchBM25Fn: func(query string, limit int) ([]*db.SearchResult, error) {
