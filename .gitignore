@@ -35,6 +35,7 @@ AGENTS.md
 # Local agent reports / session state
 .github/coverage/
 .github/prerelease/
+docs/app-test/
 .omo/run-continuation/
 .omo/notepads/
 coverage.html
