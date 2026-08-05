@@ -75,6 +75,15 @@ public final class EngineManager {
     }
 
     private let supervisor = DaemonSupervisor()
+    /// Dedicated serial queue for the supervisor stop path (issue #306).
+    /// DaemonSupervisor.stop() historically blocked the calling thread on an
+    /// internal mutex that was never released, freezing the app and forcing a
+    /// force-quit when invoked from the main actor (0.7.0 replaced the raw
+    /// pthread mutex with an NSRecursiveLock, but the stop path must still
+    /// never run on the main thread — a lock held across a hop can deadlock
+    /// the whole UI).  Serializing here also guarantees repeated stop() calls
+    /// can never re-enter the supervisor concurrently.
+    private let stopQueue = DispatchQueue(label: "dev.symaira.seek.engine-stop")
     private let maxLogs = 500
     private var currentPort: Int = 8080
 
@@ -135,8 +144,18 @@ public final class EngineManager {
         _ = supervisor.start(executable: binaryURL, arguments: ["serve", "--port", "\(port)"])
     }
 
-    public func stop() {
-        supervisor.stop()
+    /// Stops the daemon without ever touching the supervisor's locking stop
+    /// path from the main actor.  The supervisor call runs on the dedicated
+    /// `stopQueue` background executor; the UI state afterwards is driven by
+    /// `onStateChange` (→ `.stopped`/`.failed`) exactly as before.
+    public func stop() async {
+        let supervisor = self.supervisor
+        await withCheckedContinuation { continuation in
+            stopQueue.async {
+                supervisor.stop()
+                continuation.resume()
+            }
+        }
     }
 
     private func appendLog(_ message: String) {
