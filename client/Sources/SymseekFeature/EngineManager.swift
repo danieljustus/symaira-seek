@@ -3,6 +3,37 @@ import Observation
 import SymairaToolKit
 import SymairaDaemonKit
 
+/// Performs the authenticated HTTP health check against the daemon's
+/// `/status` endpoint.  Returns `true` only when the daemon answers
+/// HTTP 200 with a non-empty body while carrying our
+/// `Authorization: Bearer <token>` header.  A 401 (bad/missing token)
+/// or any network error (connection refused, timeout, …) is NOT a
+/// running daemon — this is the single source of truth for "is a daemon
+/// already serving?", and it never consults the CLI or the local
+/// database.
+enum DaemonHealth {
+    static func check(port: Int, token: String?, session: URLSession = .shared) async -> Bool {
+        guard let url = URL(string: "http://127.0.0.1:\(port)/status") else { return false }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 1.5
+        if let token {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+        do {
+            let (data, response) = try await session.data(for: request)
+            guard let httpResponse = response as? HTTPURLResponse,
+                  httpResponse.statusCode == 200,
+                  !data.isEmpty else {
+                return false
+            }
+            return true
+        } catch {
+            // No daemon on this port.
+            return false
+        }
+    }
+}
+
 /// Manages the embedded symseek engine process on macOS.
 @Observable
 @MainActor
@@ -115,67 +146,19 @@ public final class EngineManager {
         }
     }
 
-    /// Try to detect an already-running symseek daemon by making a status
-    /// request to the given port.  Returns `true` and transitions the
-    /// engine state to `.running` if a daemon responds.
+    /// Try to detect an already-running symseek daemon by making an
+    /// authenticated status request to the given port.  Returns `true`
+    /// and transitions the engine state to `.running` only when the
+    /// daemon answers HTTP 200 with our bearer token; a 401 (bad/missing
+    /// token) or any network error is treated as "no daemon", so
+    /// `start()` falls through to launching one.
     private func checkExistingDaemon(port: Int) async -> Bool {
-        let url = URL(string: "http://127.0.0.1:\(port)/status")!
-        var request = URLRequest(url: url)
-        request.timeoutInterval = 1.5
-        if let token = apiToken {
-            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        }
-
-        do {
-            let (data, response) = try await URLSession.shared.data(for: request)
-            guard let httpResponse = response as? HTTPURLResponse,
-                  httpResponse.statusCode == 200,
-                  !data.isEmpty else {
-                return false
-            }
-            // Daemon responded — adopt it.
-            currentPort = port
-            state = .running(port: port)
-            return true
-        } catch {
-            // No daemon on this port — also try the CLI status command as
-            // a fallback in case the daemon listens on a different port.
-            return await checkViaCLI()
-        }
-    }
-
-    /// Fallback: run `symseek status` via CLI to discover a running daemon
-    /// whose port we might not have guessed.  Parses the output for
-    /// known status indicators.
-    private func checkViaCLI() async -> Bool {
-        guard let binaryURL = locateBinary() else { return false }
-
-        let proc = Process()
-        proc.executableURL = binaryURL
-        proc.arguments = ["status"]
-
-        let pipe = Pipe()
-        proc.standardOutput = pipe
-        proc.standardError = Pipe()
-
-        do {
-            try proc.run()
-            proc.waitUntilExit()
-
-            guard proc.terminationStatus == 0 else { return false }
-
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            guard let output = String(data: data, encoding: .utf8),
-                  !output.isEmpty else { return false }
-
-            // A successful "symseek status" with data means the daemon is
-            // reachable.  Default to port 8080 (most common for brew).
-            currentPort = 8080
-            state = .running(port: 8080)
-            return true
-        } catch {
+        guard await DaemonHealth.check(port: port, token: apiToken) else {
             return false
         }
+        currentPort = port
+        state = .running(port: port)
+        return true
     }
 
     private func locateBinary() -> URL? {
