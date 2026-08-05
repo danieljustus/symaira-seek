@@ -193,6 +193,14 @@ func writeSearchStatus(w io.Writer, flusher http.Flusher) {
 	flusher.Flush()
 }
 
+func structuredResult(result *db.SearchResult, queryTerms []string) *db.StructuredSearchResult {
+	structured := result.Structured()
+	if structured != nil {
+		structured.Snippet = engine.BuildSnippet(structured.Snippet, queryTerms, engine.DefaultSnippetBound)
+	}
+	return structured
+}
+
 // runSearchHeartbeat emits `status` heartbeat events every
 // searchHeartbeatInterval until stop is closed, then signals completion on
 // done. It keeps slow searches (e.g. an Ollama cold start that takes up to
@@ -310,9 +318,8 @@ func newServeMux(dbClient db.Store, vectorStore db.VectorStore, embedder engine.
 		if !stream {
 			structured := make([]*db.StructuredSearchResult, 0, len(results))
 			for _, r := range results {
-				if s := r.Structured(); s != nil {
-					s.Snippet = engine.BuildSnippet(s.Snippet, queryTerms, engine.DefaultSnippetBound)
-					structured = append(structured, s)
+				if result := structuredResult(r, queryTerms); result != nil {
+					structured = append(structured, result)
 				}
 			}
 			json.NewEncoder(w).Encode(structured)
@@ -326,9 +333,8 @@ func newServeMux(dbClient db.Store, vectorStore db.VectorStore, embedder engine.
 			default:
 			}
 
-			if s := res.Structured(); s != nil {
-				s.Snippet = engine.BuildSnippet(s.Snippet, queryTerms, engine.DefaultSnippetBound)
-				data, err := json.Marshal(s)
+			if result := structuredResult(res, queryTerms); result != nil {
+				data, err := json.Marshal(result)
 				if err != nil {
 					continue
 				}
