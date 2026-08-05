@@ -22,9 +22,26 @@ jobs:
         with:
           go-version: '1.26.5'
 
-      - name: Install Ollama and embedding models
+      - name: Install Ollama
         run: |
           curl -fsSL https://ollama.com/install.sh | sh
+
+      - name: Start Ollama and wait for readiness
+        run: |
+          nohup ollama serve >/tmp/ollama.log 2>&1 &
+          for i in $(seq 1 30); do
+            curl -fsS http://localhost:11434/ >/dev/null 2>&1 && break
+            sleep 1
+          done
+          if ! curl -fsS http://localhost:11434/ >/dev/null 2>&1; then
+            echo "Ollama server did not become ready within 30s" >&2
+            cat /tmp/ollama.log >&2
+            exit 1
+          fi
+          echo "Ollama server is ready"
+
+      - name: Pull embedding models
+        run: |
           ollama pull nomic-embed-text
           ollama pull qwen3-embedding:0.6b
 
