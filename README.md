@@ -6,7 +6,7 @@
 
 [![CI](https://github.com/danieljustus/symaira-seek/actions/workflows/ci.yml/badge.svg)](https://github.com/danieljustus/symaira-seek/actions/workflows/ci.yml)
 [![Go Version](https://img.shields.io/badge/go-1.26+-00ADD8?logo=go&logoColor=white)](https://go.dev/)
-[![License: MIT](https://img.shields.io/badge/license-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
 
 ![Symaira Seek social preview](docs/assets/social-preview.png)
 
@@ -484,4 +484,4 @@ curl -X POST http://localhost:8788/index \
 
 ## License
 
-MIT License. Part of the Symaira tool suite.
+Apache License 2.0. Part of the Symaira tool suite.
