@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -12,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -203,6 +205,70 @@ func (m *mockEmbedder) ModelName() string {
 	return "mock-model"
 }
 
+// slowEmbedder wraps mockEmbedder and adds a fixed delay to embedding
+// generation, simulating a slow embedding backend (e.g. an Ollama cold
+// start) for SSE liveness tests (issue #319).
+type slowEmbedder struct {
+	mockEmbedder
+	delay time.Duration
+}
+
+func (s *slowEmbedder) GenerateVector(text string) []float32 {
+	time.Sleep(s.delay)
+	return s.mockEmbedder.GenerateVector(text)
+}
+
+func (s *slowEmbedder) GenerateVectorNoRetry(text string) []float32 {
+	time.Sleep(s.delay)
+	return s.mockEmbedder.GenerateVectorNoRetry(text)
+}
+
+// GenerateVectorNoRetryWithModel must be overridden too: the promoted
+// mockEmbedder method would dispatch internally to the embedded value's
+// GenerateVectorNoRetry, bypassing the delay.
+func (s *slowEmbedder) GenerateVectorNoRetryWithModel(text string) engine.EmbeddingResult {
+	time.Sleep(s.delay)
+	return s.mockEmbedder.GenerateVectorNoRetryWithModel(text)
+}
+
+// blockingEmbedder wraps mockEmbedder and blocks embedding generation
+// until unblock is called. It makes the "slow backend" deterministic for
+// tests that must observe stream events while the search is provably still
+// running (issue #319).
+type blockingEmbedder struct {
+	mockEmbedder
+	releaseOnce sync.Once
+	release     chan struct{}
+}
+
+func newBlockingEmbedder() *blockingEmbedder {
+	return &blockingEmbedder{release: make(chan struct{})}
+}
+
+// unblock lets pending and future embedding calls proceed. It is safe to
+// call more than once.
+func (b *blockingEmbedder) unblock() {
+	b.releaseOnce.Do(func() { close(b.release) })
+}
+
+func (b *blockingEmbedder) GenerateVector(text string) []float32 {
+	<-b.release
+	return b.mockEmbedder.GenerateVector(text)
+}
+
+func (b *blockingEmbedder) GenerateVectorNoRetry(text string) []float32 {
+	<-b.release
+	return b.mockEmbedder.GenerateVectorNoRetry(text)
+}
+
+// GenerateVectorNoRetryWithModel must be overridden too: the promoted
+// mockEmbedder method would dispatch internally to the embedded value's
+// GenerateVectorNoRetry, bypassing the block.
+func (b *blockingEmbedder) GenerateVectorNoRetryWithModel(text string) engine.EmbeddingResult {
+	<-b.release
+	return b.mockEmbedder.GenerateVectorNoRetryWithModel(text)
+}
+
 // ---------------------------------------------------------------------------
 // Test helpers
 // ---------------------------------------------------------------------------
@@ -257,6 +323,31 @@ func doRequest(t *testing.T, method, url string, body string, headers map[string
 		t.Fatalf("request failed: %v", err)
 	}
 	return resp
+}
+
+// nextSSELine reads the next line of an SSE stream, failing the test if no
+// line arrives within timeout. ok is false when the stream reached EOF.
+func nextSSELine(t *testing.T, scanner *bufio.Scanner, timeout time.Duration) (line string, ok bool) {
+	t.Helper()
+	type scanResult struct {
+		line string
+		ok   bool
+	}
+	ch := make(chan scanResult, 1)
+	go func() {
+		if scanner.Scan() {
+			ch <- scanResult{line: scanner.Text(), ok: true}
+			return
+		}
+		ch <- scanResult{}
+	}()
+	select {
+	case r := <-ch:
+		return r.line, r.ok
+	case <-time.After(timeout):
+		t.Fatalf("timed out after %v waiting for the next SSE line", timeout)
+		return "", false
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -1087,6 +1178,146 @@ func TestMux_SearchStreamEndpoint_Success(t *testing.T) {
 	}
 }
 
+// TestMux_SearchStreamEndpoint_EmitsStatusBeforeResults proves the #319
+// contract deterministically: with an embedder that blocks until released,
+// no result can exist when the stream opens, so the FIRST event must be the
+// immediate status event, periodic heartbeats must keep arriving while the
+// search is still blocked, and the result replay must follow once the
+// search completes.
+func TestMux_SearchStreamEndpoint_EmitsStatusBeforeResults(t *testing.T) {
+	store := &mockStore{
+		searchBM25Fn: func(query string, limit int) ([]*db.SearchResult, error) {
+			return []*db.SearchResult{
+				{Chunk: &db.Chunk{UUID: "u1", Content: "slow result one"}, BM25Rank: 1, RRFScore: 0.15},
+				{Chunk: &db.Chunk{UUID: "u2", Content: "slow result two"}, BM25Rank: 2, RRFScore: 0.08},
+			}, nil
+		},
+		searchVectorFn: func(queryVec []float32, limit int) ([]*db.SearchResult, error) {
+			return nil, nil
+		},
+	}
+	embedder := newBlockingEmbedder()
+	defer embedder.unblock() // never leave the search stuck if the test fails early
+	srv := newTestServer(t, store, store, embedder)
+
+	resp := doRequest(t, "GET", srv.URL+"/search/stream?q=slow+search", "", nil)
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /search/stream: status %d, want 200", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "text/event-stream" {
+		t.Fatalf("Content-Type = %q, want text/event-stream", ct)
+	}
+
+	scanner := bufio.NewScanner(resp.Body)
+
+	// The embedder is still blocked, so no result can exist yet. The FIRST
+	// event must be the immediate status event (issue #319).
+	firstEvent, ok := nextSSELine(t, scanner, 5*time.Second)
+	if !ok {
+		t.Fatal("stream closed before the first event")
+	}
+	if firstEvent != "event: status" {
+		t.Fatalf("first SSE event = %q, want %q (status must precede results)", firstEvent, "event: status")
+	}
+	if data, ok := nextSSELine(t, scanner, 5*time.Second); !ok || data != `data: {"stage":"searching"}` {
+		t.Errorf("first status data line = %q (ok=%v), want %q", data, ok, `data: {"stage":"searching"}`)
+	}
+	if _, ok := nextSSELine(t, scanner, 5*time.Second); !ok {
+		t.Fatal("stream closed before the first status event separator")
+	}
+
+	// While the search is still blocked in the embedder, a periodic
+	// heartbeat status event must arrive (issue #319).
+	heartbeatEvent, ok := nextSSELine(t, scanner, 5*time.Second)
+	if !ok {
+		t.Fatal("stream closed before the heartbeat event")
+	}
+	if heartbeatEvent != "event: status" {
+		t.Fatalf("expected a periodic heartbeat status event while the search runs, got %q", heartbeatEvent)
+	}
+	if _, ok := nextSSELine(t, scanner, 5*time.Second); !ok {
+		t.Fatal("stream closed before the heartbeat data line")
+	}
+	if _, ok := nextSSELine(t, scanner, 5*time.Second); !ok {
+		t.Fatal("stream closed before the heartbeat separator")
+	}
+
+	// Unblock the embedder: the search completes and the result replay
+	// (unchanged behavior) follows.
+	embedder.unblock()
+
+	var resultCount int
+	var gotDone bool
+	for {
+		line, ok := nextSSELine(t, scanner, 5*time.Second)
+		if !ok {
+			break
+		}
+		if strings.HasPrefix(line, "event: result") {
+			resultCount++
+		}
+		if strings.HasPrefix(line, "event: done") {
+			gotDone = true
+		}
+	}
+	if resultCount != 2 {
+		t.Errorf("expected 2 result events after the status events, got %d", resultCount)
+	}
+	if !gotDone {
+		t.Error("expected event: done after the result replay")
+	}
+}
+
+// TestMux_SearchStreamEndpoint_SlowEmbedder_FirstEventIsStatus matches the
+// issue's suggested shape: a mock embedder with a fixed delay, asserting
+// the FIRST event in the stream is a status event and that result events
+// still arrive afterwards.
+func TestMux_SearchStreamEndpoint_SlowEmbedder_FirstEventIsStatus(t *testing.T) {
+	store := &mockStore{
+		searchBM25Fn: func(query string, limit int) ([]*db.SearchResult, error) {
+			return []*db.SearchResult{
+				{Chunk: &db.Chunk{UUID: "u1", Content: "slow result"}, BM25Rank: 1, RRFScore: 0.15},
+			}, nil
+		},
+		searchVectorFn: func(queryVec []float32, limit int) ([]*db.SearchResult, error) {
+			return nil, nil
+		},
+	}
+	embedder := &slowEmbedder{delay: 300 * time.Millisecond}
+	srv := newTestServer(t, store, store, embedder)
+
+	resp := doRequest(t, "GET", srv.URL+"/search/stream?q=slow", "", nil)
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /search/stream: status %d, want 200", resp.StatusCode)
+	}
+
+	body, _ := io.ReadAll(resp.Body)
+	s := string(body)
+
+	lines := strings.Split(s, "\n")
+	if lines[0] != "event: status" {
+		t.Errorf("first SSE line = %q, want %q (status must precede results)", lines[0], "event: status")
+	}
+	statusIdx := strings.Index(s, "event: status")
+	resultIdx := strings.Index(s, "event: result")
+	if statusIdx == -1 {
+		t.Error("expected event: status in slow-embedder stream")
+	}
+	if resultIdx == -1 {
+		t.Error("expected event: result in slow-embedder stream")
+	}
+	if statusIdx != -1 && resultIdx != -1 && statusIdx > resultIdx {
+		t.Error("status event must precede result events")
+	}
+	if !strings.Contains(s, "event: done") {
+		t.Error("expected event: done in slow-embedder stream")
+	}
+}
+
 func TestMux_SearchStreamEndpoint_SearchError(t *testing.T) {
 	store := &mockStore{
 		searchBM25Fn: func(query string, limit int) ([]*db.SearchResult, error) {
@@ -1102,8 +1333,29 @@ func TestMux_SearchStreamEndpoint_SearchError(t *testing.T) {
 	resp := doRequest(t, "GET", srv.URL+"/search/stream?q=fail", "", nil)
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusInternalServerError {
-		t.Fatalf("GET /search/stream: status %d, want 500", resp.StatusCode)
+	// The SSE headers are committed by the immediate status event before the
+	// search runs, so a failing search is reported as an SSE error event on
+	// the already-open stream rather than an HTTP 500 (issue #319).
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /search/stream: status %d, want 200 (stream committed by status event)", resp.StatusCode)
+	}
+
+	body, _ := io.ReadAll(resp.Body)
+	s := string(body)
+
+	statusIdx := strings.Index(s, "event: status")
+	errIdx := strings.Index(s, "event: error")
+	if statusIdx == -1 {
+		t.Error("expected event: status before the error event")
+	}
+	if errIdx == -1 {
+		t.Fatalf("expected event: error in SSE stream, got: %s", s)
+	}
+	if statusIdx > errIdx {
+		t.Error("status event must precede the error event")
+	}
+	if !strings.Contains(s, "stream search failed") {
+		t.Errorf("expected error event to carry the failure message, got: %s", s)
 	}
 }
 

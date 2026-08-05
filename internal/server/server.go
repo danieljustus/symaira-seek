@@ -24,9 +24,10 @@ import (
 )
 
 const (
-	maxHeaderBytes    = 1 << 20
-	maxIndexBodyBytes = 1 << 20
-	indexCooldown     = 5 * time.Second
+	maxHeaderBytes          = 1 << 20
+	maxIndexBodyBytes       = 1 << 20
+	indexCooldown           = 5 * time.Second
+	searchHeartbeatInterval = 2 * time.Second
 )
 
 type rateLimiter struct {
@@ -182,6 +183,36 @@ func warnIfNoAuthToken(w io.Writer) {
 	fmt.Fprintln(w, "WARNING: SEEK_API_TOKEN not set — HTTP daemon is unauthenticated and reachable by any local process")
 }
 
+// writeSearchStatus emits a single `status` SSE event announcing that the
+// search is in progress and flushes it so the client observes it
+// immediately. It is used for both the initial event emitted before the
+// search starts and the periodic heartbeat events (issue #319).
+func writeSearchStatus(w io.Writer, flusher http.Flusher) {
+	statusData, _ := json.Marshal(map[string]string{"stage": "searching"})
+	fmt.Fprintf(w, "event: status\ndata: %s\n\n", statusData)
+	flusher.Flush()
+}
+
+// runSearchHeartbeat emits `status` heartbeat events every
+// searchHeartbeatInterval until stop is closed, then signals completion on
+// done. It keeps slow searches (e.g. an Ollama cold start that takes up to
+// ~120s) visibly alive to SSE clients. The caller must wait on done before
+// writing further events to the stream so the response writer stays
+// single-writer.
+func runSearchHeartbeat(w io.Writer, flusher http.Flusher, stop <-chan struct{}, done chan<- struct{}) {
+	defer close(done)
+	ticker := time.NewTicker(searchHeartbeatInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			writeSearchStatus(w, flusher)
+		case <-stop:
+			return
+		}
+	}
+}
+
 // newServeMux builds the HTTP handler mux with all endpoint handlers.
 // It is extracted from StartHTTPServer so that tests can exercise the full
 // handler chain via a mock db.Store and engine.Embedder without starting a
@@ -207,8 +238,10 @@ func newServeMux(dbClient db.Store, vectorStore db.VectorStore, embedder engine.
 	})
 
 	// 3. Hybrid search endpoint. SSE (/search/stream, or /search with
-	// Accept: text/event-stream) is only a framing convenience: the search
-	// runs to completion first, then the result set is replayed as events.
+	// Accept: text/event-stream) streams status heartbeat events while the
+	// search runs (issue #319): an immediate `status` event, then periodic
+	// heartbeats, so clients see liveness during slow embedding backends;
+	// once the search completes, the result set is replayed as events.
 	handleSearch := func(w http.ResponseWriter, r *http.Request) {
 		query := r.URL.Query().Get("q")
 		if query == "" {
@@ -226,6 +259,8 @@ func newServeMux(dbClient db.Store, vectorStore db.VectorStore, embedder engine.
 		stream := r.URL.Path == "/search/stream" || acceptsEventStream(r)
 
 		var flusher http.Flusher
+		var stopHeartbeat chan struct{}
+		var heartbeatDone chan struct{}
 		if stream {
 			f, ok := w.(http.Flusher)
 			if !ok {
@@ -236,12 +271,36 @@ func newServeMux(dbClient db.Store, vectorStore db.VectorStore, embedder engine.
 			w.Header().Set("Content-Type", "text/event-stream")
 			w.Header().Set("Cache-Control", "no-cache")
 			w.Header().Set("Connection", "keep-alive")
+
+			// Issue #319: emit an immediate, flushed status event BEFORE running
+			// the search so clients see liveness right away — a cold Ollama
+			// backend can take up to ~120s to embed. Heartbeats keep the
+			// connection visibly alive while the search runs.
+			writeSearchStatus(w, flusher)
+			stopHeartbeat = make(chan struct{})
+			heartbeatDone = make(chan struct{})
+			go runSearchHeartbeat(w, flusher, stopHeartbeat, heartbeatDone)
 		} else {
 			w.Header().Set("Content-Type", "application/json")
 		}
 
 		results, err := engine.SearchHybridWithOptions(dbClient, vectorStore, embedder, query, limit, searchOpts)
+		if stream {
+			// Stop the heartbeat before touching the response writer again so
+			// the stream stays single-writer (no concurrent writes).
+			close(stopHeartbeat)
+			<-heartbeatDone
+		}
 		if err != nil {
+			if stream {
+				// The SSE headers (and the status event) are already committed,
+				// so an HTTP error status is no longer possible; report the
+				// failure as an SSE error event instead.
+				errData, _ := json.Marshal(map[string]string{"error": err.Error()})
+				fmt.Fprintf(w, "event: error\ndata: %s\n\n", errData)
+				flusher.Flush()
+				return
+			}
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
