@@ -30,6 +30,11 @@ let package = Package(
             dependencies: ["SymseekFeature"],
             path: "Sources/SymseekApp",
             resources: []
+        ),
+        .testTarget(
+            name: "SymseekFeatureTests",
+            dependencies: ["SymseekFeature"],
+            path: "Tests/SymseekFeatureTests"
         )
     ]
 )

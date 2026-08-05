@@ -67,12 +67,19 @@ struct DashboardView: View {
                     
                     HStack {
                         if engineManager.isRunning {
-                            Text("REST Port: \(engineManager.port ?? 8080)")
+                            Text("REST Port: \(String(engineManager.port ?? 8080))")
                                 .font(.system(.caption, design: .monospaced))
                                 .foregroundStyle(Color.symairaTextSecondary)
                             Spacer()
                             Button("Stop Server") {
-                                engineManager.stop()
+                                // Issue #306: never run the supervisor's stop
+                                // path synchronously on the main actor — it can
+                                // block on an internal lock and freeze the app.
+                                // The action returns immediately; the stop runs
+                                // on EngineManager's background stop queue.
+                                Task {
+                                    await engineManager.stop()
+                                }
                             }
                             .buttonStyle(.borderedProminent)
                             .tint(.red.opacity(0.8))

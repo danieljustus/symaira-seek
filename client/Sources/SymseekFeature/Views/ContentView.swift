@@ -10,7 +10,13 @@ struct ContentView: View {
     
     @State private var selectedTab: Tab = .dashboard
     @State private var engineManager = EngineManager()
-    
+
+    /// App version read from the bundle (CFBundleShortVersionString), which
+    /// client/build.sh injects from the git tag at packaging time.
+    private var appVersion: String {
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "dev"
+    }
+
     var body: some View {
         NavigationSplitView {
             // Sidebar Navigation
@@ -77,7 +83,7 @@ struct ContentView: View {
                             .font(.system(.caption2, design: .monospaced))
                             .foregroundStyle(Color.symairaTextSecondary)
                     }
-                    Text("v2.3.1")
+                    Text("v\(appVersion)")
                         .font(.system(.caption2, design: .monospaced))
                         .foregroundStyle(Color.symairaMuted)
                 }
