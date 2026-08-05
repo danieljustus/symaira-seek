@@ -215,7 +215,7 @@ class SearchModel {
         if let apiToken {
             request.setValue("Bearer \(apiToken)", forHTTPHeaderField: "Authorization")
         }
-        
+
         URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
             Task { @MainActor [weak self] in
                 guard let self else { return }
