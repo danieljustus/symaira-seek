@@ -188,9 +188,9 @@ func TestQuantSidecarRoundTripMinimalMeta(t *testing.T) {
 
 	quant := []byte{0xAA, 0xBB}
 	meta := QuantSidecarMeta{
-		CodecVersion: 2,
-		Dimension:    2,
-		BitWidth:     4,
+		CodecVersion:  2,
+		Dimension:     2,
+		BitWidth:      4,
 		QuantizerMode: "product",
 	}
 
