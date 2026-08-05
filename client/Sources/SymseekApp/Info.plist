@@ -4,6 +4,8 @@
 <dict>
     <key>CFBundleExecutable</key>
     <string>symseek-gui</string>
+    <key>CFBundleIconFile</key>
+    <string>Symseek</string>
     <key>CFBundleIdentifier</key>
     <string>dev.symaira.symseek-gui</string>
     <key>CFBundleName</key>

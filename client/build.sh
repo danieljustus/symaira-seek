@@ -21,7 +21,7 @@ echo "Version: $VERSION"
 
 echo "=== 1. Building Go Backend ==="
 # CGO_ENABLED=0 to stay 100% CGO-free as per guidelines
-CGO_ENABLED=0 go build -ldflags "-s -w -X main.version=$VERSION" -o symseek cmd/symseek/main.go
+CGO_ENABLED=0 go build -ldflags "-s -w -X main.version=$VERSION" -o symseek ./cmd/symseek
 echo "Go binary built at ./symseek"
 
 echo "=== 2. Building Swift GUI Client ==="
@@ -53,6 +53,9 @@ cp "$SWIFT_BIN_DIR/symseek-gui" "$APP_DIR/Contents/MacOS/"
 # Embed Go backend binary
 cp symseek "$APP_DIR/Contents/Resources/"
 chmod +x "$APP_DIR/Contents/Resources/symseek"
+
+# Copy application icon (declared via CFBundleIconFile in Info.plist)
+cp client/Sources/SymseekApp/icon/Symseek.icns "$APP_DIR/Contents/Resources/"
 
 echo "macOS App Bundle assembled at $APP_DIR"
 
