@@ -2,15 +2,19 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/danieljustus/symaira-seek/internal/bench"
 	"github.com/danieljustus/symaira-seek/internal/config"
 	"github.com/danieljustus/symaira-seek/internal/db"
 )
@@ -936,4 +940,202 @@ func TestStartMCPServer(t *testing.T) {
 
 func portStr(port int) string {
 	return fmt.Sprintf("%d", port)
+}
+
+// ---------------------------------------------------------------------------
+// Bench command tests  (lines 321-444)
+// ---------------------------------------------------------------------------
+
+// benchFixture writes a minimal corpus and judgment set into a temp dir.
+func benchFixture(t *testing.T) (corpusDir, judgmentsPath string) {
+	t.Helper()
+	dir := t.TempDir()
+	corpusDir = filepath.Join(dir, "corpus")
+	if err := os.MkdirAll(corpusDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	for name, content := range map[string]string{
+		"alpha.txt": "The quick brown fox jumps over the lazy dog near the river bank.",
+		"beta.txt":  "Quantum entanglement links particles across any distance instantly.",
+	} {
+		if err := os.WriteFile(filepath.Join(corpusDir, name), []byte(content), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	judgmentsPath = filepath.Join(dir, "judgments.yaml")
+	content := "queries:\n" +
+		"  - query: \"quick brown fox river\"\n" +
+		"    relevant_ids: [\"alpha\"]\n" +
+		"  - query: \"quantum entanglement particles\"\n" +
+		"    relevant_ids: [\"beta\"]\n"
+	if err := os.WriteFile(judgmentsPath, []byte(content), 0600); err != nil {
+		t.Fatal(err)
+	}
+	return corpusDir, judgmentsPath
+}
+
+// setupBenchEnv isolates HOME and config, and points the Ollama endpoint at a
+// local stub that answers 404 so the bench CLI deterministically falls back to
+// the local-hash embedder without touching the network.
+func setupBenchEnv(t *testing.T) {
+	t.Helper()
+	setupTestEnv(t)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "model not found", http.StatusNotFound)
+	}))
+	t.Cleanup(srv.Close)
+
+	cfgDir := filepath.Join(os.Getenv("HOME"), ".config", "symseek")
+	if err := os.MkdirAll(cfgDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	cfgPath := filepath.Join(cfgDir, "config.toml")
+	contents := fmt.Sprintf("ollama_url = %q\ntimeout_seconds = 2\nrerank_timeout_seconds = 2\n", srv.URL+"/api/embeddings")
+	if err := os.WriteFile(cfgPath, []byte(contents), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfgFile = cfgPath
+	initConfig()
+}
+
+// TestBenchCmd_JSONOutput covers lines 355-359: --json must emit a valid JSON
+// array of per-query results.
+func TestBenchCmd_JSONOutput(t *testing.T) {
+	setupBenchEnv(t)
+	corpus, judgments := benchFixture(t)
+
+	cmd := newRootCmd()
+	cmd.SetArgs([]string{"bench", "--corpus", corpus, "--judgments", judgments, "--limit", "5", "--json"})
+	out := captureStdout(t, func() {
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("bench --json: %v", err)
+		}
+	})
+
+	out = strings.TrimSpace(out)
+	if !json.Valid([]byte(out)) {
+		t.Fatalf("expected valid JSON output, got %q", out)
+	}
+	var results []map[string]any
+	if err := json.Unmarshal([]byte(out), &results); err != nil {
+		t.Fatalf("parsing bench JSON: %v", err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("expected 2 results, got %d", len(results))
+	}
+	for _, r := range results {
+		if _, ok := r["Query"]; !ok {
+			t.Errorf("expected Query field in %v", r)
+		}
+		if _, ok := r["MRR"]; !ok {
+			t.Errorf("expected MRR field in %v", r)
+		}
+	}
+}
+
+// TestBenchCmd_TextSummary covers lines 361-362: without --json the command
+// prints the human-readable summary produced by printBenchResults.
+func TestBenchCmd_TextSummary(t *testing.T) {
+	setupBenchEnv(t)
+	corpus, judgments := benchFixture(t)
+
+	cmd := newRootCmd()
+	cmd.SetArgs([]string{"bench", "--corpus", corpus, "--judgments", judgments, "--limit", "5"})
+	out := captureStdout(t, func() {
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("bench: %v", err)
+		}
+	})
+
+	if !strings.Contains(out, "=== Bench Results: Hybrid ===") {
+		t.Errorf("expected hybrid results header in output, got %q", out)
+	}
+	if !strings.Contains(out, "Queries: 2") {
+		t.Errorf("expected 'Queries: 2' summary line, got %q", out)
+	}
+	if !strings.Contains(out, "Mean") {
+		t.Errorf("expected Mean row in output, got %q", out)
+	}
+}
+
+// TestBenchCmd_AllConfigs covers lines 366-436: --all-configs runs the three
+// configurations and prints the aggregate comparison table.
+func TestBenchCmd_AllConfigs(t *testing.T) {
+	setupBenchEnv(t)
+	corpus, judgments := benchFixture(t)
+
+	cmd := newRootCmd()
+	cmd.SetArgs([]string{"bench", "--all-configs", "--corpus", corpus, "--judgments", judgments, "--limit", "5"})
+	out := captureStdout(t, func() {
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("bench --all-configs: %v", err)
+		}
+	})
+
+	if !strings.Contains(out, "=== Aggregate Comparison ===") {
+		t.Errorf("expected aggregate comparison in output, got %q", out)
+	}
+	for _, name := range []string{"Vector Only", "Hybrid", "Hybrid+Rerank"} {
+		if !strings.Contains(out, name) {
+			t.Errorf("expected %q config in output, got %q", name, out)
+		}
+	}
+}
+
+// TestBenchCmd_BadJudgments covers line 352: a missing judgments file must
+// surface as an error instead of silently succeeding.
+func TestBenchCmd_BadJudgments(t *testing.T) {
+	setupBenchEnv(t)
+	corpus, _ := benchFixture(t)
+
+	cmd := newRootCmd()
+	cmd.SetArgs([]string{"bench", "--corpus", corpus, "--judgments", filepath.Join(t.TempDir(), "missing.yaml")})
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("expected error for missing judgments file")
+	}
+}
+
+// TestPrintBenchResults_Summary covers lines 541-564: the summary must include
+// the config header, the non-errored query count, a Mean row, and an error
+// marker for failed queries.
+func TestPrintBenchResults_Summary(t *testing.T) {
+	results := []*bench.Result{
+		{
+			Query: "quick brown fox", RankedIDs: []string{"alpha"},
+			HitRate1: 1, HitRate3: 1, HitRate5: 1, HitRate10: 1,
+			MRR: 1, NDCG10: 0.9, Latency: 5 * time.Millisecond,
+		},
+		{Query: "quantum entanglement", Error: "search exploded", Latency: time.Millisecond},
+	}
+
+	var buf bytes.Buffer
+	printBenchResults(&buf, "Hybrid", results)
+	out := buf.String()
+
+	if !strings.Contains(out, "=== Bench Results: Hybrid ===") {
+		t.Errorf("expected bench header, got %q", out)
+	}
+	if !strings.Contains(out, "Queries: 1") {
+		t.Errorf("expected errored query excluded from count, got %q", out)
+	}
+	if !strings.Contains(out, "[ERR]") {
+		t.Errorf("expected error marker for failed query, got %q", out)
+	}
+	if !strings.Contains(out, "Mean") {
+		t.Errorf("expected Mean row, got %q", out)
+	}
+}
+
+// TestPrintBenchResults_TruncatesLongQuery covers lines 554-557: queries
+// longer than 38 chars are truncated in the per-query table.
+func TestPrintBenchResults_TruncatesLongQuery(t *testing.T) {
+	long := strings.Repeat("q", 60)
+	var buf bytes.Buffer
+	printBenchResults(&buf, "Hybrid", []*bench.Result{{Query: long, HitRate1: 0.5, MRR: 0.25}})
+	out := buf.String()
+	if !strings.Contains(out, strings.Repeat("q", 35)+"...") {
+		t.Errorf("expected long query truncated to 35 chars, got %q", out)
+	}
 }

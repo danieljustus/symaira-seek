@@ -32,20 +32,20 @@ import (
 var version = "0.1.0-dev"
 
 var (
-	cfgFile     string
-	cfg         config.Config
-	limitFlag   int
-	jsonFlag    bool
-	tuiFlag     bool
-	plainFlag   bool
+	cfgFile        string
+	cfg            config.Config
+	limitFlag      int
+	jsonFlag       bool
+	tuiFlag        bool
+	plainFlag      bool
 	pathFilterFlag string
-	watchFlag   bool
-	portFlag    int
-	urlFlag     string
-	stdinFlag   bool
-	sourceFlag  string
-	verboseFlag bool
-	quietFlag   bool
+	watchFlag      bool
+	portFlag       int
+	urlFlag        string
+	stdinFlag      bool
+	sourceFlag     string
+	verboseFlag    bool
+	quietFlag      bool
 )
 
 func main() {
