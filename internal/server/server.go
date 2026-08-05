@@ -151,12 +151,17 @@ func contentTypeEnforcement(next http.Handler) http.Handler {
 	})
 }
 
-// bearerTokenAuth wraps an http.Handler and checks the SEEK_API_TOKEN
-// environment variable. If set, requests must include a matching Bearer token
-// in the Authorization header.
-func bearerTokenAuth(next http.Handler) http.Handler {
+// bearerTokenAuth wraps an http.Handler and requires a matching Bearer token
+// in the Authorization header when expected is non-empty. /health stays open
+// as an unauthenticated liveness probe (it exposes no index data). An empty
+// expected token (--no-auth mode) leaves all endpoints open, matching the
+// pre-#318 behavior.
+func bearerTokenAuth(expected string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		expected := os.Getenv("SEEK_API_TOKEN")
+		if r.URL.Path == "/health" {
+			next.ServeHTTP(w, r)
+			return
+		}
 		if expected == "" {
 			next.ServeHTTP(w, r)
 			return
@@ -171,12 +176,10 @@ func bearerTokenAuth(next http.Handler) http.Handler {
 	})
 }
 
-// warnIfNoAuthToken emits a prominent warning to w when SEEK_API_TOKEN is
-// not set, signaling that the HTTP daemon is unauthenticated.
+// warnIfNoAuthToken emits a prominent warning to w, signaling that the HTTP
+// daemon is running unauthenticated (--no-auth mode).
 func warnIfNoAuthToken(w io.Writer) {
-	if os.Getenv("SEEK_API_TOKEN") == "" {
-		fmt.Fprintln(w, "WARNING: SEEK_API_TOKEN not set — HTTP daemon is unauthenticated and reachable by any local process")
-	}
+	fmt.Fprintln(w, "WARNING: SEEK_API_TOKEN not set — HTTP daemon is unauthenticated and reachable by any local process")
 }
 
 // newServeMux builds the HTTP handler mux with all endpoint handlers.
@@ -334,8 +337,10 @@ func newServeMux(dbClient db.Store, vectorStore db.VectorStore, embedder engine.
 	return mux
 }
 
-// StartHTTPServer runs the local HTTP REST daemon.
-func StartHTTPServer(port int, ollamaCfg engine.OllamaConfig, indexCooldown time.Duration, quantCfg *db.QuantConfig, rerankCfg engine.RerankConfig, expandCfg engine.ExpandConfig) error {
+// StartHTTPServer runs the local HTTP REST daemon. authToken is the API token
+// required on all endpoints except /health; an empty authToken runs the
+// daemon unauthenticated (--no-auth mode).
+func StartHTTPServer(port int, authToken string, ollamaCfg engine.OllamaConfig, indexCooldown time.Duration, quantCfg *db.QuantConfig, rerankCfg engine.RerankConfig, expandCfg engine.ExpandConfig) error {
 	dbClient, err := db.Open()
 	if err != nil {
 		return fmt.Errorf("failed to open database: %w", err)
@@ -348,12 +353,16 @@ func StartHTTPServer(port int, ollamaCfg engine.OllamaConfig, indexCooldown time
 	mux := newServeMux(dbClient, dbClient, embedder, indexCooldown, searchOpts)
 
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
-	warnIfNoAuthToken(os.Stderr)
+	if authToken == "" {
+		warnIfNoAuthToken(os.Stderr)
+	} else {
+		fmt.Fprintln(os.Stderr, "API token required: all endpoints except /health require Authorization: Bearer <token>")
+	}
 	fmt.Fprintf(os.Stderr, "HTTP daemon listening on http://%s...\n", addr)
 
 	srv := &http.Server{
 		Addr:           addr,
-		Handler:        hostValidation(originValidation(contentTypeEnforcement(bearerTokenAuth(mux)))),
+		Handler:        hostValidation(originValidation(contentTypeEnforcement(bearerTokenAuth(authToken, mux)))),
 		ReadTimeout:    15 * time.Second,
 		WriteTimeout:   15 * time.Second,
 		IdleTimeout:    60 * time.Second,
