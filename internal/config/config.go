@@ -2,6 +2,8 @@
 package config
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -9,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/BurntSushi/toml"
 	"github.com/danieljustus/symaira-corekit/configkit"
@@ -95,6 +98,51 @@ func Reload() (*Config, error) {
 
 func GlobalPath() string {
 	return configkit.DefaultPath("symseek")
+}
+
+// ConfigDir returns the XDG config directory for symseek
+// (e.g. ~/.config/symseek).
+func ConfigDir() string {
+	return filepath.Dir(GlobalPath())
+}
+
+// APITokenPath returns the path of the HTTP daemon's API token file
+// (e.g. ~/.config/symseek/api-token).
+func APITokenPath() string {
+	return filepath.Join(ConfigDir(), "api-token")
+}
+
+// LoadOrCreateAPIToken returns the HTTP daemon API token stored at path. On
+// first start (file missing) it generates a cryptographically random token
+// and persists it to path with 0600 permissions. An existing but unreadable
+// or malformed file is returned as an error so callers can fail the serve
+// command instead of silently falling back to an unauthenticated daemon.
+func LoadOrCreateAPIToken(path string) (token string, created bool, err error) {
+	data, err := os.ReadFile(path)
+	if err == nil {
+		token = strings.TrimSpace(string(data))
+		if token == "" || strings.ContainsFunc(token, unicode.IsSpace) {
+			return "", false, fmt.Errorf("API token file %s is malformed (expected a single token on one line)", path)
+		}
+		return token, false, nil
+	}
+	if !os.IsNotExist(err) {
+		return "", false, fmt.Errorf("failed to read API token file %s: %w", path, err)
+	}
+
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		return "", false, fmt.Errorf("failed to generate API token: %w", err)
+	}
+	token = hex.EncodeToString(buf)
+
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return "", false, fmt.Errorf("failed to create config directory for API token: %w", err)
+	}
+	if err := os.WriteFile(path, []byte(token+"\n"), 0600); err != nil {
+		return "", false, fmt.Errorf("failed to write API token file %s: %w", path, err)
+	}
+	return token, true, nil
 }
 
 // OllamaConfig converts a Config to the engine.OllamaConfig format.

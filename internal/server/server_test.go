@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/danieljustus/symaira-seek/internal/config"
 	"github.com/danieljustus/symaira-seek/internal/db"
 	"github.com/danieljustus/symaira-seek/internal/engine"
 	"github.com/danieljustus/symaira-seek/internal/pathutil"
@@ -207,17 +208,31 @@ func (m *mockEmbedder) ModelName() string {
 // ---------------------------------------------------------------------------
 
 // testHandler returns the full middleware-wrapped handler for the mux.
-func testHandler(t *testing.T, store db.Store, vectorStore db.VectorStore, embedder engine.Embedder, indexCooldown time.Duration) http.Handler {
+// authToken is the token required by bearerTokenAuth; empty emulates
+// --no-auth mode.
+func testHandler(t *testing.T, store db.Store, vectorStore db.VectorStore, embedder engine.Embedder, indexCooldown time.Duration, authToken string) http.Handler {
 	t.Helper()
 	mux := newServeMux(store, vectorStore, embedder, indexCooldown, engine.SearchOptions{})
-	return hostValidation(originValidation(contentTypeEnforcement(bearerTokenAuth(mux))))
+	return hostValidation(originValidation(contentTypeEnforcement(bearerTokenAuth(authToken, mux))))
 }
 
-// newTestServer starts an httptest.Server with the full handler chain.
+// newTestServer starts an httptest.Server with the full handler chain in
+// unauthenticated (--no-auth) mode.
 // The server is automatically closed when the test finishes.
 func newTestServer(t *testing.T, store db.Store, vectorStore db.VectorStore, embedder engine.Embedder) *httptest.Server {
 	t.Helper()
-	handler := testHandler(t, store, vectorStore, embedder, 5*time.Second)
+	handler := testHandler(t, store, vectorStore, embedder, 5*time.Second, "")
+	srv := httptest.NewServer(handler)
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// newAuthTestServer starts an httptest.Server with the full handler chain
+// requiring the given bearer token on all endpoints except /health.
+// The server is automatically closed when the test finishes.
+func newAuthTestServer(t *testing.T, store db.Store, vectorStore db.VectorStore, embedder engine.Embedder, authToken string) *httptest.Server {
+	t.Helper()
+	handler := testHandler(t, store, vectorStore, embedder, 5*time.Second, authToken)
 	srv := httptest.NewServer(handler)
 	t.Cleanup(srv.Close)
 	return srv
@@ -419,9 +434,10 @@ func TestContentTypeEnforcement_SkipsNonIndexPaths(t *testing.T) {
 	}
 }
 
+// TestBearerTokenAuth_NoTokenRequired covers --no-auth mode: with an empty
+// expected token, requests pass through without an Authorization header.
 func TestBearerTokenAuth_NoTokenRequired(t *testing.T) {
-	t.Setenv("SEEK_API_TOKEN", "")
-	handler := bearerTokenAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := bearerTokenAuth("", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
@@ -435,12 +451,11 @@ func TestBearerTokenAuth_NoTokenRequired(t *testing.T) {
 }
 
 func TestBearerTokenAuth_RejectsMissingToken(t *testing.T) {
-	t.Setenv("SEEK_API_TOKEN", "secret123")
-	handler := bearerTokenAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := bearerTokenAuth("secret123", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
-	req := httptest.NewRequest("GET", "/health", nil)
+	req := httptest.NewRequest("GET", "/status", nil)
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, req)
 
@@ -450,13 +465,43 @@ func TestBearerTokenAuth_RejectsMissingToken(t *testing.T) {
 }
 
 func TestBearerTokenAuth_AcceptsValidToken(t *testing.T) {
-	t.Setenv("SEEK_API_TOKEN", "secret123")
-	handler := bearerTokenAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := bearerTokenAuth("secret123", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest("GET", "/status", nil)
+	req.Header.Set("Authorization", "Bearer secret123")
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", rr.Code)
+	}
+}
+
+func TestBearerTokenAuth_RejectsWrongToken(t *testing.T) {
+	handler := bearerTokenAuth("secret123", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest("GET", "/status", nil)
+	req.Header.Set("Authorization", "Bearer wrong-token")
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401, got %d", rr.Code)
+	}
+}
+
+// TestBearerTokenAuth_HealthStaysOpen verifies the /health liveness probe is
+// reachable without a token even when auth is enforced.
+func TestBearerTokenAuth_HealthStaysOpen(t *testing.T) {
+	handler := bearerTokenAuth("secret123", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
 	req := httptest.NewRequest("GET", "/health", nil)
-	req.Header.Set("Authorization", "Bearer secret123")
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, req)
 
@@ -713,25 +758,19 @@ func TestRateLimiterKeyedByHostAcrossConnections(t *testing.T) {
 	}
 }
 
-func TestWarnIfNoAuthToken_Unset(t *testing.T) {
-	t.Setenv("SEEK_API_TOKEN", "")
+// TestWarnIfNoAuthToken verifies the prominent unauthenticated-daemon warning
+// is written to w (stderr) whenever the daemon runs without a token
+// (--no-auth mode). warnIfNoAuthToken is only called by StartHTTPServer when
+// no token was resolved, so the warning is now unconditional.
+func TestWarnIfNoAuthToken(t *testing.T) {
 	var buf bytes.Buffer
 	warnIfNoAuthToken(&buf)
 	out := buf.String()
 	if !strings.Contains(out, "WARNING") {
-		t.Errorf("expected warning on stderr when SEEK_API_TOKEN is unset, got %q", out)
+		t.Errorf("expected warning on stderr when the daemon runs without a token, got %q", out)
 	}
-	if !strings.Contains(out, "SEEK_API_TOKEN") {
-		t.Errorf("warning should mention SEEK_API_TOKEN, got %q", out)
-	}
-}
-
-func TestWarnIfNoAuthToken_Set(t *testing.T) {
-	t.Setenv("SEEK_API_TOKEN", "my-secret-token")
-	var buf bytes.Buffer
-	warnIfNoAuthToken(&buf)
-	if buf.Len() != 0 {
-		t.Errorf("expected no warning when SEEK_API_TOKEN is set, got %q", buf.String())
+	if !strings.Contains(out, "unauthenticated") {
+		t.Errorf("warning should mention unauthenticated daemon, got %q", out)
 	}
 }
 
@@ -1247,7 +1286,7 @@ func TestMux_IndexEndpoint_RateLimit(t *testing.T) {
 	}
 	embedder := &mockEmbedder{}
 	// Very long cooldown to guarantee rate limiting on second request
-	handler := testHandler(t, store, store, embedder, 24*time.Hour)
+	handler := testHandler(t, store, store, embedder, 24*time.Hour, "")
 	srv := httptest.NewServer(handler)
 	t.Cleanup(srv.Close)
 
@@ -1357,7 +1396,7 @@ func TestMux_IndexEndpoint_IndexDirectoryError(t *testing.T) {
 func TestFullChain_HostValidationRejects(t *testing.T) {
 	store := &mockStore{}
 	embedder := &mockEmbedder{}
-	handler := testHandler(t, store, store, embedder, 5*time.Second)
+	handler := testHandler(t, store, store, embedder, 5*time.Second, "")
 
 	req := httptest.NewRequest("GET", "/health", nil)
 	req.Host = "evil.example.com"
@@ -1372,7 +1411,7 @@ func TestFullChain_HostValidationRejects(t *testing.T) {
 func TestFullChain_OriginValidationRejects(t *testing.T) {
 	store := &mockStore{}
 	embedder := &mockEmbedder{}
-	handler := testHandler(t, store, store, embedder, 5*time.Second)
+	handler := testHandler(t, store, store, embedder, 5*time.Second, "")
 
 	req := httptest.NewRequest("GET", "/health", nil)
 	req.Host = "127.0.0.1:8788"
@@ -1386,14 +1425,11 @@ func TestFullChain_OriginValidationRejects(t *testing.T) {
 }
 
 func TestFullChain_BearerTokenRejects(t *testing.T) {
-	t.Setenv("SEEK_API_TOKEN", "real-secret")
-	defer t.Setenv("SEEK_API_TOKEN", "")
-
 	store := &mockStore{}
 	embedder := &mockEmbedder{}
-	handler := testHandler(t, store, store, embedder, 5*time.Second)
+	handler := testHandler(t, store, store, embedder, 5*time.Second, "real-secret")
 
-	req := httptest.NewRequest("GET", "/health", nil)
+	req := httptest.NewRequest("GET", "/status", nil)
 	req.Host = "127.0.0.1:8788"
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, req)
@@ -1404,14 +1440,11 @@ func TestFullChain_BearerTokenRejects(t *testing.T) {
 }
 
 func TestFullChain_BearerTokenAccepts(t *testing.T) {
-	t.Setenv("SEEK_API_TOKEN", "real-secret")
-	defer t.Setenv("SEEK_API_TOKEN", "")
-
 	store := &mockStore{}
 	embedder := &mockEmbedder{}
-	handler := testHandler(t, store, store, embedder, 5*time.Second)
+	handler := testHandler(t, store, store, embedder, 5*time.Second, "real-secret")
 
-	req := httptest.NewRequest("GET", "/health", nil)
+	req := httptest.NewRequest("GET", "/status", nil)
 	req.Host = "127.0.0.1:8788"
 	req.Header.Set("Authorization", "Bearer real-secret")
 	rr := httptest.NewRecorder()
@@ -1425,7 +1458,7 @@ func TestFullChain_BearerTokenAccepts(t *testing.T) {
 func TestFullChain_ContentTypeRejectsOnIndex(t *testing.T) {
 	store := &mockStore{}
 	embedder := &mockEmbedder{}
-	handler := testHandler(t, store, store, embedder, 5*time.Second)
+	handler := testHandler(t, store, store, embedder, 5*time.Second, "")
 
 	req := httptest.NewRequest("POST", "/index", strings.NewReader(`{"path":"/tmp"}`))
 	req.Host = "127.0.0.1:8788"
@@ -1441,7 +1474,7 @@ func TestFullChain_ContentTypeRejectsOnIndex(t *testing.T) {
 func TestFullChain_AllowsGETOnNonIndexWithoutContentType(t *testing.T) {
 	store := &mockStore{}
 	embedder := &mockEmbedder{}
-	handler := testHandler(t, store, store, embedder, 5*time.Second)
+	handler := testHandler(t, store, store, embedder, 5*time.Second, "")
 
 	req := httptest.NewRequest("GET", "/search?q=test", nil)
 	req.Host = "127.0.0.1:8788"
@@ -1454,12 +1487,9 @@ func TestFullChain_AllowsGETOnNonIndexWithoutContentType(t *testing.T) {
 }
 
 func TestFullChain_AllOptionsOnHealthEndpoint(t *testing.T) {
-	t.Setenv("SEEK_API_TOKEN", "mytoken")
-	defer t.Setenv("SEEK_API_TOKEN", "")
-
 	store := &mockStore{}
 	embedder := &mockEmbedder{}
-	handler := testHandler(t, store, store, embedder, 5*time.Second)
+	handler := testHandler(t, store, store, embedder, 5*time.Second, "mytoken")
 
 	req := httptest.NewRequest("GET", "/health", nil)
 	req.Host = "127.0.0.1:8788"
@@ -1476,7 +1506,7 @@ func TestFullChain_AllOptionsOnHealthEndpoint(t *testing.T) {
 func TestFullChain_IndexMethodNotAllowed(t *testing.T) {
 	store := &mockStore{}
 	embedder := &mockEmbedder{}
-	handler := testHandler(t, store, store, embedder, 5*time.Second)
+	handler := testHandler(t, store, store, embedder, 5*time.Second, "")
 
 	req := httptest.NewRequest("DELETE", "/index", nil)
 	req.Host = "127.0.0.1:8788"
@@ -1491,7 +1521,7 @@ func TestFullChain_IndexMethodNotAllowed(t *testing.T) {
 func TestFullChain_IndexBadContentTypeOverwrites(t *testing.T) {
 	store := &mockStore{}
 	embedder := &mockEmbedder{}
-	handler := testHandler(t, store, store, embedder, 5*time.Second)
+	handler := testHandler(t, store, store, embedder, 5*time.Second, "")
 
 	req := httptest.NewRequest("POST", "/index", strings.NewReader(`{"path":"/tmp"}`))
 	req.Host = "127.0.0.1:8788"
@@ -1513,7 +1543,7 @@ func TestStartHTTPServer_ListensAndServe(t *testing.T) {
 
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- StartHTTPServer(0, engine.OllamaConfig{}, 5*time.Second, nil, engine.RerankConfig{}, engine.ExpandConfig{})
+		errCh <- StartHTTPServer(0, "test-token", engine.OllamaConfig{}, 5*time.Second, nil, engine.RerankConfig{}, engine.ExpandConfig{})
 	}()
 
 	// Wait for the server to actually be listening before sending SIGTERM.
@@ -1543,5 +1573,93 @@ func TestStartHTTPServer_ListensAndServe(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("server did not shut down within 5s")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// API token auth tests (issue #318)
+// ---------------------------------------------------------------------------
+
+// TestAuth_TokenFileEnforced provisions a token file in a temp config dir
+// (as the daemon does on first start) and verifies the full middleware chain
+// enforces it: no token → 401, correct token → 200, wrong token → 401, and
+// /health stays open as an unauthenticated liveness probe.
+func TestAuth_TokenFileEnforced(t *testing.T) {
+	tokenPath := filepath.Join(t.TempDir(), "api-token")
+	token, created, err := config.LoadOrCreateAPIToken(tokenPath)
+	if err != nil {
+		t.Fatalf("LoadOrCreateAPIToken: %v", err)
+	}
+	if !created {
+		t.Fatal("expected token file to be created on first start")
+	}
+	if len(token) != 64 {
+		t.Errorf("expected 64-hex-char random token, got %d chars", len(token))
+	}
+	info, err := os.Stat(tokenPath)
+	if err != nil {
+		t.Fatalf("stat token file: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0600 {
+		t.Errorf("token file permissions = %v, want 0600", perm)
+	}
+
+	store := &mockStore{}
+	embedder := &mockEmbedder{}
+	srv := newAuthTestServer(t, store, store, embedder, token)
+
+	// Request without token → 401.
+	resp := doRequest(t, "GET", srv.URL+"/status", "", nil)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("GET /status without token: status %d, want 401", resp.StatusCode)
+	}
+
+	// Data endpoint without token → 401.
+	resp = doRequest(t, "GET", srv.URL+"/search?q=hello", "", nil)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("GET /search without token: status %d, want 401", resp.StatusCode)
+	}
+
+	// Correct token → 200.
+	resp = doRequest(t, "GET", srv.URL+"/status", "", map[string]string{"Authorization": "Bearer " + token})
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /status with token: status %d, want 200", resp.StatusCode)
+	}
+
+	// Wrong token → 401.
+	resp = doRequest(t, "GET", srv.URL+"/status", "", map[string]string{"Authorization": "Bearer wrong-token"})
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("GET /status with wrong token: status %d, want 401", resp.StatusCode)
+	}
+
+	// /health stays open without a token.
+	resp = doRequest(t, "GET", srv.URL+"/health", "", nil)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /health without token: status %d, want 200", resp.StatusCode)
+	}
+}
+
+// TestAuth_NoAuthPassthrough covers --no-auth mode: with no expected token
+// the full chain serves protected endpoints without an Authorization header.
+func TestAuth_NoAuthPassthrough(t *testing.T) {
+	store := &mockStore{}
+	embedder := &mockEmbedder{}
+	srv := newTestServer(t, store, store, embedder)
+
+	resp := doRequest(t, "GET", srv.URL+"/status", "", nil)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /status without token (--no-auth): status %d, want 200", resp.StatusCode)
+	}
+
+	resp = doRequest(t, "GET", srv.URL+"/search?q=hello", "", nil)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /search without token (--no-auth): status %d, want 200", resp.StatusCode)
 	}
 }

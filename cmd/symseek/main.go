@@ -41,6 +41,7 @@ var (
 	pathFilterFlag string
 	watchFlag      bool
 	portFlag       int
+	noAuthFlag     bool
 	urlFlag        string
 	stdinFlag      bool
 	sourceFlag     string
@@ -483,13 +484,18 @@ targets from docs/research/README.md (§4.3.1):
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if portFlag > 0 {
 				fmt.Fprintf(os.Stderr, "HTTP REST Server implementation starting on port %d...\n", portFlag)
-				return startHTTPServer(portFlag)
+				authToken, err := resolveAPIToken(noAuthFlag)
+				if err != nil {
+					return err
+				}
+				return startHTTPServer(portFlag, authToken)
 			}
 			fmt.Fprintln(os.Stderr, "MCP server starting over stdio...")
 			return startMCPServer()
 		},
 	}
 	serveCmd.Flags().IntVarP(&portFlag, "port", "p", 0, "Launch HTTP REST server on this port instead of stdio MCP")
+	serveCmd.Flags().BoolVar(&noAuthFlag, "no-auth", false, "Run the HTTP daemon without authentication (token file is neither read nor created; all endpoints except /health stay open)")
 	rootCmd.AddCommand(serveCmd)
 
 	return rootCmd
@@ -509,12 +515,35 @@ func initConfig() {
 	cfg = *loaded
 }
 
-func startHTTPServer(port int) error {
+// resolveAPIToken determines the HTTP daemon's auth token: SEEK_API_TOKEN
+// wins when set; otherwise the token file at the XDG config path is loaded,
+// creating it on first start. With --no-auth the daemon runs unauthenticated.
+// All diagnostics are written to stderr only (the repo contract forbids
+// stdout pollution while the daemon runs).
+func resolveAPIToken(noAuth bool) (string, error) {
+	if noAuth {
+		return "", nil
+	}
+	if token := os.Getenv("SEEK_API_TOKEN"); token != "" {
+		return token, nil
+	}
+	tokenPath := config.APITokenPath()
+	token, created, err := config.LoadOrCreateAPIToken(tokenPath)
+	if err != nil {
+		return "", err
+	}
+	if created {
+		fmt.Fprintf(os.Stderr, "Generated API token and saved it to %s (permissions 0600)\n", tokenPath)
+	}
+	return token, nil
+}
+
+func startHTTPServer(port int, authToken string) error {
 	cooldown := time.Duration(cfg.IndexCooldownSeconds) * time.Second
 	if cooldown <= 0 {
 		cooldown = 5 * time.Second
 	}
-	return server.StartHTTPServer(port, cfg.OllamaConfig(), cooldown, cfg.QuantDBConfig(), cfg.RerankConfig(), cfg.ExpandConfig())
+	return server.StartHTTPServer(port, authToken, cfg.OllamaConfig(), cooldown, cfg.QuantDBConfig(), cfg.RerankConfig(), cfg.ExpandConfig())
 }
 
 func startMCPServer() error {

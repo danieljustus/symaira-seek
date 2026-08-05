@@ -187,7 +187,7 @@ struct DashboardView: View {
     
     private func fetchStats() {
         let port = engineManager.port ?? 8080
-        model.fetchStats(port: port, isDaemonRunning: engineManager.isRunning)
+        model.fetchStats(port: port, isDaemonRunning: engineManager.isRunning, apiToken: engineManager.apiToken)
     }
 }
 
@@ -235,7 +235,7 @@ class DashboardModel {
     var databaseSize = "0 B"
     var isFetching = false
     
-    func fetchStats(port: Int, isDaemonRunning: Bool) {
+    func fetchStats(port: Int, isDaemonRunning: Bool, apiToken: String?) {
         guard isDaemonRunning, !isFetching else { return }
         isFetching = true
         
@@ -246,6 +246,9 @@ class DashboardModel {
         
         var request = URLRequest(url: url)
         request.timeoutInterval = 2.0
+        if let apiToken {
+            request.setValue("Bearer \(apiToken)", forHTTPHeaderField: "Authorization")
+        }
         
         URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
             guard let self else { return }

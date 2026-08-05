@@ -27,6 +27,22 @@ public final class EngineManager {
         return nil
     }
 
+    /// Reads the daemon API token from the XDG config path
+    /// (~/.config/symseek/api-token), if present. The daemon creates this
+    /// file on first start; every client HTTP call to the daemon must send
+    /// it as `Authorization: Bearer <token>`.
+    public var apiToken: String? {
+        let tokenURL = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".config/symseek/api-token")
+        guard let data = FileManager.default.contents(atPath: tokenURL.path),
+              let token = String(data: data, encoding: .utf8)?
+                  .trimmingCharacters(in: .whitespacesAndNewlines),
+              !token.isEmpty else {
+            return nil
+        }
+        return token
+    }
+
     private let supervisor = DaemonSupervisor()
     private let maxLogs = 500
     private var currentPort: Int = 8080
@@ -106,6 +122,9 @@ public final class EngineManager {
         let url = URL(string: "http://127.0.0.1:\(port)/status")!
         var request = URLRequest(url: url)
         request.timeoutInterval = 1.5
+        if let token = apiToken {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
 
         do {
             let (data, response) = try await URLSession.shared.data(for: request)

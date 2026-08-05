@@ -175,7 +175,7 @@ struct SearchView: View {
 
     private func performSearch() {
         let port = engineManager.port ?? 8080
-        model.performSearch(port: port)
+        model.performSearch(port: port, apiToken: engineManager.apiToken)
     }
 }
 
@@ -189,7 +189,7 @@ class SearchModel {
     var isSearching = false
     var searchError: String?
     
-    func performSearch(port: Int) {
+    func performSearch(port: Int, apiToken: String?) {
         let cleanQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleanQuery.isEmpty else {
             results = []
@@ -211,7 +211,12 @@ class SearchModel {
             return
         }
         
-        URLSession.shared.dataTask(with: url) { [weak self] data, response, error in
+        var request = URLRequest(url: url)
+        if let apiToken {
+            request.setValue("Bearer \(apiToken)", forHTTPHeaderField: "Authorization")
+        }
+        
+        URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.isSearching = false
