@@ -67,7 +67,7 @@ struct DashboardView: View {
                     
                     HStack {
                         if engineManager.isRunning {
-                            Text("REST Port: \(engineManager.port ?? 8080)")
+                            Text("REST Port: \(String(engineManager.port ?? 8080))")
                                 .font(.system(.caption, design: .monospaced))
                                 .foregroundStyle(Color.symairaTextSecondary)
                             Spacer()
