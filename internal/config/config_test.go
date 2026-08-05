@@ -1014,3 +1014,110 @@ func TestConfigKeys_CoversAllConfigFields(t *testing.T) {
 		}
 	}
 }
+
+// ---------------------------------------------------------------------------
+// API token file tests (issue #318)
+// ---------------------------------------------------------------------------
+
+func TestAPITokenPath_UnderConfigDir(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	got := APITokenPath()
+	want := filepath.Join(dir, ".config", "symseek", "api-token")
+	if got != want {
+		t.Errorf("APITokenPath() = %q, want %q", got, want)
+	}
+	if ConfigDir() != filepath.Dir(want) {
+		t.Errorf("ConfigDir() = %q, want %q", ConfigDir(), filepath.Dir(want))
+	}
+}
+
+func TestLoadOrCreateAPIToken_CreatesOnFirstStart(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "api-token")
+
+	token, created, err := LoadOrCreateAPIToken(path)
+	if err != nil {
+		t.Fatalf("LoadOrCreateAPIToken: %v", err)
+	}
+	if !created {
+		t.Error("expected created=true on first start")
+	}
+	if len(token) != 64 {
+		t.Errorf("expected 64-hex-char token, got %d chars", len(token))
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read token file: %v", err)
+	}
+	if strings.TrimSpace(string(data)) != token {
+		t.Errorf("token file content = %q, want %q", string(data), token)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat token file: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0600 {
+		t.Errorf("token file permissions = %v, want 0600", perm)
+	}
+}
+
+func TestLoadOrCreateAPIToken_ReusesExistingFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "api-token")
+	if err := os.WriteFile(path, []byte("existing-token\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	token, created, err := LoadOrCreateAPIToken(path)
+	if err != nil {
+		t.Fatalf("LoadOrCreateAPIToken: %v", err)
+	}
+	if created {
+		t.Error("expected created=false when the file already exists")
+	}
+	if token != "existing-token" {
+		t.Errorf("token = %q, want %q", token, "existing-token")
+	}
+}
+
+func TestLoadOrCreateAPIToken_RejectsEmptyFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "api-token")
+	if err := os.WriteFile(path, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, err := LoadOrCreateAPIToken(path); err == nil {
+		t.Fatal("expected error for empty token file")
+	}
+}
+
+func TestLoadOrCreateAPIToken_RejectsMalformedFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "api-token")
+	if err := os.WriteFile(path, []byte("line-one\nline-two\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, err := LoadOrCreateAPIToken(path); err == nil {
+		t.Fatal("expected error for multi-line token file")
+	}
+}
+
+func TestLoadOrCreateAPIToken_RejectsUnreadableFile(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root; permission checks are bypassed")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "api-token")
+	if err := os.WriteFile(path, []byte("secret\n"), 0000); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, err := LoadOrCreateAPIToken(path); err == nil {
+		t.Fatal("expected error for unreadable token file")
+	}
+}

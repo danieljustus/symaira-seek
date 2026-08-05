@@ -868,6 +868,112 @@ func TestServeCmd_MCP(t *testing.T) {
 	}
 }
 
+// TestServeCmd_NoAuth verifies the --no-auth flag: the daemon starts without
+// creating a token file and serves protected endpoints without a token.
+func TestServeCmd_NoAuth(t *testing.T) {
+	setupTestEnv(t)
+	port := freePort(t)
+
+	done := make(chan error, 1)
+	go func() {
+		cmd := newRootCmd()
+		cmd.SetArgs([]string{"serve", "--port", portStr(port), "--no-auth"})
+		done <- cmd.Execute()
+	}()
+
+	waitForServer(t, fmt.Sprintf("127.0.0.1:%d", port), 5*time.Second)
+
+	tokenPath := filepath.Join(os.Getenv("HOME"), ".config", "symseek", "api-token")
+	if _, err := os.Stat(tokenPath); !os.IsNotExist(err) {
+		t.Errorf("--no-auth must not create a token file, stat err = %v", err)
+	}
+
+	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/status", port))
+	if err != nil {
+		t.Fatalf("GET /status: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("GET /status without token (--no-auth): status %d, want 200", resp.StatusCode)
+	}
+}
+
+// TestServeCmd_TokenFileCreated verifies the default (auth-enabled) serve
+// path: a token file is created on first start and the daemon rejects
+// requests without it.
+func TestServeCmd_TokenFileCreated(t *testing.T) {
+	setupTestEnv(t)
+	port := freePort(t)
+
+	done := make(chan error, 1)
+	go func() {
+		cmd := newRootCmd()
+		cmd.SetArgs([]string{"serve", "--port", portStr(port)})
+		done <- cmd.Execute()
+	}()
+
+	waitForServer(t, fmt.Sprintf("127.0.0.1:%d", port), 5*time.Second)
+
+	tokenPath := filepath.Join(os.Getenv("HOME"), ".config", "symseek", "api-token")
+	data, err := os.ReadFile(tokenPath)
+	if err != nil {
+		t.Fatalf("expected token file at %s: %v", tokenPath, err)
+	}
+	token := strings.TrimSpace(string(data))
+	if len(token) != 64 {
+		t.Errorf("expected 64-hex-char token, got %q", token)
+	}
+
+	base := fmt.Sprintf("http://127.0.0.1:%d", port)
+
+	resp, err := http.Get(base + "/status")
+	if err != nil {
+		t.Fatalf("GET /status: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("GET /status without token: status %d, want 401", resp.StatusCode)
+	}
+
+	req, err := http.NewRequest("GET", base+"/status", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET /status with token: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("GET /status with token: status %d, want 200", resp.StatusCode)
+	}
+}
+
+// TestResolveAPIToken_EnvPrecedence verifies SEEK_API_TOKEN wins over the
+// token file and that --no-auth bypasses both.
+func TestResolveAPIToken_EnvPrecedence(t *testing.T) {
+	setupTestEnv(t)
+
+	t.Setenv("SEEK_API_TOKEN", "env-secret")
+	token, err := resolveAPIToken(false)
+	if err != nil {
+		t.Fatalf("resolveAPIToken: %v", err)
+	}
+	if token != "env-secret" {
+		t.Errorf("token = %q, want env value %q", token, "env-secret")
+	}
+	// The env path must not create a token file.
+	if _, err := os.Stat(filepath.Join(os.Getenv("HOME"), ".config", "symseek", "api-token")); !os.IsNotExist(err) {
+		t.Error("resolveAPIToken must not create a token file when SEEK_API_TOKEN is set")
+	}
+
+	t.Setenv("SEEK_API_TOKEN", "")
+	if token, err := resolveAPIToken(true); err != nil || token != "" {
+		t.Errorf("resolveAPIToken(--no-auth) = (%q, %v), want (\"\", nil)", token, err)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // startHTTPServer tests  (lines 334-340)
 // ---------------------------------------------------------------------------
@@ -880,7 +986,7 @@ func TestStartHTTPServer_DefaultCooldown(t *testing.T) {
 	port := freePort(t)
 	done := make(chan error, 1)
 	go func() {
-		done <- startHTTPServer(port)
+		done <- startHTTPServer(port, "test-token")
 	}()
 
 	waitForServer(t, fmt.Sprintf("127.0.0.1:%d", port), 5*time.Second)
@@ -894,7 +1000,7 @@ func TestStartHTTPServer_CustomCooldown(t *testing.T) {
 	port := freePort(t)
 	done := make(chan error, 1)
 	go func() {
-		done <- startHTTPServer(port)
+		done <- startHTTPServer(port, "test-token")
 	}()
 
 	waitForServer(t, fmt.Sprintf("127.0.0.1:%d", port), 5*time.Second)
