@@ -205,32 +205,6 @@ func (m *mockEmbedder) ModelName() string {
 	return "mock-model"
 }
 
-// slowEmbedder wraps mockEmbedder and adds a fixed delay to embedding
-// generation, simulating a slow embedding backend (e.g. an Ollama cold
-// start) for SSE liveness tests (issue #319).
-type slowEmbedder struct {
-	mockEmbedder
-	delay time.Duration
-}
-
-func (s *slowEmbedder) GenerateVector(text string) []float32 {
-	time.Sleep(s.delay)
-	return s.mockEmbedder.GenerateVector(text)
-}
-
-func (s *slowEmbedder) GenerateVectorNoRetry(text string) []float32 {
-	time.Sleep(s.delay)
-	return s.mockEmbedder.GenerateVectorNoRetry(text)
-}
-
-// GenerateVectorNoRetryWithModel must be overridden too: the promoted
-// mockEmbedder method would dispatch internally to the embedded value's
-// GenerateVectorNoRetry, bypassing the delay.
-func (s *slowEmbedder) GenerateVectorNoRetryWithModel(text string) engine.EmbeddingResult {
-	time.Sleep(s.delay)
-	return s.mockEmbedder.GenerateVectorNoRetryWithModel(text)
-}
-
 // blockingEmbedder wraps mockEmbedder and blocks embedding generation
 // until unblock is called. It makes the "slow backend" deterministic for
 // tests that must observe stream events while the search is provably still
@@ -1267,54 +1241,6 @@ func TestMux_SearchStreamEndpoint_EmitsStatusBeforeResults(t *testing.T) {
 	}
 	if !gotDone {
 		t.Error("expected event: done after the result replay")
-	}
-}
-
-// TestMux_SearchStreamEndpoint_SlowEmbedder_FirstEventIsStatus matches the
-// issue's suggested shape: a mock embedder with a fixed delay, asserting
-// the FIRST event in the stream is a status event and that result events
-// still arrive afterwards.
-func TestMux_SearchStreamEndpoint_SlowEmbedder_FirstEventIsStatus(t *testing.T) {
-	store := &mockStore{
-		searchBM25Fn: func(query string, limit int) ([]*db.SearchResult, error) {
-			return []*db.SearchResult{
-				{Chunk: &db.Chunk{UUID: "u1", Content: "slow result"}, BM25Rank: 1, RRFScore: 0.15},
-			}, nil
-		},
-		searchVectorFn: func(queryVec []float32, limit int) ([]*db.SearchResult, error) {
-			return nil, nil
-		},
-	}
-	embedder := &slowEmbedder{delay: 300 * time.Millisecond}
-	srv := newTestServer(t, store, store, embedder)
-
-	resp := doRequest(t, "GET", srv.URL+"/search/stream?q=slow", "", nil)
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("GET /search/stream: status %d, want 200", resp.StatusCode)
-	}
-
-	body, _ := io.ReadAll(resp.Body)
-	s := string(body)
-
-	lines := strings.Split(s, "\n")
-	if lines[0] != "event: status" {
-		t.Errorf("first SSE line = %q, want %q (status must precede results)", lines[0], "event: status")
-	}
-	statusIdx := strings.Index(s, "event: status")
-	resultIdx := strings.Index(s, "event: result")
-	if statusIdx == -1 {
-		t.Error("expected event: status in slow-embedder stream")
-	}
-	if resultIdx == -1 {
-		t.Error("expected event: result in slow-embedder stream")
-	}
-	if statusIdx != -1 && resultIdx != -1 && statusIdx > resultIdx {
-		t.Error("status event must precede result events")
-	}
-	if !strings.Contains(s, "event: done") {
-		t.Error("expected event: done in slow-embedder stream")
 	}
 }
 
