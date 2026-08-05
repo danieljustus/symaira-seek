@@ -104,8 +104,8 @@ struct SearchView: View {
                             Text("Found \(model.results.count) matches")
                                 .font(.system(.caption, design: .monospaced))
                                 .foregroundStyle(Color.symairaGold)
-                        } else if !model.query.isEmpty {
-                            Text("No documents matched your query")
+                        } else if shouldShowEmptyMessage(query: model.query, results: model.results, searchError: model.searchError) {
+                            Text("No documents matched your query. Check the query or add documents to the index.")
                                 .font(.caption)
                                 .foregroundStyle(Color.symairaMuted)
                         }
@@ -245,6 +245,14 @@ class SearchModel {
             }
         }.resume()
     }
+}
+
+/// True when the search UI should show the "no documents matched" empty
+/// state: a query is present, no results came back, and the search did
+/// not fail. An errored search must never also claim a zero-result
+/// outcome (issue #309).
+func shouldShowEmptyMessage(query: String, results: [SearchView.SearchResult], searchError: String?) -> Bool {
+    return !query.isEmpty && results.isEmpty && searchError == nil
 }
 
 struct SearchResultRow: View {
