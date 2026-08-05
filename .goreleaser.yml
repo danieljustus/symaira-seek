@@ -79,7 +79,7 @@ brews:
     directory: Formula
     homepage: https://github.com/danieljustus/symaira-seek
     description: Local-first, CGO-free document retrieval for AI agents
-    license: MIT
+    license: Apache-2.0
     service: |
       run "#{opt_bin}/symseek"
     test: |
