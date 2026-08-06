@@ -2,6 +2,7 @@ package parser
 
 import (
 	"archive/zip"
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/xml"
@@ -13,6 +14,7 @@ import (
 	"sync"
 
 	"github.com/ledongthuc/pdf"
+	"golang.org/x/net/html"
 )
 
 // MaxIndexFileSize is the maximum file size (in bytes) that the indexer will
@@ -77,8 +79,8 @@ type fileCacheEntry struct {
 }
 
 // ParseFile reads a file and returns its text content.
-// It dispatches to format-specific extractors for PDF, DOCX, XLSX, and PPTX files;
-// all other files are read as raw text (UTF-8).
+// It dispatches to format-specific extractors for PDF, DOCX, XLSX, PPTX,
+// and HTML files; all other files are read as raw text (UTF-8).
 func ParseFile(path string) (string, error) {
 	ext := strings.ToLower(filepath.Ext(path))
 	switch ext {
@@ -90,6 +92,8 @@ func ParseFile(path string) (string, error) {
 		return parseXLSX(path)
 	case ".pptx":
 		return parsePPTX(path)
+	case ".html", ".htm":
+		return parseHTML(path)
 	default:
 		f, err := os.Open(path)
 		if err != nil {
@@ -104,6 +108,81 @@ func ParseFile(path string) (string, error) {
 			return "", fmt.Errorf("file %s exceeds %d byte limit (%d bytes)", path, MaxIndexFileSize, len(data))
 		}
 		return string(data), nil
+	}
+}
+
+// blockHTMLElements are HTML block-level elements whose end introduces a
+// paragraph break, matching the block-boundary rule used for Office XML
+// (issue #340).
+var blockHTMLElements = map[string]bool{
+	"p":   true,
+	"div": true,
+	"li":  true,
+	"tr":  true,
+	"h1":  true,
+	"h2":  true,
+	"h3":  true,
+	"h4":  true,
+	"h5":  true,
+	"h6":  true,
+}
+
+// parseHTML extracts text from an HTML file. Script, style and head
+// subtrees are dropped entirely; block-level element boundaries become
+// paragraph breaks; entities are decoded by the tokenizer. The file is
+// read through the same capped reader as plain text, so the size limit
+// applies to HTML input as well (issue #340).
+func parseHTML(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", fmt.Errorf("failed to open file: %w", err)
+	}
+	defer f.Close()
+
+	data, err := io.ReadAll(io.LimitReader(f, MaxIndexFileSize+1))
+	if err != nil {
+		return "", fmt.Errorf("failed to read file: %w", err)
+	}
+	if int64(len(data)) > MaxIndexFileSize {
+		return "", fmt.Errorf("file %s exceeds %d byte limit (%d bytes)", path, MaxIndexFileSize, len(data))
+	}
+
+	doc, err := html.Parse(bytes.NewReader(data))
+	if err != nil {
+		return "", fmt.Errorf("failed to parse HTML: %w", err)
+	}
+	return extractHTMLText(doc), nil
+}
+
+// extractHTMLText walks a parsed HTML tree and returns its text content:
+// script/style/head subtrees are dropped entirely, block-level element
+// boundaries become paragraph breaks, and whitespace-only formatting text
+// nodes (source indentation) are skipped.
+func extractHTMLText(doc *html.Node) string {
+	var text strings.Builder
+	walkHTMLText(doc, &text)
+	return strings.TrimSpace(collapseNewlineRuns(text.String()))
+}
+
+func walkHTMLText(n *html.Node, text *strings.Builder) {
+	switch n.Type {
+	case html.TextNode:
+		// Skip formatting whitespace between elements (indentation);
+		// inline spaces between spans are kept so words do not fuse.
+		if strings.TrimSpace(n.Data) == "" && strings.Contains(n.Data, "\n") {
+			return
+		}
+		text.WriteString(n.Data)
+	case html.ElementNode:
+		if n.Data == "script" || n.Data == "style" || n.Data == "head" {
+			return
+		}
+	}
+	for c := n.FirstChild; c != nil; c = c.NextSibling {
+		walkHTMLText(c, text)
+	}
+	if n.Type == html.ElementNode && blockHTMLElements[n.Data] {
+		text.WriteString("\n\n")
 	}
 }
 

@@ -434,6 +434,90 @@ func TestParseFileXLSXNotFound(t *testing.T) {
 	}
 }
 
+// --- HTML tests (issue #340) ---
+
+func TestParseFileHTML(t *testing.T) {
+	htmlContent := `<!DOCTYPE html>
+<html>
+<head><title>Docs Home</title><style>.hero { color: red; }</style></head>
+<body>
+<h1>Welcome to the docs</h1>
+<p>Symaira &amp; Seek indexes <b>plain text</b> from HTML.</p>
+<script>const secret = "do not index";</script>
+<div><p>Second block of content.</p></div>
+</body>
+</html>`
+	htmlPath := filepath.Join(t.TempDir(), "docs.html")
+	if err := os.WriteFile(htmlPath, []byte(htmlContent), 0644); err != nil {
+		t.Fatalf("write html: %v", err)
+	}
+
+	parsed, err := ParseFile(htmlPath)
+	if err != nil {
+		t.Fatalf("ParseFile(.html) failed: %v", err)
+	}
+
+	// Block-level elements produce block boundaries consistent with the
+	// Office extraction rule.
+	if !strings.Contains(parsed, "Welcome to the docs\n\nSymaira & Seek indexes plain text from HTML.") {
+		t.Errorf("expected a block boundary between h1 and p, got %q", parsed)
+	}
+	if !strings.Contains(parsed, "Second block of content.") {
+		t.Errorf("expected div content, got %q", parsed)
+	}
+	// HTML entities are decoded to their characters.
+	if !strings.Contains(parsed, "Symaira & Seek") {
+		t.Errorf("expected decoded entity, got %q", parsed)
+	}
+	// Inline script and style content is excluded from extracted text.
+	for _, forbidden := range []string{"do not index", "const secret", "color: red", "Docs Home", "hero"} {
+		if strings.Contains(parsed, forbidden) {
+			t.Errorf("extracted text must not contain %q, got %q", forbidden, parsed)
+		}
+	}
+	// No tag names, attribute names or attribute values as index terms.
+	for _, forbidden := range []string{"<h1", "<p", "DOCTYPE", "html>", "class=", "href"} {
+		if strings.Contains(parsed, forbidden) {
+			t.Errorf("extracted text must not contain markup %q, got %q", forbidden, parsed)
+		}
+	}
+}
+
+func TestParseFileHTM(t *testing.T) {
+	htmPath := filepath.Join(t.TempDir(), "page.htm")
+	content := `<html><body><p>Htm works too.</p></body></html>`
+	if err := os.WriteFile(htmPath, []byte(content), 0644); err != nil {
+		t.Fatalf("write htm: %v", err)
+	}
+
+	parsed, err := ParseFile(htmPath)
+	if err != nil {
+		t.Fatalf("ParseFile(.htm) failed: %v", err)
+	}
+	if parsed != "Htm works too." {
+		t.Errorf("expected stripped text, got %q", parsed)
+	}
+}
+
+func TestParseFileHTMLRejectsOversized(t *testing.T) {
+	htmlPath := filepath.Join(t.TempDir(), "big.html")
+	bigData := make([]byte, MaxIndexFileSize+1)
+	for i := range bigData {
+		bigData[i] = 'A'
+	}
+	if err := os.WriteFile(htmlPath, bigData, 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	_, err := ParseFile(htmlPath)
+	if err == nil {
+		t.Fatal("expected error for oversized HTML file, got nil")
+	}
+	if !strings.Contains(err.Error(), "exceeds") {
+		t.Errorf("error should mention size limit, got: %v", err)
+	}
+}
+
 // --- DOCX block-boundary tests (issue #339) ---
 
 func TestParseFileDOCX_ParagraphBoundaries(t *testing.T) {
