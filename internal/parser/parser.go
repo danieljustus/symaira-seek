@@ -452,8 +452,13 @@ func parseOfficeXML(path, xmlEntry string) (string, error) {
 	return "", fmt.Errorf("entry %s not found in archive", xmlEntry)
 }
 
-// extractXMLText parses an XML document and extracts all text content from <w:t> elements (DOCX)
-// or <a:t> elements (PPTX), returning the concatenated text.
+// extractXMLText parses an XML document and extracts its text content,
+// preserving block boundaries (issue #339): paragraph end elements
+// (w:p / a:p) become paragraph breaks, break elements (w:br / w:cr / a:br)
+// become newlines, w:tab becomes a tab, and a:sp shape end elements
+// separate distinct text boxes. Runs of three or more consecutive
+// newlines collapse to a single paragraph break so empty paragraphs do
+// not inflate chunk boundaries.
 func extractXMLText(r io.Reader) (string, error) {
 	decoder := xml.NewDecoder(r)
 	var text strings.Builder
@@ -466,12 +471,20 @@ func extractXMLText(r io.Reader) (string, error) {
 		}
 		switch t := token.(type) {
 		case xml.StartElement:
-			if t.Name.Local == "t" {
+			switch t.Name.Local {
+			case "t":
 				inText = true
+			case "br", "cr":
+				text.WriteString("\n")
+			case "tab":
+				text.WriteString("	")
 			}
 		case xml.EndElement:
-			if t.Name.Local == "t" {
+			switch t.Name.Local {
+			case "t":
 				inText = false
+			case "p", "sp":
+				text.WriteString("\n\n")
 			}
 		case xml.CharData:
 			if inText {
@@ -479,7 +492,28 @@ func extractXMLText(r io.Reader) (string, error) {
 			}
 		}
 	}
-	return text.String(), nil
+	return strings.TrimSpace(collapseNewlineRuns(text.String())), nil
+}
+
+// collapseNewlineRuns collapses runs of three or more consecutive newlines
+// into a single paragraph break ("\n\n") so empty paragraphs do not
+// inflate the block boundaries of extracted text.
+func collapseNewlineRuns(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	newlines := 0
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\n' {
+			newlines++
+			if newlines > 2 {
+				continue
+			}
+		} else {
+			newlines = 0
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
 }
 
 // readXLSXSharedStrings reads the shared strings table from an XLSX archive.
@@ -532,6 +566,8 @@ func parseSharedStrings(r io.Reader) ([]string, error) {
 }
 
 // extractXLSXSheetText extracts text from a single XLSX worksheet XML file.
+// Cells are joined with tabs and each row ends with a newline so row
+// boundaries survive extraction (issue #339).
 func extractXLSXSheetText(f *zip.File, sharedStrings []string) (string, error) {
 	rc, err := f.Open()
 	if err != nil {
@@ -544,6 +580,7 @@ func extractXLSXSheetText(f *zip.File, sharedStrings []string) (string, error) {
 	inV := false
 	var cellType string
 	var cellValue strings.Builder
+	rowHasCell := false
 
 	for {
 		token, err := decoder.Token()
@@ -578,9 +615,16 @@ func extractXLSXSheetText(f *zip.File, sharedStrings []string) (string, error) {
 					}
 				}
 				if val != "" {
+					if rowHasCell {
+						text.WriteString("	")
+					}
 					text.WriteString(val)
-					text.WriteString("\t")
+					rowHasCell = true
 				}
+			}
+			if t.Name.Local == "row" {
+				text.WriteString("\n")
+				rowHasCell = false
 			}
 		case xml.CharData:
 			if inV {
@@ -592,6 +636,7 @@ func extractXLSXSheetText(f *zip.File, sharedStrings []string) (string, error) {
 }
 
 // extractPPTXSlideText extracts text from a single PPTX slide XML file.
+// It shares the block-boundary extraction rule with DOCX (issue #339).
 func extractPPTXSlideText(f *zip.File) (string, error) {
 	rc, err := f.Open()
 	if err != nil {
@@ -599,32 +644,5 @@ func extractPPTXSlideText(f *zip.File) (string, error) {
 	}
 	defer rc.Close()
 
-	decoder := xml.NewDecoder(io.LimitReader(rc, MaxIndexFileSize))
-	var text strings.Builder
-	inT := false
-
-	for {
-		token, err := decoder.Token()
-		if err != nil {
-			break
-		}
-		switch t := token.(type) {
-		case xml.StartElement:
-			if t.Name.Local == "t" {
-				inT = true
-			}
-		case xml.EndElement:
-			if t.Name.Local == "t" {
-				inT = false
-			}
-			if t.Name.Local == "a:p" || t.Name.Local == "p" {
-				text.WriteString("\n")
-			}
-		case xml.CharData:
-			if inT {
-				text.Write(t)
-			}
-		}
-	}
-	return text.String(), nil
+	return extractXMLText(io.LimitReader(rc, MaxIndexFileSize))
 }

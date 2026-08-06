@@ -434,6 +434,83 @@ func TestParseFileXLSXNotFound(t *testing.T) {
 	}
 }
 
+// --- DOCX block-boundary tests (issue #339) ---
+
+func TestParseFileDOCX_ParagraphBoundaries(t *testing.T) {
+	docXML := `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>first paragraph</w:t></w:r></w:p><w:p><w:r><w:t>second paragraph</w:t></w:r></w:p></w:body></w:document>`
+	docxPath := filepath.Join(t.TempDir(), "para.docx")
+	createZip(t, docxPath, map[string]string{"word/document.xml": docXML})
+
+	parsed, err := ParseFile(docxPath)
+	if err != nil {
+		t.Fatalf("ParseFile(.docx) failed: %v", err)
+	}
+	want := "first paragraph\n\nsecond paragraph"
+	if parsed != want {
+		t.Errorf("paragraphs must be separated by a blank line, got %q, want %q", parsed, want)
+	}
+	if strings.Contains(parsed, "first paragraphsecond paragraph") {
+		t.Errorf("words from adjacent paragraphs must not be fused, got %q", parsed)
+	}
+}
+
+func TestParseFileDOCX_BreaksAndTabs(t *testing.T) {
+	docXML := `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>line one</w:t><w:br/><w:t>line two</w:t></w:r></w:p><w:p><w:r><w:t>col1</w:t><w:tab/><w:t>col2</w:t></w:r></w:p></w:body></w:document>`
+	docxPath := filepath.Join(t.TempDir(), "breaks.docx")
+	createZip(t, docxPath, map[string]string{"word/document.xml": docXML})
+
+	parsed, err := ParseFile(docxPath)
+	if err != nil {
+		t.Fatalf("ParseFile(.docx) failed: %v", err)
+	}
+	want := "line one\nline two\n\ncol1	col2"
+	if parsed != want {
+		t.Errorf("w:br/w:tab whitespace not preserved, got %q, want %q", parsed, want)
+	}
+}
+
+func TestParseFilePPTX_TwoTextBoxes(t *testing.T) {
+	slideXML := `<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:cSld><p:spTree><p:sp><a:txBody><a:p><a:r><a:t>box one</a:t></a:r></a:p></a:txBody></p:sp><p:sp><a:txBody><a:p><a:r><a:t>box two</a:t></a:r></a:p></a:txBody></p:sp></p:spTree></p:cSld></p:sld>`
+	pptxPath := filepath.Join(t.TempDir(), "boxes.pptx")
+	createZip(t, pptxPath, map[string]string{"ppt/slides/slide1.xml": slideXML})
+
+	parsed, err := ParseFile(pptxPath)
+	if err != nil {
+		t.Fatalf("ParseFile(.pptx) failed: %v", err)
+	}
+	want := "box one\n\nbox two"
+	if parsed != want {
+		t.Errorf("distinct text boxes must be separate blocks, got %q, want %q", parsed, want)
+	}
+}
+
+func TestParseFileXLSX_RowBoundaries(t *testing.T) {
+	xlsxPath := filepath.Join(t.TempDir(), "rows.xlsx")
+	rows := [][]string{{"alpha", "beta"}, {"gamma", "delta"}}
+	createMinimalXLSX(t, xlsxPath, nil, rows, nil)
+
+	parsed, err := ParseFile(xlsxPath)
+	if err != nil {
+		t.Fatalf("ParseFile(.xlsx) failed: %v", err)
+	}
+	want := "alpha	beta\ngamma	delta"
+	if parsed != want {
+		t.Errorf("expected one line per row, got %q, want %q", parsed, want)
+	}
+}
+
+func TestExtractXMLText_CollapsesNewlineRuns(t *testing.T) {
+	docXML := `<w:document><w:body><w:p><w:r><w:t>alpha</w:t></w:r></w:p><w:p/><w:p/><w:p><w:r><w:t>omega</w:t></w:r></w:p></w:body></w:document>`
+	got, err := extractXMLText(strings.NewReader(docXML))
+	if err != nil {
+		t.Fatalf("extractXMLText: %v", err)
+	}
+	want := "alpha\n\nomega"
+	if got != want {
+		t.Errorf("runs of 3+ newlines must collapse to a paragraph break, got %q, want %q", got, want)
+	}
+}
+
 func TestSplitText_ZeroChunkSize(t *testing.T) {
 	got := SplitText("any text", 0, 0)
 	if len(got) != 1 || got[0] != "any text" {
@@ -632,8 +709,8 @@ func TestExtractPPTXSlideText_EmptySlide(t *testing.T) {
 	if err != nil {
 		t.Fatalf("extractPPTXSlideText: %v", err)
 	}
-	if got != "\n" {
-		t.Errorf("empty slide should produce newline, got %q", got)
+	if got != "" {
+		t.Errorf("empty slide should produce no text, got %q", got)
 	}
 }
 
@@ -659,8 +736,8 @@ func TestExtractPPTXSlideText_NoTextElements(t *testing.T) {
 	if err != nil {
 		t.Fatalf("extractPPTXSlideText: %v", err)
 	}
-	if !strings.Contains(got, "\n") {
-		t.Error("expected at least a newline for paragraph end")
+	if got != "" {
+		t.Errorf("slide without text elements should produce no text, got %q", got)
 	}
 }
 
@@ -684,6 +761,30 @@ func createFakeZipFile(t *testing.T, xmlContent string) *zip.File {
 		t.Fatalf("open zip reader: %v", err)
 	}
 	return r.File[0]
+}
+
+// createZip writes a ZIP archive to disk with the given entries.
+func createZip(t *testing.T, zipPath string, entries map[string]string) {
+	t.Helper()
+	f, err := os.Create(zipPath)
+	if err != nil {
+		t.Fatalf("create zip: %v", err)
+	}
+	defer f.Close()
+
+	w := zip.NewWriter(f)
+	for name, content := range entries {
+		entry, err := w.Create(name)
+		if err != nil {
+			t.Fatalf("create entry %s: %v", name, err)
+		}
+		if _, err := entry.Write([]byte(content)); err != nil {
+			t.Fatalf("write entry %s: %v", name, err)
+		}
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("close zip writer: %v", err)
+	}
 }
 
 // createZipBomb writes a ZIP file containing a single entry whose
