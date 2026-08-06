@@ -24,6 +24,18 @@ import (
 // skipped or rejected to prevent memory exhaustion.
 const MaxIndexFileSize = 10 << 20
 
+// MaxArchiveEntries is the maximum number of entries an Office-style ZIP
+// archive may contain. Archives with more entries are rejected at open
+// time, before any entry is decompressed (issue #342).
+const MaxArchiveEntries = 10000
+
+// MaxArchiveDecompressedBytes is the maximum total number of decompressed
+// bytes the indexer will read across all entries of one Office-style ZIP
+// archive, guarding against zip bombs whose individual entries stay under
+// MaxIndexFileSize. Reading stops with an error once the budget is spent
+// (issue #342).
+const MaxArchiveDecompressedBytes = 100 << 20
+
 // knownDocumentExtensions are document formats the indexer recognizes but
 // does not index (no extraction branch exists). They are reported with an
 // explicit skip message when encountered so unsupported documents are
@@ -305,19 +317,34 @@ func parseXLSX(path string) (string, error) {
 	}
 	defer r.Close()
 
+	if err := checkArchiveEntryCount(path, r.File); err != nil {
+		return "", err
+	}
+
+	budget := &archiveBudget{remaining: MaxArchiveDecompressedBytes}
+
 	// Try to read shared strings first
-	sharedStrings, err := readXLSXSharedStrings(r.File)
+	sharedStrings, err := readXLSXSharedStrings(r.File, budget)
 	if err != nil {
 		sharedStrings = nil
+	}
+	if budget.exhausted() {
+		return "", archiveBudgetExceededError(path)
 	}
 
 	var text strings.Builder
 	for _, f := range r.File {
 		if strings.HasPrefix(f.Name, "xl/worksheets/sheet") && strings.HasSuffix(f.Name, ".xml") {
-			content, err := extractXLSXSheetText(f, sharedStrings)
+			if budget.exhausted() {
+				return "", archiveBudgetExceededError(path)
+			}
+			content, err := extractXLSXSheetText(f, sharedStrings, budget)
 			if err == nil && strings.TrimSpace(content) != "" {
 				text.WriteString(content)
 				text.WriteString("\n")
+			}
+			if budget.exhausted() {
+				return "", archiveBudgetExceededError(path)
 			}
 		}
 	}
@@ -337,13 +364,25 @@ func parsePPTX(path string) (string, error) {
 	}
 	defer r.Close()
 
+	if err := checkArchiveEntryCount(path, r.File); err != nil {
+		return "", err
+	}
+
+	budget := &archiveBudget{remaining: MaxArchiveDecompressedBytes}
+
 	var text strings.Builder
 	for _, f := range r.File {
 		if strings.HasPrefix(f.Name, "ppt/slides/slide") && strings.HasSuffix(f.Name, ".xml") {
-			content, err := extractPPTXSlideText(f)
+			if budget.exhausted() {
+				return "", archiveBudgetExceededError(path)
+			}
+			content, err := extractPPTXSlideText(f, budget)
 			if err == nil && strings.TrimSpace(content) != "" {
 				text.WriteString(content)
 				text.WriteString("\n")
+			}
+			if budget.exhausted() {
+				return "", archiveBudgetExceededError(path)
 			}
 		}
 	}
@@ -592,8 +631,9 @@ func parseOfficeXML(path, xmlEntry string) (string, error) {
 }
 
 // parseOfficeXMLPart reads a single XML part from an Office-style ZIP
-// archive and extracts its text with the given extractor. The part is read
-// through the per-entry size cap.
+// archive and extracts its text with the given extractor. Each entry is
+// read through the per-entry size cap reduced by the remaining archive
+// decompression budget (issue #342).
 func parseOfficeXMLPart(path, xmlEntry string, extract func(io.Reader) (string, error)) (string, error) {
 	r, err := zip.OpenReader(path)
 	if err != nil {
@@ -601,17 +641,86 @@ func parseOfficeXMLPart(path, xmlEntry string, extract func(io.Reader) (string, 
 	}
 	defer r.Close()
 
+	if err := checkArchiveEntryCount(path, r.File); err != nil {
+		return "", err
+	}
+
+	budget := &archiveBudget{remaining: MaxArchiveDecompressedBytes}
 	for _, f := range r.File {
-		if f.Name == xmlEntry {
-			rc, err := f.Open()
-			if err != nil {
-				return "", fmt.Errorf("failed to read %s: %w", xmlEntry, err)
-			}
-			defer rc.Close()
-			return extract(io.LimitReader(rc, MaxIndexFileSize))
+		if f.Name != xmlEntry {
+			continue
 		}
+		if budget.exhausted() {
+			return "", archiveBudgetExceededError(path)
+		}
+		rc, err := f.Open()
+		if err != nil {
+			return "", fmt.Errorf("failed to read %s: %w", xmlEntry, err)
+		}
+		cr := &countingReader{r: rc}
+		content, err := extract(io.LimitReader(cr, budget.limit()))
+		rc.Close()
+		budget.spend(cr.n)
+		return content, err
 	}
 	return "", fmt.Errorf("entry %s not found in archive", xmlEntry)
+}
+
+// archiveBudget tracks the remaining decompression budget for a single
+// Office-style archive (issue #342).
+type archiveBudget struct {
+	remaining int64
+}
+
+// exhausted reports whether the archive decompression budget is spent.
+func (b *archiveBudget) exhausted() bool {
+	return b.remaining <= 0
+}
+
+// limit returns the read limit for the next entry: the per-entry cap,
+// reduced by the remaining archive budget.
+func (b *archiveBudget) limit() int64 {
+	limit := int64(MaxIndexFileSize)
+	if b.remaining < limit {
+		limit = b.remaining
+	}
+	if limit < 0 {
+		limit = 0
+	}
+	return limit
+}
+
+// spend subtracts the number of bytes actually decompressed from the
+// remaining archive budget.
+func (b *archiveBudget) spend(n int64) {
+	b.remaining -= n
+}
+
+// countingReader counts the bytes read through it.
+type countingReader struct {
+	r io.Reader
+	n int64
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += int64(n)
+	return n, err
+}
+
+// checkArchiveEntryCount rejects archives whose entry count exceeds
+// MaxArchiveEntries before any entry is decompressed (issue #342).
+func checkArchiveEntryCount(path string, files []*zip.File) error {
+	if len(files) > MaxArchiveEntries {
+		return fmt.Errorf("archive %s has %d entries, exceeding the %d entry limit", path, len(files), MaxArchiveEntries)
+	}
+	return nil
+}
+
+// archiveBudgetExceededError reports that an archive exceeded the total
+// decompression budget (issue #342).
+func archiveBudgetExceededError(path string) error {
+	return fmt.Errorf("archive %s exceeds the %d byte decompression budget", path, MaxArchiveDecompressedBytes)
 }
 
 // extractODFText extracts text from an OpenDocument content.xml stream.
@@ -731,7 +840,7 @@ func collapseNewlineRuns(s string) string {
 }
 
 // readXLSXSharedStrings reads the shared strings table from an XLSX archive.
-func readXLSXSharedStrings(files []*zip.File) ([]string, error) {
+func readXLSXSharedStrings(files []*zip.File, budget *archiveBudget) ([]string, error) {
 	for _, f := range files {
 		if f.Name == "xl/sharedStrings.xml" {
 			rc, err := f.Open()
@@ -739,7 +848,10 @@ func readXLSXSharedStrings(files []*zip.File) ([]string, error) {
 				return nil, err
 			}
 			defer rc.Close()
-			return parseSharedStrings(io.LimitReader(rc, MaxIndexFileSize))
+			cr := &countingReader{r: rc}
+			strings_, err := parseSharedStrings(io.LimitReader(cr, budget.limit()))
+			budget.spend(cr.n)
+			return strings_, err
 		}
 	}
 	return nil, fmt.Errorf("shared strings not found")
@@ -781,15 +893,17 @@ func parseSharedStrings(r io.Reader) ([]string, error) {
 
 // extractXLSXSheetText extracts text from a single XLSX worksheet XML file.
 // Cells are joined with tabs and each row ends with a newline so row
-// boundaries survive extraction (issue #339).
-func extractXLSXSheetText(f *zip.File, sharedStrings []string) (string, error) {
+// boundaries survive extraction (issue #339). The entry is read through
+// the per-entry cap reduced by the remaining archive budget (#342).
+func extractXLSXSheetText(f *zip.File, sharedStrings []string, budget *archiveBudget) (string, error) {
 	rc, err := f.Open()
 	if err != nil {
 		return "", err
 	}
 	defer rc.Close()
 
-	decoder := xml.NewDecoder(io.LimitReader(rc, MaxIndexFileSize))
+	cr := &countingReader{r: rc}
+	decoder := xml.NewDecoder(io.LimitReader(cr, budget.limit()))
 	var text strings.Builder
 	inV := false
 	var cellType string
@@ -846,17 +960,23 @@ func extractXLSXSheetText(f *zip.File, sharedStrings []string) (string, error) {
 			}
 		}
 	}
+	budget.spend(cr.n)
 	return text.String(), nil
 }
 
 // extractPPTXSlideText extracts text from a single PPTX slide XML file.
 // It shares the block-boundary extraction rule with DOCX (issue #339).
-func extractPPTXSlideText(f *zip.File) (string, error) {
+// The entry is read through the per-entry cap reduced by the remaining
+// archive budget (#342).
+func extractPPTXSlideText(f *zip.File, budget *archiveBudget) (string, error) {
 	rc, err := f.Open()
 	if err != nil {
 		return "", err
 	}
 	defer rc.Close()
 
-	return extractXMLText(io.LimitReader(rc, MaxIndexFileSize))
+	cr := &countingReader{r: rc}
+	content, err := extractXMLText(io.LimitReader(cr, budget.limit()))
+	budget.spend(cr.n)
+	return content, err
 }

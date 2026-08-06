@@ -698,6 +698,150 @@ func TestExtractXMLText_CollapsesNewlineRuns(t *testing.T) {
 	}
 }
 
+// --- Archive-level decompression budget tests (issue #342) ---
+
+func TestParseDOCXZipBomb_ManyEntries(t *testing.T) {
+	docxPath := filepath.Join(t.TempDir(), "many.docx")
+	createManyEntryZip(t, docxPath, MaxArchiveEntries+1, "word/document.xml",
+		`<w:document><w:body><w:p><w:r><w:t>tiny</w:t></w:r></w:p></w:body></w:document>`)
+
+	_, err := ParseFile(docxPath)
+	if err == nil {
+		t.Fatal("expected error for archive with too many entries, got nil")
+	}
+	if !strings.Contains(err.Error(), "entry") {
+		t.Errorf("error should mention the entry limit, got: %v", err)
+	}
+}
+
+func TestParseXLSXZipBomb_ManyEntries(t *testing.T) {
+	xlsxPath := filepath.Join(t.TempDir(), "many.xlsx")
+	createManyEntryZip(t, xlsxPath, MaxArchiveEntries+1, "xl/worksheets/sheet1.xml",
+		`<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData></worksheet>`)
+
+	_, err := ParseFile(xlsxPath)
+	if err == nil {
+		t.Fatal("expected error for archive with too many entries, got nil")
+	}
+	if !strings.Contains(err.Error(), "entry") {
+		t.Errorf("error should mention the entry limit, got: %v", err)
+	}
+}
+
+func TestParseXLSXZipBomb_ArchiveBudget(t *testing.T) {
+	// 12 worksheets, each 9 MiB of cell text: every entry stays under the
+	// per-entry cap but the archive collectively exceeds
+	// MaxArchiveDecompressedBytes.
+	xlsxPath := filepath.Join(t.TempDir(), "budget.xlsx")
+	createBudgetBombXLSX(t, xlsxPath, 12, 9<<20)
+
+	_, err := ParseFile(xlsxPath)
+	if err == nil {
+		t.Fatal("expected budget rejection for archive exceeding decompression budget, got nil")
+	}
+	if !strings.Contains(err.Error(), "budget") {
+		t.Errorf("error should mention the decompression budget, got: %v", err)
+	}
+}
+
+func TestParseFileXLSX_MultiSheetStillIndexes(t *testing.T) {
+	xlsxPath := filepath.Join(t.TempDir(), "multi.xlsx")
+	createZip(t, xlsxPath, map[string]string{
+		"xl/sharedStrings.xml":     `<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><si><t>alpha</t></si></sst>`,
+		"xl/worksheets/sheet1.xml": `<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="s"><v>0</v></c></row></sheetData></worksheet>`,
+		"xl/worksheets/sheet2.xml": `<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1"><v>42</v></c></row></sheetData></worksheet>`,
+		"xl/worksheets/sheet3.xml": `<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1"><v>3.14</v></c></row></sheetData></worksheet>`,
+	})
+
+	parsed, err := ParseFile(xlsxPath)
+	if err != nil {
+		t.Fatalf("multi-sheet workbook must still index: %v", err)
+	}
+	for _, want := range []string{"alpha", "42", "3.14"} {
+		if !strings.Contains(parsed, want) {
+			t.Errorf("expected %q in multi-sheet extraction, got %q", want, parsed)
+		}
+	}
+}
+
+func TestParseFilePPTX_MultiSlideStillIndexes(t *testing.T) {
+	slide := func(text string) string {
+		return `<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:cSld><p:spTree><p:sp><a:txBody><a:p><a:r><a:t>` + text + `</a:t></a:r></a:p></a:txBody></p:sp></p:spTree></p:cSld></p:sld>`
+	}
+	pptxPath := filepath.Join(t.TempDir(), "multi.pptx")
+	createZip(t, pptxPath, map[string]string{
+		"ppt/slides/slide1.xml": slide("first slide"),
+		"ppt/slides/slide2.xml": slide("second slide"),
+	})
+
+	parsed, err := ParseFile(pptxPath)
+	if err != nil {
+		t.Fatalf("multi-slide deck must still index: %v", err)
+	}
+	if !strings.Contains(parsed, "first slide") || !strings.Contains(parsed, "second slide") {
+		t.Errorf("expected both slides, got %q", parsed)
+	}
+}
+
+// createManyEntryZip writes a ZIP archive with count entries: the named
+// entry carries namedContent, all other entries hold a single byte.
+func createManyEntryZip(t *testing.T, zipPath string, count int, namedEntry, namedContent string) {
+	t.Helper()
+	f, err := os.Create(zipPath)
+	if err != nil {
+		t.Fatalf("create zip: %v", err)
+	}
+	defer f.Close()
+
+	w := zip.NewWriter(f)
+	for i := 0; i < count; i++ {
+		name := fmt.Sprintf("entry%d.xml", i)
+		content := "x"
+		if i == 0 {
+			name = namedEntry
+			content = namedContent
+		}
+		entry, err := w.Create(name)
+		if err != nil {
+			t.Fatalf("create entry %s: %v", name, err)
+		}
+		if _, err := entry.Write([]byte(content)); err != nil {
+			t.Fatalf("write entry %s: %v", name, err)
+		}
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("close zip writer: %v", err)
+	}
+}
+
+// createBudgetBombXLSX writes an XLSX with n worksheet entries, each a
+// valid sheet whose single cell holds size bytes of text.
+func createBudgetBombXLSX(t *testing.T, xlsxPath string, n, size int) {
+	t.Helper()
+	f, err := os.Create(xlsxPath)
+	if err != nil {
+		t.Fatalf("create zip: %v", err)
+	}
+	defer f.Close()
+
+	w := zip.NewWriter(f)
+	for i := 1; i <= n; i++ {
+		entry, err := w.Create(fmt.Sprintf("xl/worksheets/sheet%d.xml", i))
+		if err != nil {
+			t.Fatalf("create entry: %v", err)
+		}
+		content := `<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1"><v>` +
+			strings.Repeat("X", size) +
+			`</v></c></row></sheetData></worksheet>`
+		if _, err := entry.Write([]byte(content)); err != nil {
+			t.Fatalf("write entry: %v", err)
+		}
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("close zip writer: %v", err)
+	}
+}
+
 func TestSplitText_ZeroChunkSize(t *testing.T) {
 	got := SplitText("any text", 0, 0)
 	if len(got) != 1 || got[0] != "any text" {
@@ -880,7 +1024,7 @@ func TestExtractXMLText_EmptyInput(t *testing.T) {
 func TestExtractPPTXSlideText_MalformedXML(t *testing.T) {
 	slideXML := `<?xml version="1.0"?><p><t>visible</t><broken>&&&</p>`
 	fakeFile := createFakeZipFile(t, slideXML)
-	got, err := extractPPTXSlideText(fakeFile)
+	got, err := extractPPTXSlideText(fakeFile, &archiveBudget{remaining: MaxArchiveDecompressedBytes})
 	if err != nil {
 		t.Fatalf("extractPPTXSlideText should handle malformed XML: %v", err)
 	}
@@ -892,7 +1036,7 @@ func TestExtractPPTXSlideText_MalformedXML(t *testing.T) {
 func TestExtractPPTXSlideText_EmptySlide(t *testing.T) {
 	slideXML := `<?xml version="1.0"?><p><r><t></t></r></p>`
 	fakeFile := createFakeZipFile(t, slideXML)
-	got, err := extractPPTXSlideText(fakeFile)
+	got, err := extractPPTXSlideText(fakeFile, &archiveBudget{remaining: MaxArchiveDecompressedBytes})
 	if err != nil {
 		t.Fatalf("extractPPTXSlideText: %v", err)
 	}
@@ -904,7 +1048,7 @@ func TestExtractPPTXSlideText_EmptySlide(t *testing.T) {
 func TestExtractPPTXSlideText_MultipleParagraphs(t *testing.T) {
 	slideXML := `<?xml version="1.0"?><p><t>first</t></p><p><t>second</t></p>`
 	fakeFile := createFakeZipFile(t, slideXML)
-	got, err := extractPPTXSlideText(fakeFile)
+	got, err := extractPPTXSlideText(fakeFile, &archiveBudget{remaining: MaxArchiveDecompressedBytes})
 	if err != nil {
 		t.Fatalf("extractPPTXSlideText: %v", err)
 	}
@@ -919,7 +1063,7 @@ func TestExtractPPTXSlideText_MultipleParagraphs(t *testing.T) {
 func TestExtractPPTXSlideText_NoTextElements(t *testing.T) {
 	slideXML := `<?xml version="1.0"?><p><r><rPr/></r></p>`
 	fakeFile := createFakeZipFile(t, slideXML)
-	got, err := extractPPTXSlideText(fakeFile)
+	got, err := extractPPTXSlideText(fakeFile, &archiveBudget{remaining: MaxArchiveDecompressedBytes})
 	if err != nil {
 		t.Fatalf("extractPPTXSlideText: %v", err)
 	}
