@@ -4,12 +4,14 @@ import (
 	"archive/zip"
 	"bytes"
 	"crypto/sha256"
+	"encoding/csv"
 	"encoding/hex"
 	"encoding/xml"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -21,6 +23,32 @@ import (
 // read into memory. Files and individual ZIP entries exceeding this limit are
 // skipped or rejected to prevent memory exhaustion.
 const MaxIndexFileSize = 10 << 20
+
+// knownDocumentExtensions are document formats the indexer recognizes but
+// does not index (no extraction branch exists). They are reported with an
+// explicit skip message when encountered so unsupported documents are
+// visible instead of silently ignored (issue #341).
+var knownDocumentExtensions = map[string]bool{
+	".doc":  true,
+	".xls":  true,
+	".ppt":  true,
+	".rtf":  true,
+	".epub": true,
+	".odg":  true,
+}
+
+// IsKnownDocumentExtension reports whether ext is a recognized document
+// format that the indexer does not support.
+func IsKnownDocumentExtension(ext string) bool {
+	return knownDocumentExtensions[strings.ToLower(ext)]
+}
+
+// UnsupportedDocumentSkipMessage returns the one-line skip message emitted
+// when a known document format cannot be indexed. It names the file and
+// the reason, following the "Skipping %s: ..." stderr pattern.
+func UnsupportedDocumentSkipMessage(path, ext string) string {
+	return fmt.Sprintf("Skipping %s: %s is a known document format that is not indexed", path, ext)
+}
 
 var (
 	fileCache   = make(map[string]fileCacheEntry)
@@ -92,6 +120,10 @@ func ParseFile(path string) (string, error) {
 		return parseXLSX(path)
 	case ".pptx":
 		return parsePPTX(path)
+	case ".odt", ".ods", ".odp":
+		return parseODF(path)
+	case ".csv":
+		return parseCSV(path)
 	case ".html", ".htm":
 		return parseHTML(path)
 	default:
@@ -219,6 +251,50 @@ func parsePDF(path string) (string, error) {
 // parseDOCX extracts text from a DOCX file (ZIP archive containing word/document.xml).
 func parseDOCX(path string) (string, error) {
 	return parseOfficeXML(path, "word/document.xml")
+}
+
+// parseODF extracts text from an OpenDocument file (ODT/ODS/ODP). The
+// archive part content.xml holds the document body and is read through the
+// same capped ZIP part primitive as DOCX, with block boundaries preserved
+// (issue #341).
+func parseODF(path string) (string, error) {
+	return parseOfficeXMLPart(path, "content.xml", extractODFText)
+}
+
+// parseCSV reads a CSV file and preserves row boundaries: fields within a
+// row are joined with tabs (matching the XLSX cell rule) and each row ends
+// with a newline (issue #341). The file is read through the same capped
+// reader as plain text, so the size limit applies.
+func parseCSV(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", fmt.Errorf("failed to open file: %w", err)
+	}
+	defer f.Close()
+
+	data, err := io.ReadAll(io.LimitReader(f, MaxIndexFileSize+1))
+	if err != nil {
+		return "", fmt.Errorf("failed to read file: %w", err)
+	}
+	if int64(len(data)) > MaxIndexFileSize {
+		return "", fmt.Errorf("file %s exceeds %d byte limit (%d bytes)", path, MaxIndexFileSize, len(data))
+	}
+
+	r := csv.NewReader(bytes.NewReader(data))
+	r.FieldsPerRecord = -1
+	var text strings.Builder
+	for {
+		record, err := r.Read()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			break
+		}
+		text.WriteString(strings.Join(record, "	"))
+		text.WriteString("\n")
+	}
+	return strings.TrimSpace(text.String()), nil
 }
 
 // parseXLSX extracts text from an XLSX file (ZIP archive with shared strings + sheet data).
@@ -512,6 +588,13 @@ func splitRecursive(text string, separators []string, chunkSize, chunkOverlap in
 
 // parseOfficeXML reads an Office Open XML file (DOCX/PPTX) from a ZIP archive.
 func parseOfficeXML(path, xmlEntry string) (string, error) {
+	return parseOfficeXMLPart(path, xmlEntry, extractXMLText)
+}
+
+// parseOfficeXMLPart reads a single XML part from an Office-style ZIP
+// archive and extracts its text with the given extractor. The part is read
+// through the per-entry size cap.
+func parseOfficeXMLPart(path, xmlEntry string, extract func(io.Reader) (string, error)) (string, error) {
 	r, err := zip.OpenReader(path)
 	if err != nil {
 		return "", fmt.Errorf("failed to open Office XML: %w", err)
@@ -525,10 +608,62 @@ func parseOfficeXML(path, xmlEntry string) (string, error) {
 				return "", fmt.Errorf("failed to read %s: %w", xmlEntry, err)
 			}
 			defer rc.Close()
-			return extractXMLText(io.LimitReader(rc, MaxIndexFileSize))
+			return extract(io.LimitReader(rc, MaxIndexFileSize))
 		}
 	}
 	return "", fmt.Errorf("entry %s not found in archive", xmlEntry)
+}
+
+// extractODFText extracts text from an OpenDocument content.xml stream.
+// Text lives as character data inside text:p / text:h blocks (and inside
+// office:value cells); text:tab becomes a tab, text:line-break a newline,
+// and text:s a run of spaces. Block boundaries follow the same rule as
+// the Office extraction fix (issue #341).
+func extractODFText(r io.Reader) (string, error) {
+	decoder := xml.NewDecoder(r)
+	var text strings.Builder
+	inBlock := 0
+
+	for {
+		token, err := decoder.Token()
+		if err != nil {
+			break
+		}
+		switch t := token.(type) {
+		case xml.StartElement:
+			switch t.Name.Local {
+			case "p", "h", "value":
+				inBlock++
+			case "tab":
+				text.WriteString("	")
+			case "line-break":
+				text.WriteString("\n")
+			case "s":
+				n := 1
+				for _, attr := range t.Attr {
+					if attr.Name.Local == "c" {
+						if v, err := strconv.Atoi(attr.Value); err == nil && v > 0 {
+							n = v
+						}
+					}
+				}
+				text.WriteString(strings.Repeat(" ", n))
+			}
+		case xml.EndElement:
+			switch t.Name.Local {
+			case "p", "h":
+				text.WriteString("\n\n")
+				inBlock--
+			case "value":
+				inBlock--
+			}
+		case xml.CharData:
+			if inBlock > 0 {
+				text.Write(t)
+			}
+		}
+	}
+	return strings.TrimSpace(collapseNewlineRuns(text.String())), nil
 }
 
 // extractXMLText parses an XML document and extracts its text content,

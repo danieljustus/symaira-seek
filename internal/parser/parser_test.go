@@ -518,7 +518,110 @@ func TestParseFileHTMLRejectsOversized(t *testing.T) {
 	}
 }
 
-// --- DOCX block-boundary tests (issue #339) ---
+// --- ODF and CSV tests (issue #341) ---
+
+const odfNamespaces = `xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0" xmlns:draw="urn:oasis:names:tc:opendocument:xmlns:drawing:1.0"`
+
+func TestParseFileODT(t *testing.T) {
+	contentXML := `<?xml version="1.0" encoding="UTF-8"?>` +
+		`<office:document-content ` + odfNamespaces + `><office:body><office:text>` +
+		`<text:h text:outline-level="1">ODT Heading</text:h>` +
+		`<text:p>First <text:tab/>tabbed paragraph</text:p>` +
+		`<text:p>Second<text:line-break/>line</text:p>` +
+		`</office:text></office:body></office:document-content>`
+	odtPath := filepath.Join(t.TempDir(), "doc.odt")
+	createZip(t, odtPath, map[string]string{"content.xml": contentXML})
+
+	parsed, err := ParseFile(odtPath)
+	if err != nil {
+		t.Fatalf("ParseFile(.odt) failed: %v", err)
+	}
+	want := "ODT Heading\n\nFirst \ttabbed paragraph\n\nSecond\nline"
+	if parsed != want {
+		t.Errorf("ODT extraction mismatch, got %q, want %q", parsed, want)
+	}
+}
+
+func TestParseFileODS(t *testing.T) {
+	contentXML := `<?xml version="1.0" encoding="UTF-8"?>` +
+		`<office:document-content ` + odfNamespaces + `><office:body><office:spreadsheet><table:table>` +
+		`<table:table-row><table:table-cell office:value-type="string"><text:p>alpha</text:p></table:table-cell><table:table-cell office:value-type="string"><text:p>beta</text:p></table:table-cell></table:table-row>` +
+		`<table:table-row><table:table-cell office:value-type="float"><office:value>42</office:value></table:table-cell><table:table-cell office:value-type="string"><text:p>delta</text:p></table:table-cell></table:table-row>` +
+		`</table:table></office:spreadsheet></office:body></office:document-content>`
+	odsPath := filepath.Join(t.TempDir(), "sheet.ods")
+	createZip(t, odsPath, map[string]string{"content.xml": contentXML})
+
+	parsed, err := ParseFile(odsPath)
+	if err != nil {
+		t.Fatalf("ParseFile(.ods) failed: %v", err)
+	}
+	if !strings.Contains(parsed, "alpha\n\nbeta") {
+		t.Errorf("ODS cells must be separate blocks, got %q", parsed)
+	}
+	if !strings.Contains(parsed, "42") || !strings.Contains(parsed, "delta") {
+		t.Errorf("ODS numeric and string cells must be searchable, got %q", parsed)
+	}
+}
+
+func TestParseFileODP(t *testing.T) {
+	contentXML := `<?xml version="1.0" encoding="UTF-8"?>` +
+		`<office:document-content ` + odfNamespaces + `><office:body><office:presentation>` +
+		`<draw:page draw:name="page1"><draw:frame><draw:text-box>` +
+		`<text:p>Slide heading</text:p><text:p>Slide body</text:p>` +
+		`</draw:text-box></draw:frame></draw:page>` +
+		`</office:presentation></office:body></office:document-content>`
+	odpPath := filepath.Join(t.TempDir(), "deck.odp")
+	createZip(t, odpPath, map[string]string{"content.xml": contentXML})
+
+	parsed, err := ParseFile(odpPath)
+	if err != nil {
+		t.Fatalf("ParseFile(.odp) failed: %v", err)
+	}
+	want := "Slide heading\n\nSlide body"
+	if parsed != want {
+		t.Errorf("ODP extraction mismatch, got %q, want %q", parsed, want)
+	}
+}
+
+func TestParseFileCSV(t *testing.T) {
+	csvPath := filepath.Join(t.TempDir(), "people.csv")
+	content := "name,role\nada,engineer\nbob,designer\n"
+	if err := os.WriteFile(csvPath, []byte(content), 0644); err != nil {
+		t.Fatalf("write csv: %v", err)
+	}
+
+	parsed, err := ParseFile(csvPath)
+	if err != nil {
+		t.Fatalf("ParseFile(.csv) failed: %v", err)
+	}
+	want := "name\trole\nada\tengineer\nbob\tdesigner"
+	if parsed != want {
+		t.Errorf("CSV row boundaries not preserved, got %q, want %q", parsed, want)
+	}
+}
+
+func TestIsKnownDocumentExtension(t *testing.T) {
+	for _, ext := range []string{".rtf", ".RTF", ".epub", ".doc", ".xls", ".ppt", ".odg"} {
+		if !IsKnownDocumentExtension(ext) {
+			t.Errorf("expected %s to be a known document format", ext)
+		}
+	}
+	for _, ext := range []string{".md", ".txt", ".html", ".htm", ".pdf", ".docx", ".xlsx", ".pptx", ".odt", ".ods", ".odp", ".csv"} {
+		if IsKnownDocumentExtension(ext) {
+			t.Errorf("expected %s NOT to be an unsupported known format", ext)
+		}
+	}
+}
+
+func TestUnsupportedDocumentSkipMessage(t *testing.T) {
+	msg := UnsupportedDocumentSkipMessage("/home/user/docs/manual.rtf", ".rtf")
+	if !strings.Contains(msg, "/home/user/docs/manual.rtf") {
+		t.Errorf("skip message must name the file, got %q", msg)
+	}
+	if !strings.Contains(msg, "not indexed") {
+		t.Errorf("skip message must give the reason, got %q", msg)
+	}
+}
 
 func TestParseFileDOCX_ParagraphBoundaries(t *testing.T) {
 	docXML := `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>first paragraph</w:t></w:r></w:p><w:p><w:r><w:t>second paragraph</w:t></w:r></w:p></w:body></w:document>`
