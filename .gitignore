@@ -13,6 +13,9 @@
 /bin/
 /dist/
 
+# SwiftPM build artifacts (root package; client/ has its own .gitignore)
+/.build/
+
 # Editor scratch
 *.swp
 *.swo
