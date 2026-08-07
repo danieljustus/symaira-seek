@@ -1,20 +1,43 @@
 ## What's changed
 
-This patch release ships the v2.3.0 feature set and fixes the macOS DMG build in the release workflow.
+This patch release ships the v2.5.0 feature set and focuses on the document
+parser (new formats, block boundaries, archive safety), release-workflow fixes,
+and dependency bumps.
 
-### v2.3.0 highlights
-- Native macOS GUI (`Symseek.app`) and DMG installer
-- `Symseek` daemon embedded inside the macOS app via `SymairaDaemonKit`
-- Grounded extraction sidecars with `symseek extract search` / `list` / `import`
-- Search API stable chunk IDs, structured results, and path-scope filter (`--path`)
-- `symseek version --json` emits machine-readable version and schema metadata
+### v2.5.0 highlights
+- Root-level Swift package so consumers can pin by tag (#336)
 
-### Fixes
-- Corrected the GoReleaser dist path used by the macOS DMG packaging step so the release workflow can build and upload `Symseek.dmg`.
+### Parser improvements
+- HTML and ODF (`.odt`/`.ods`/`.odp`) and CSV documents are now indexed (#341)
+- Office extraction preserves block boundaries: paragraph breaks, line breaks,
+  tabs, and row separators (#339)
+- HTML markup is stripped before indexing; `script`/`style`/`head` subtrees are
+  dropped and block-level boundaries are emitted (#340)
+- Whole-archive decompression budget (100 MiB, max 10 000 entries) protects
+  against decompression bombs (#342)
+- Unindexable document formats now emit a skip message naming the file (#341)
+
+### Release workflow
+- DMG Info.plist now receives the real tag version (was literal `__VERSION__`)
+  and a `PkgInfo` file; a verification step fails the release when the bundle
+  metadata does not match the tag (#335)
+
+### Fixes & housekeeping
+- Root SwiftPM build artifacts ignored (#344)
+- Adoption reports kept out of version control (#343)
+
+### Dependencies
+- symaira-corekit 0.7.0 → 0.8.0 (#338)
+- actions/upload-artifact 4 → 7 (#337)
+
+### Notes
+- Existing corpora must be reindexed for the improved extraction to take
+  effect.
 
 ### Closed Issues
-- #239 Native macOS GUI
-- #240 macOS app bundle and DMG
-- #251 Grounded extraction sidecars
+- #339 Preserve block boundaries when extracting Office text
+- #340 Strip markup before indexing HTML
+- #341 Make unindexable document formats visible, then add ODF and CSV
+- #342 Add a whole-archive decompression budget
 
-**Full Changelog**: https://github.com/danieljustus/symaira-seek/compare/v2.3.0...v2.3.1
+**Full Changelog**: https://github.com/danieljustus/symaira-seek/compare/v2.5.0...v2.5.1
