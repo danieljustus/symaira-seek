@@ -1,13 +1,11 @@
 ## What's changed
 
-This patch release ships the v2.5.0 feature set and focuses on the document
-parser (new formats, block boundaries, archive safety), release-workflow fixes,
-and dependency bumps.
+This minor release ships a major upgrade to the document parser: new document
+formats (HTML, ODF, CSV) are now indexed, office extraction preserves block
+boundaries, and archives are protected by a decompression budget. It also
+includes release-workflow hardening and dependency bumps.
 
-### v2.5.0 highlights
-- Root-level Swift package so consumers can pin by tag (#336)
-
-### Parser improvements
+### Parser: new formats and better extraction
 - HTML and ODF (`.odt`/`.ods`/`.odp`) and CSV documents are now indexed (#341)
 - Office extraction preserves block boundaries: paragraph breaks, line breaks,
   tabs, and row separators (#339)
@@ -25,6 +23,7 @@ and dependency bumps.
 ### Fixes & housekeeping
 - Root SwiftPM build artifacts ignored (#344)
 - Adoption reports kept out of version control (#343)
+- Stale version strings and release notes corrected for this release (#349)
 
 ### Dependencies
 - symaira-corekit 0.7.0 → 0.8.0 (#338)
@@ -40,4 +39,4 @@ and dependency bumps.
 - #341 Make unindexable document formats visible, then add ODF and CSV
 - #342 Add a whole-archive decompression budget
 
-**Full Changelog**: https://github.com/danieljustus/symaira-seek/compare/v2.5.0...v2.5.1
+**Full Changelog**: https://github.com/danieljustus/symaira-seek/compare/v2.5.0...v2.6.0
