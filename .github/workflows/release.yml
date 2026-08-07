@@ -119,11 +119,10 @@ jobs:
           fi
           
           # 6. Package into DMG
-          DMG_STAGE="client/build/dmg"
-          mkdir -p "$DMG_STAGE"
-          cp -R "$APP_DIR" "$DMG_STAGE/"
-          ln -s /Applications "$DMG_STAGE/Applications"
-          hdiutil create -volname "Symseek" -srcfolder "$DMG_STAGE" -ov -format UDZO client/build/Symseek.dmg
+          ./scripts/create-symaira-dmg.sh \
+            "$APP_DIR" \
+            client/build/Symseek.dmg \
+            "Symseek"
 
       - name: Verify App Bundle Metadata
         run: |
