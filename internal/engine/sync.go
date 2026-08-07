@@ -76,11 +76,16 @@ var supportedExtensions = map[string]bool{
 	".yml":  true,
 	".sh":   true,
 	".html": true,
+	".htm":  true,
 	".css":  true,
+	".csv":  true,
 	".pdf":  true,
 	".docx": true,
 	".pptx": true,
 	".xlsx": true,
+	".odt":  true,
+	".ods":  true,
+	".odp":  true,
 }
 
 // IndexDirectory crawls a directory, computes hashes, parses changed files,
@@ -130,6 +135,10 @@ func IndexDirectory(dbClient db.Store, embedder Embedder, dirPath string) error 
 				return nil
 			}
 			foundPaths[path] = true
+		} else if parser.IsKnownDocumentExtension(ext) {
+			// Make unindexable document formats visible instead of
+			// silently ignoring them (issue #341).
+			fmt.Fprintf(os.Stderr, "%s\n", parser.UnsupportedDocumentSkipMessage(path, ext))
 		}
 
 		return nil
@@ -330,6 +339,9 @@ func applyIncrementalChanges(dbClient db.Store, embedder Embedder, absPath strin
 
 		ext := strings.ToLower(filepath.Ext(path))
 		if !supportedExtensions[ext] {
+			if parser.IsKnownDocumentExtension(ext) {
+				fmt.Fprintf(os.Stderr, "%s\n", parser.UnsupportedDocumentSkipMessage(path, ext))
+			}
 			continue
 		}
 
