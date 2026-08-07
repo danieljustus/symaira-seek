@@ -605,9 +605,18 @@ func TestWatchDirectory_ModifiesFile(t *testing.T) {
 		errCh <- WatchDirectory(ctx, dbClient, embedder, docsDir)
 	}()
 
-	time.Sleep(200 * time.Millisecond)
-
-	doc, err := dbClient.GetDocument(existingFile)
+	// Wait for the initial sync to finish. Poll instead of sleeping a fixed
+	// 200ms: on a loaded CI runner the initial index can take longer, which
+	// makes the fixed-sleep variant flaky.
+	var doc *db.Document
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		doc, err = dbClient.GetDocument(existingFile)
+		if err == nil && doc != nil {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 	if err != nil || doc == nil {
 		t.Fatalf("initial index: doc=%v err=%v", doc, err)
 	}
