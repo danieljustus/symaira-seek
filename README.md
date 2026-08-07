@@ -57,9 +57,9 @@ brew install symseek
 
 Download the latest release for your platform from [GitHub Releases](https://github.com/danieljustus/symaira-seek/releases):
 
-- **Linux**: `symaira-seek_2.5.1_linux_amd64.tar.gz` or `symaira-seek_2.5.1_linux_arm64.tar.gz`
-- **macOS**: `symaira-seek_2.5.1_darwin_amd64.tar.gz` or `symaira-seek_2.5.1_darwin_arm64.tar.gz`
-- **Windows**: `symaira-seek_2.5.1_windows_amd64.zip` or `symaira-seek_2.5.1_windows_arm64.zip`
+- **Linux**: `symaira-seek_2.6.0_linux_amd64.tar.gz` or `symaira-seek_2.6.0_linux_arm64.tar.gz`
+- **macOS**: `symaira-seek_2.6.0_darwin_amd64.tar.gz` or `symaira-seek_2.6.0_darwin_arm64.tar.gz`
+- **Windows**: `symaira-seek_2.6.0_windows_amd64.zip` or `symaira-seek_2.6.0_windows_arm64.zip`
 
 Extract and install:
 ```bash
@@ -108,7 +108,7 @@ go build -o symseek cmd/symseek/main.go
 
 To inject a version string at build time, set `main.version` via `-ldflags`. The CI workflow derives the value from the current git tag (or a `0.0.0-dev+<short-sha>` fallback) and passes it automatically:
 ```bash
-VERSION="v2.5.1"
+VERSION="v2.6.0"
 go build -ldflags "-s -w -X main.version=${VERSION}" -o symseek cmd/symseek/main.go
 ./symseek version
 ```
