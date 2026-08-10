@@ -12,7 +12,7 @@ This repository is the public MIT-licensed Symaira Seek self-hosted foundation.
 ## Repository Role
 
 - Keep this repository buildable, testable, and runnable without any private commercial code.
-- Self-hosted Symaira Seek remains free and open source under the MIT License.
+- Self-hosted Symaira Seek remains free and open source under the Apache-2.0 License.
 - Do not add Cloud Pro, hosted-service, tenant-management, billing, subscription, customer-support, or commercial deployment code here.
 
 ## Architecture & Code Style Guidelines
