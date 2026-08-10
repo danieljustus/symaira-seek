@@ -140,6 +140,18 @@ Perform a hybrid semantic and keyword search:
 ./symseek search "renewable energy optimization" --limit 5
 ```
 
+For a reproducible human-readable example, index the bundled benchmark fixtures and use `--plain` to keep the command out of the interactive TUI:
+
+```console
+$ ./symseek index testdata/bench/corpus
+$ ./symseek search "vector similarity" --plain --limit 1
+[1] Path: /path/to/symaira-seek/testdata/bench/corpus/vector-databases.txt (Chunk Index: 0)
+    Score: RRF=0.0328 Cosine=0.4622 (Ranks: BM25=1 Vector=1)
+    --- Snippet ---
+    Vector databases store and index vector embeddings for efficient similarity search. They are essential for semantic search, recommendation systems, and RAG applications. Common indexing methods include IVF (Inverted File Index), HNSW (Hierarchical Navigable Small World), and product quantization. Po
+    ----------------
+```
+
 Export structured search results directly to JSON:
 ```bash
 ./symseek search "renewable energy optimization" --json
