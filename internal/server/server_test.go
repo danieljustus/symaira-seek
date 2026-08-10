@@ -1720,21 +1720,25 @@ func TestStartHTTPServer_ListensAndServe(t *testing.T) {
 	withTempHome(t)
 
 	errCh := make(chan error, 1)
+	readyCh := make(chan net.Addr, 1)
 	go func() {
-		errCh <- StartHTTPServer(0, "test-token", engine.OllamaConfig{}, 5*time.Second, nil, engine.RerankConfig{}, engine.ExpandConfig{})
+		errCh <- startHTTPServer(0, "test-token", engine.OllamaConfig{}, 5*time.Second, nil, engine.RerankConfig{}, engine.ExpandConfig{}, readyCh)
 	}()
 
-	// Wait for the server to actually be listening before sending SIGTERM.
-	// The fixed 200ms sleep was too short under the race detector.
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		conn, err := net.DialTimeout("tcp", "127.0.0.1:0", 200*time.Millisecond)
-		if err == nil {
-			conn.Close()
-			break
-		}
-		time.Sleep(50 * time.Millisecond)
+	// Wait for the listener to bind, then verify the server is reachable at
+	// the address assigned by the kernel. Port 0 must never be used as a
+	// readiness target: it asks the kernel for another ephemeral port.
+	var listenerAddr net.Addr
+	select {
+	case listenerAddr = <-readyCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("server did not report a bound listener within 5s")
 	}
+	conn, err := net.DialTimeout("tcp", listenerAddr.String(), 5*time.Second)
+	if err != nil {
+		t.Fatalf("server did not accept connections at %s: %v", listenerAddr, err)
+	}
+	conn.Close()
 
 	p, err := os.FindProcess(os.Getpid())
 	if err != nil {

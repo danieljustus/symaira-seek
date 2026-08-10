@@ -406,6 +406,14 @@ func newServeMux(dbClient db.Store, vectorStore db.VectorStore, embedder engine.
 // required on all endpoints except /health; an empty authToken runs the
 // daemon unauthenticated (--no-auth mode).
 func StartHTTPServer(port int, authToken string, ollamaCfg engine.OllamaConfig, indexCooldown time.Duration, quantCfg *db.QuantConfig, rerankCfg engine.RerankConfig, expandCfg engine.ExpandConfig) error {
+	return startHTTPServer(port, authToken, ollamaCfg, indexCooldown, quantCfg, rerankCfg, expandCfg, nil)
+}
+
+// startHTTPServer is the implementation of StartHTTPServer. ready, when
+// non-nil, receives the address assigned by the listener before serving
+// begins. Keeping this boundary internal preserves the public API while
+// allowing lifecycle tests to use the actual address for port 0.
+func startHTTPServer(port int, authToken string, ollamaCfg engine.OllamaConfig, indexCooldown time.Duration, quantCfg *db.QuantConfig, rerankCfg engine.RerankConfig, expandCfg engine.ExpandConfig, ready chan<- net.Addr) error {
 	dbClient, err := db.Open()
 	if err != nil {
 		return fmt.Errorf("failed to open database: %w", err)
@@ -418,12 +426,23 @@ func StartHTTPServer(port int, authToken string, ollamaCfg engine.OllamaConfig, 
 	mux := newServeMux(dbClient, dbClient, embedder, indexCooldown, searchOpts)
 
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("failed to listen on %s: %w", addr, err)
+	}
+	actualAddr := listener.Addr()
+	defer func() {
+		if listener != nil {
+			listener.Close()
+		}
+	}()
+
 	if authToken == "" {
 		warnIfNoAuthToken(os.Stderr)
 	} else {
-		fmt.Fprintln(os.Stderr, "API token required: all endpoints except /health require Authorization: Bearer <token>")
+		fmt.Fprintln(os.Stderr, "API token required: all endpoints except /health require Authorization: Bearer ***")
 	}
-	fmt.Fprintf(os.Stderr, "HTTP daemon listening on http://%s...\n", addr)
+	fmt.Fprintf(os.Stderr, "HTTP daemon listening on http://%s...\n", actualAddr)
 
 	srv := &http.Server{
 		Addr:           addr,
@@ -435,14 +454,18 @@ func StartHTTPServer(port int, authToken string, ollamaCfg engine.OllamaConfig, 
 	}
 
 	errCh := make(chan error, 1)
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
+
 	go func() {
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if ready != nil {
+			ready <- actualAddr
+		}
+		if err := srv.Serve(listener); err != nil && err != http.ErrServerClosed {
 			errCh <- err
 		}
 	}()
-
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
 	select {
 	case err := <-errCh:
