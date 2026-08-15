@@ -1758,6 +1758,120 @@ func TestStartHTTPServer_ListensAndServe(t *testing.T) {
 	}
 }
 
+// TestStartHTTPServer_OccupiedPortFails covers the net.Listen failure
+// branch (issue #362): starting the daemon on a port already bound by
+// another listener must return the "failed to listen" error instead of
+// hanging or silently serving.
+func TestStartHTTPServer_OccupiedPortFails(t *testing.T) {
+	withTempHome(t)
+
+	// Occupy a port, then attempt to start the server on the same port.
+	blocker, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen: %v", err)
+	}
+	defer blocker.Close()
+	port := blocker.Addr().(*net.TCPAddr).Port
+
+	err = startHTTPServer(port, "test-token", engine.OllamaConfig{}, 5*time.Second, nil, engine.RerankConfig{}, engine.ExpandConfig{}, nil)
+	if err == nil {
+		t.Fatal("expected an error when the port is already occupied")
+	}
+	if !strings.Contains(err.Error(), "failed to listen on") {
+		t.Fatalf("expected 'failed to listen' error, got: %v", err)
+	}
+}
+
+// TestStartHTTPServer_ServeErrorPropagates covers the error-channel
+// propagation path (issue #362): when the underlying listener is closed
+// out from under a running server, http.Server.Serve returns an error
+// that is not http.ErrServerClosed, and that error must reach the caller
+// through errCh as "HTTP server error: ...".
+func TestStartHTTPServer_ServeErrorPropagates(t *testing.T) {
+	withTempHome(t)
+
+	// Inject a listener we control so the serve goroutine has something
+	// to bind to, then close it to force Serve to return a non-
+	// ErrServerClosed error.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen: %v", err)
+	}
+
+	errCh := make(chan error, 1)
+	readyCh := make(chan net.Addr, 1)
+	go func() {
+		errCh <- startHTTPServerWithListener(0, "test-token", engine.OllamaConfig{}, 5*time.Second, nil, engine.RerankConfig{}, engine.ExpandConfig{}, readyCh, ln)
+	}()
+
+	select {
+	case <-readyCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("server did not report a bound listener within 5s")
+	}
+
+	// Closing the listener makes Serve return net.ErrClosed, which must
+	// propagate through errCh and surface as "HTTP server error".
+	ln.Close()
+
+	select {
+	case err := <-errCh:
+		if err == nil {
+			t.Fatal("expected serve error to propagate through errCh, got nil")
+		}
+		if !strings.Contains(err.Error(), "HTTP server error") {
+			t.Fatalf("expected 'HTTP server error' prefix, got: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("serve error did not propagate within 5s")
+	}
+}
+
+// TestStartHTTPServer_DeferredListenerClose covers the deferred
+// listener-close closure (issue #362): after a graceful SIGTERM shutdown
+// the bound port must be released, proving the deferred close ran.
+func TestStartHTTPServer_DeferredListenerClose(t *testing.T) {
+	withTempHome(t)
+
+	errCh := make(chan error, 1)
+	readyCh := make(chan net.Addr, 1)
+	go func() {
+		errCh <- startHTTPServer(0, "test-token", engine.OllamaConfig{}, 5*time.Second, nil, engine.RerankConfig{}, engine.ExpandConfig{}, readyCh)
+	}()
+
+	var boundAddr net.Addr
+	select {
+	case boundAddr = <-readyCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("server did not report a bound listener within 5s")
+	}
+
+	p, err := os.FindProcess(os.Getpid())
+	if err != nil {
+		t.Fatalf("FindProcess: %v", err)
+	}
+	if err := p.Signal(syscall.SIGTERM); err != nil {
+		t.Fatalf("SIGTERM: %v", err)
+	}
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("StartHTTPServer returned error: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("server did not shut down within 5s")
+	}
+
+	// The deferred close must have released the port: rebinding the same
+	// address now succeeds.
+	rebound, err := net.Listen("tcp", boundAddr.String())
+	if err != nil {
+		t.Fatalf("listener was not closed on shutdown; rebinding %s failed: %v", boundAddr, err)
+	}
+	rebound.Close()
+}
+
 // ---------------------------------------------------------------------------
 // API token auth tests (issue #318)
 // ---------------------------------------------------------------------------

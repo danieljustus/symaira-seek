@@ -414,6 +414,15 @@ func StartHTTPServer(port int, authToken string, ollamaCfg engine.OllamaConfig, 
 // begins. Keeping this boundary internal preserves the public API while
 // allowing lifecycle tests to use the actual address for port 0.
 func startHTTPServer(port int, authToken string, ollamaCfg engine.OllamaConfig, indexCooldown time.Duration, quantCfg *db.QuantConfig, rerankCfg engine.RerankConfig, expandCfg engine.ExpandConfig, ready chan<- net.Addr) error {
+	return startHTTPServerWithListener(port, authToken, ollamaCfg, indexCooldown, quantCfg, rerankCfg, expandCfg, ready, nil)
+}
+
+// startHTTPServerWithListener is startHTTPServer with an optional
+// externally-created listener. ln is a testing seam (mirroring ready):
+// when non-nil it replaces the net.Listen call so tests can close the
+// listener out from under a running server and exercise the error-channel
+// propagation path (issue #362).
+func startHTTPServerWithListener(port int, authToken string, ollamaCfg engine.OllamaConfig, indexCooldown time.Duration, quantCfg *db.QuantConfig, rerankCfg engine.RerankConfig, expandCfg engine.ExpandConfig, ready chan<- net.Addr, ln net.Listener) error {
 	dbClient, err := db.Open()
 	if err != nil {
 		return fmt.Errorf("failed to open database: %w", err)
@@ -425,10 +434,17 @@ func startHTTPServer(port int, authToken string, ollamaCfg engine.OllamaConfig, 
 	searchOpts := engine.SearchOptions{RerankCfg: rerankCfg, ExpandCfg: expandCfg}
 	mux := newServeMux(dbClient, dbClient, embedder, indexCooldown, searchOpts)
 
-	addr := fmt.Sprintf("127.0.0.1:%d", port)
-	listener, err := net.Listen("tcp", addr)
-	if err != nil {
-		return fmt.Errorf("failed to listen on %s: %w", addr, err)
+	var listener net.Listener
+	var addr string
+	if ln != nil {
+		listener = ln
+		addr = ln.Addr().String()
+	} else {
+		addr = fmt.Sprintf("127.0.0.1:%d", port)
+		listener, err = net.Listen("tcp", addr)
+		if err != nil {
+			return fmt.Errorf("failed to listen on %s: %w", addr, err)
+		}
 	}
 	actualAddr := listener.Addr()
 	defer func() {
