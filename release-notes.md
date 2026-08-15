@@ -1,42 +1,35 @@
 ## What's changed
 
-This minor release ships a major upgrade to the document parser: new document
-formats (HTML, ODF, CSV) are now indexed, office extraction preserves block
-boundaries, and archives are protected by a decompression budget. It also
-includes release-workflow hardening and dependency bumps.
+This patch release hardens the local HTTP server lifecycle, refreshes the
+macOS installer branding, and updates the Go toolchain and runtime
+dependencies.
 
-### Parser: new formats and better extraction
-- HTML and ODF (`.odt`/`.ods`/`.odp`) and CSV documents are now indexed (#341)
-- Office extraction preserves block boundaries: paragraph breaks, line breaks,
-  tabs, and row separators (#339)
-- HTML markup is stripped before indexing; `script`/`style`/`head` subtrees are
-  dropped and block-level boundaries are emitted (#340)
-- Whole-archive decompression budget (100 MiB, max 10 000 entries) protects
-  against decompression bombs (#342)
-- Unindexable document formats now emit a skip message naming the file (#341)
+### Server stability
+- The bound HTTP listener is now awaited before serving begins, so lifecycle
+  tests and callers observe the real assigned address (#358)
+- Error paths of the HTTP server are covered by tests: occupied-port failure,
+  serve-error propagation, and graceful shutdown releasing the bound port (#363)
 
-### Release workflow
-- DMG Info.plist now receives the real tag version (was literal `__VERSION__`)
-  and a `PkgInfo` file; a verification step fails the release when the bundle
-  metadata does not match the tag (#335)
+### macOS app
+- The DMG now ships unified Symaira branding with a drag-to-Applications
+  window (#352, fixes #351)
 
-### Fixes & housekeeping
-- Root SwiftPM build artifacts ignored (#344)
-- Adoption reports kept out of version control (#343)
-- Stale version strings and release notes corrected for this release (#349)
+### Security & dependencies
+- Go toolchain 1.26.5 → 1.26.6, fixing six standard-library vulnerabilities
+  reported by govulncheck (net/url, crypto/tls, net/http, encoding/xml,
+  encoding/asn1) (#360)
+- symaira-corekit 0.8.0 → 0.9.1 (#359)
+- modernc.org/sqlite 1.55.0 → 1.56.0 (#359)
+- Pinned actions/upload-artifact (v7.0.1) and staticcheck (2026.1) for
+  reproducible builds (#361)
 
-### Dependencies
-- symaira-corekit 0.7.0 → 0.8.0 (#338)
-- actions/upload-artifact 4 → 7 (#337)
-
-### Notes
-- Existing corpora must be reindexed for the improved extraction to take
-  effect.
+### Docs
+- Apache-2.0 license stated consistently across AGENTS.md and CONTRIBUTING.md
+  (#353)
+- Human-readable search output example added to the README (#357)
 
 ### Closed Issues
-- #339 Preserve block boundaries when extracting Office text
-- #340 Strip markup before indexing HTML
-- #341 Make unindexable document formats visible, then add ODF and CSV
-- #342 Add a whole-archive decompression budget
+- #351 DMG installs with missing branding and no drag-to-Applications window
+- #362 Add error-path tests for HTTP server listener startup
 
-**Full Changelog**: https://github.com/danieljustus/symaira-seek/compare/v2.5.0...v2.6.0
+**Full Changelog**: https://github.com/danieljustus/symaira-seek/compare/v2.6.0...v2.6.1
