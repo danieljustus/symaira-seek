@@ -207,9 +207,9 @@ default off for local paths. Incremental UX matters: the report frames
 
 These report topics belong elsewhere or are deliberate non-goals:
 
-- **Cloud-Pro**: managed hosting, cross-device sync, team features, the Obsidian-
-  style "pay for convenience, not features" business model, pricing (report §7) →
-  `symaira-seek-pro`.
+- **Managed cloud**: hosting, cross-device sync, team features, the Obsidian-
+  style "pay for convenience, not features" business model, pricing (report §7).
+  There is no Pro edition; these are non-goals, not deferred work.
 - **E2E / property-preserving encryption** for cloud sync, **GDPR DPA/DPIA**
   obligations (report §6.3) → cloud component only; the local tool processes no
   data on Symaira's behalf.
